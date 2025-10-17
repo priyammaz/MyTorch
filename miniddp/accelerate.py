@@ -14,6 +14,12 @@ import pickle
 from safetensors.numpy import save_file, load_file
 import warnings
 
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except:
+    WANDB_AVAILABLE = False
+
 class GradScaler:
     def __init__(self, 
                  init_scale=2.0**16,
@@ -160,8 +166,10 @@ class Accelerator:
         ### Import wandb if logging with it ###
         self.wandb_enabled = False
         if log_wand:
-            self.wandb_enabled = True
-            import wandb
+            if not WANDB_AVAILABLE:
+                warnings.warn("Wandb is not installed! Run `pip install wandb`")
+            else:
+                self.wandb_enabled = True
 
     def is_main_process(self):
         return self.rank == 0
@@ -274,10 +282,11 @@ class Accelerator:
 
                     ### If we just updated and were in mixed precision mode, we only updated ###
                     ### our fp32 copy of the weights. We need to copy those back into our model ###
-                    ### now for the next iteration! ###
+                    ### now for the next iteration! It is important to use the copy() operation ###
+                    ### as we dont want to cast our fp32_copy to fp16! ###
                     if accelerator.mixed_precision:
                         for fp32_param, param in zip(accelerator.fp32_params, accelerator.model._parameters_no_dedup()):
-                            param.data = fp32_param.data.astype(cp.float16)
+                            param.data = fp32_param.data.copy().astype(cp.float16)
 
             def zero_grad(self, *args, **kwargs):   
 
@@ -496,7 +505,7 @@ class Accelerator:
                         
                         ### If we've seen this gradient before, reuse the same fp32 grad ###
                         if param_ptr in seen_params:
-                            fp32_param.grad = seen_params[param_ptr]
+                            fp32_param.grad = seen_params[param_ptr].astype(cp.float32)
                         else:
                             ### Create new fp32 gradient and store it ###
                             fp32_grad = param.grad.astype(cp.float32)
@@ -504,7 +513,7 @@ class Accelerator:
                             seen_params[param_ptr] = fp32_grad
                     else:
                         fp32_param.grad = None
-
+  
             self.skip_optimizer_step = skip_step
 
     def clip_grad_norm_(self, max_norm=1.0):
@@ -592,7 +601,7 @@ class Accelerator:
 
         if config is not None:
             assert isinstance(config, dict), "Config must be a dictionary!"
-            
+        
         if not self.wandb_enabled:
             warnings.warn("log_wandb not enabled at init of Accelerator, doing it now!")
             self.wandb_enabled = True
@@ -637,7 +646,7 @@ class Accelerator:
                 ### from our stored internal buffer ###
                 if self.mixed_precision:
                     fp32_param = self.fp32_params[i]
-         
+                    
                     model_state[name] = cp.asnumpy(fp32_param.data._array)
                 else:
                     model_state[name] = cp.asnumpy(param.data._array)
