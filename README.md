@@ -98,7 +98,7 @@ If you take the chain rule derivative of $\frac{d \sigma(x)}{d x}$ you will end 
 The most important part of the AutoGrad system is building the computational graph to know the order of backpropagation. 
 
 #### Example 1: Gradient Propagation 
-![graph1](../../src/visuals/computational_graph_1.png)
+<img src="src/computational_graph_1.png" alt="drawing" width="500"/>
 
 Like in every neural network, we are propagating gradients from the end of the network back to the beginning.
 
@@ -113,7 +113,7 @@ This should remind you very closely of Depth-First Search
 ![DFS](https://upload.wikimedia.org/wikipedia/commons/7/7f/Depth-First-Search.gif)
 
 ### Example 2: Barriers to Gradient Propagation
-![graph2](../../src/visuals/computational_graph_2.png)
+<img src="src/computational_graph_2.png" alt="drawing" width="500"/>
 
 Depth first search is not exactly correct though. Lets look at this example! Just like before we start at the end and work our way back. We will first propagate our gradient down the blue path just like before. Then we will once we get to the end of the blue path, we can move up a node and then update the light-blue node using the orange path. Now if we kept Depth First search going, we would continue propagating our gradients from the light-blue node **BUT THIS IS WRONG**. The light blue node has a dependencies from two separate branches. 
 
