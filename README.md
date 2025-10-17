@@ -1,4 +1,3 @@
-# MyTorch
 <img src="src/banner.png" alt="drawing" width="600"/>
 
 ## The Goal
