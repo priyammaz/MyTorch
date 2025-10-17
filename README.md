@@ -54,7 +54,7 @@ conda install -c conda-forge cupy cudnn cutensor nccl cuda-version=12.8
 
 ##### Install PyTorch for that exact Cuda Version!
 
-Now we just need to install PyTorch with the save Cuda version! You can go [here](https://pytorch.org/get-started/previous-versions/) to find a previous install if you are running an older cuda variant.
+Now we just need to install PyTorch with the same Cuda version! You can go [here](https://pytorch.org/get-started/previous-versions/) to find a previous install if you are running an older cuda variant.
 
 ```
 pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
