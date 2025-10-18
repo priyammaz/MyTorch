@@ -115,7 +115,7 @@ os.makedirs(path_to_experiment, exist_ok=True)
 ### Init DDP ###
 accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps,
                           mixed_precision=args.mixed_precision,
-                          log_wand=args.log_wandb)
+                          log_wandb=args.log_wandb)
 
 ### Config to store model information (so we can load precise setup for inference!) ###
 training_config = {
