@@ -1,11 +1,9 @@
 import os
 import mytorch
-import cupy as cp
 from models.gpt2 import GPT2, GPT2Config
-from tqdm import tqdm
 import argparse
 import pickle
-import numpy as np
+import tiktoken
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GPT2 with MyTorch")
@@ -41,6 +39,7 @@ if model_config["path_to_tokenizer"] is not None:
     tokenizer_char2idx = tokenizer_meta["char2idx"]
     tokenizer_idx2char = tokenizer_meta["idx2char"]
 else:
+    tokenizer = tiktoken.get_encoding("gpt2")
     USE_TIKTOKEN = True
 
 ### Load Model ###
@@ -78,11 +77,16 @@ model.load_state_dict(state_dict)
 model = model.to(args.device)
 
 ### Get starting tokens for model ###
-generated = [tokenizer_char2idx[c] for c in args.start]
+if not USE_TIKTOKEN:
+    generated = [tokenizer_char2idx[c] for c in args.start]
+else:
+    generated = tokenizer.encode(args.start)
+
 seed = mytorch.Tensor(generated, dtype=mytorch.int32).unsqueeze(0).to(args.device)
 context = seed
 
 # Generation loop
+print(args.start, end="", flush=True)
 for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model_config["context_length"]):
     seed = mytorch.Tensor(
         generated[-model_config["context_length"]:], dtype=mytorch.int32
@@ -116,7 +120,11 @@ for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model
     generated.append(next_id)
 
     # Decode and print the latest token
-    token = tokenizer_idx2char[next_id]
+    if not USE_TIKTOKEN:
+        token = tokenizer_idx2char[next_id]
+    else:
+        token = tokenizer.decode([next_id])
+
     print(token, end="", flush=True)
 
 print("\n")
