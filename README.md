@@ -13,7 +13,7 @@ Build a relatively robust Deep Learning Framework that has the following feautur
 - Make it as educational as possible!
 
 <details>
-<summary><b><span style="font-size: 1.5em;">Installation</span></b></summary>
+<summary><b><span style="font-size: 2em;">Installation</span></b></summary>
 
 ### Basic Setup 
 
@@ -29,7 +29,8 @@ pip install requests "datasets<4.0.0" wandb requests tqdm tiktoken safetensors
 
 With this you are ready for training, with support for mixed precision and distributed training!
 
-### Advanced Setup for Fused Operations
+<details>
+<summary><b><span style="font-size: 2em;">Advanced Setup for Fused Operations</span></b></summary>
 
 To access fused operations we need to install [Triton](https://github.com/triton-lang/triton) which defines all of our kernels! The main issue you will face is that Triton has a torch dependency, and torch comes with its own version of cuda. We need to ensure our cuda versions all match up so they don't conflict!
 
@@ -150,6 +151,7 @@ Some PyTorch versions ship with ```Triton```, but some dont. Just incase you can
 ```
 pip install triton
 ```
+</details>
 
 </details>
 
