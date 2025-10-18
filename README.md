@@ -9,10 +9,11 @@ Build a relatively robust Deep Learning Framework that has the following feautur
 - CPU/GPU support
 - Fused Kernels w/ Triton to make GPUs go brrrrr
 - Distributed training using Cupys NCCL Backend
-- Mixed Precision Training support
+- Mixed Precision Training support with Dynamic Grad Scaling
 - Make it as educational as possible!
 
-## Installation
+<details>
+<summary><b><span style="font-size: 1.5em;">Installation</span></b></summary>
 
 ### Basic Setup 
 
@@ -23,42 +24,137 @@ conda install -c conda-forge cupy cudnn cutensor nccl
 
 Just need a few other packages for our training scripts!
 ```
-pip install requests "datasets=3.6.0" wandb requests tqdm tiktoken safetensors
+pip install requests "datasets<4.0.0" wandb requests tqdm tiktoken safetensors
 ```
 
-### Advanced Setup for Distributed Fused Training
+With this you are ready for training, with support for mixed precision and distributed training!
+
+### Advanced Setup for Fused Operations
+
+To access fused operations we need to install [Triton](https://github.com/triton-lang/triton) which defines all of our kernels! The main issue you will face is that Triton has a torch dependency, and torch comes with its own version of cuda. We need to ensure our cuda versions all match up so they don't conflict!
+
+<details>
+<summary><b><span style="font-size: 1.3em;">Step 1: Check Your Max Supported Cuda Version</span></b></summary>
+
+Run the following
+```
+nvidia-smi
+```
+
+You will see something like:
+
+```bash
++-----------------------------------------------------------------------------------------+
+| NVIDIA-SMI 570.86.10              Driver Version: 570.86.10      CUDA Version: 12.8     |
+|-----------------------------------------+------------------------+----------------------+
+| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
+| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
+|                                         |                        |               MIG M. |
+|=========================================+========================+======================|
+|   0  NVIDIA RTX A6000               Off |   00000000:41:00.0 Off |                  Off |
+| 30%   46C    P8              7W /  300W |      19MiB /  49140MiB |      0%      Default |
+|                                         |                        |                  N/A |
++-----------------------------------------+------------------------+----------------------+
+
+```
+
+In my case you see a ```CUDA Version 12.8```. Now this doesn't necessarily mean that Cupy and PyTorch will use Cuda Version 12.8, just that it is the max supported version for the installed driver! But keep this in mind as when we do install any version greater than this Cuda version!
+</details>
+
+<details>
+<summary><b><span style="font-size: 1.3em;">Step 2: Check Prebuilt PyTorch Installs</span></b></summary>
+We need to ensure that everything we install matches the PyTorch version we will also install. You can take a look at their installation page to see supported. Pick whatever Cuda version you want to install! As long as its <= to your ```nvidia-smi``` version from earlier it should work. 
+
+</details>
+<details>
+<summary><b><span style="font-size: 1.3em;">Step 3: Check your NVCC Version</span></b></summary>
+
+Run the following
+```
+nvcc --version
+```
+
+You should see something like
+
+```bash
+nvcc: NVIDIA (R) Cuda compiler driver
+Copyright (c) 2005-2025 NVIDIA Corporation
+Built on Wed_Jan_15_19:20:09_PST_2025
+Cuda compilation tools, release 12.8, V12.8.61
+Build cuda_12.8.r12.8/compiler.35404655_0
+```
+
+In my case you see a that my NVCC Version is also 12.8 so it matches my Cuda version from ```nvidia-smi``` and I am using the latest version my drivers support! Yours could be less, your ```nvidia-smi``` version could be 12.6, but ```nvcc``` is using 12.4. This is totally fine, the version we want to use is our NVCC version for all of our installs going forward
+
+### Problems
+### Problem #1: What if NVCC Doesn't exist?
+
+It is possible that ```NVCC``` doesn't exist on your computer. If you didn't install the cuda-toolkit then you wouldn't have it.
+
+
+### Problem #2: What if my NVCC Cuda Version Doesn't Match the Cuda Version I Want from PyTorch?
+
+This is the more likely issue, that your system may be using a specific cuda version that PyTorch doesn't have a prebuilt wheel for. For example, if your NVCC is version 12.3, but PyTorch doensn't have a specific install for this. PyTorch doesn't really care about your systenms cuda version anyway as it installs its own binaries within the environment. But Cupy does use your NVCC version and a mismatch here would cause issues down the line if we don't have everything be the same!
+
+## Solution (You should do this anyway)
+
+### Easy
+
+As long as we are using Cuda versions starting at 12 (sorry 11.8 folks) then you get an easy fix
+```
+conda install -c conda-forge cuda-nvcc cuda-version=<DESIRED_VERSION>
+```
+
+This will install a local version of NVCC into your Conda environment and you will be good to go! Just make your Desired Version to be whatever Cuda version you wanted from PyTorch. 
+
+
+### Hard(ish)
+
+If you can't do this, then you need to make a system level update and change your Cuda Version following Nvidias documentations on the [Cuda Toolkit](https://developer.nvidia.com/cuda-toolkit)
+
 
 Installation is mostly simple, unless you want distributed training AND Triton Kernels for fused ops! The potential issue is that Triton has a Torch requirement and Torch has its own version of NCCL that can conflict with Cupy. So we just need to do the following:
 
-##### Check NVCC Version
+</details>
 
-```nvidia-smi``` tells you the max cuda version supported by your GPU driver, but ```nvcc --version``` tells you the the actual cuda version used to compile cuda in the backend! So just verify your cuda version here.
 
-```
-nvcc --version
+<details>
+<summary><b><span style="font-size: 1.3em;">Step 4: Install Cupy and PyTorch</span></b></summary>
 
-output:
-# nvcc: NVIDIA (R) Cuda compiler driver
-# Copyright (c) 2005-2025 NVIDIA Corporation
-# Built on Wed_Jan_15_19:20:09_PST_2025
-# Cuda compilation tools, release 12.8, V12.8.61
-# Build cuda_12.8.r12.8/compiler.35404655_0
+#### Install Cupy With Your Selected Cuda Version
 
 ```
-
-##### Install Cupy with that specific Cuda Version 
-
-```
-conda install -c conda-forge cupy cudnn cutensor nccl cuda-version=12.8
+conda install -c conda-forge cupy cudnn cutensor nccl cuda-version=<DESIRED_VERSION>
 ```
 
-##### Install PyTorch for that exact Cuda Version!
+#### Install PyTorch With Your Selected Cuda Version 
 
-Now we just need to install PyTorch with the same Cuda version! You can go [here](https://pytorch.org/get-started/previous-versions/) to find a previous install if you are running an older cuda variant.
+This is an example, go to PyTorch to find your specific version [here](https://pytorch.org/get-started/locally/) or if you need an older cuda variant you can search [here](https://pytorch.org/get-started/previous-versions/)
 
 ```
-pip install torch==2.7.1 torchvision==0.22.1 torchaudio==2.7.1 --index-url https://download.pytorch.org/whl/cu128
+pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
 ```
+
+You can opt not to install ```torchvision``` or ```torchaudio```. I do have a few examples using the MNIST dataset from ```torchvision``` so you can install it if you want!
+
+### Install Everything Else Like Before
+
+```
+pip install requests "datasets<4.0.0" wandb requests tqdm tiktoken safetensors
+```
+
+### Verify Triton Install
+
+Some PyTorch versions ship with ```Triton```, but some dont. Just incase you can install it with:
+
+```
+pip install triton
+```
+
+</details>
+
+</details>
+
 
 ### Code Inspiration!
 - Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
