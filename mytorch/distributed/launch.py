@@ -23,8 +23,8 @@ def main():
             env["RANK"] = str(rank)
             env["WORLD_SIZE"] = str(world_size)
             env["LOCAL_RANK"] = str(rank)
-            env["CUPYX_DISTRIBUTED_HOST"] = args.master_addr
-            env["CUPYX_DISTRIBUTED_PORT"] = args.master_port   
+            env["CUPYX_DISTRIBUTED_HOST"] = os.environ.get("CUPYX_DISTRIBUTED_HOST", args.master_addr)
+            env["CUPYX_DISTRIBUTED_PORT"] = os.environ.get("CUPYX_DISTRIBUTED_PORT", args.master_port)
 
             cmd = [sys.executable, args.training_script] + training_args
 
