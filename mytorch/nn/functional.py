@@ -13,7 +13,15 @@ so they remain cpu/gpu agnostic
 """
 import numpy as np
 from ..tensor import Tensor
-from . import fused_ops as FO
+try:
+    import triton
+    from . import fused_ops as FO
+    FUSED_AVAIL = True
+except:
+    FUSED_AVAIL = False
+    FLAG_ONCE = False
+
+import warnings
 
 def linear(input, weight, bias=None, auto=False):
 
@@ -1400,7 +1408,7 @@ def dropout(input, dropout_p, training=True, auto=False):
 
         return out
    
-def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=True):
+def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=False):
 
     """
     Standard LayerNorm op with input of the shape (*, E)
@@ -1435,6 +1443,12 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Tr
         return scale_shifted_x
 
     else:
+
+        if fused and not FUSED_AVAIL:
+            if not FLAG_ONCE:
+                warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
+                FLAG_ONCE = True
+            fused = False
 
         if not fused:
             input_cp = input.data
@@ -1513,6 +1527,8 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Tr
 
         else:
 
+            assert "cuda" in input.device, "Fused Operations can only be performed on Cuda Tensors!"
+            
             ### Fused ops need raw cupy arrays not Array ###
             if hasattr(input.data, "_array"):
                 input_array = input.data._array
@@ -1810,7 +1826,7 @@ def gelu(x):
 
     return out
 
-def softmax(x, dim=-1, auto=False, fused=True):
+def softmax(x, dim=-1, auto=False, fused=False):
 
     if auto:
 
@@ -1822,7 +1838,12 @@ def softmax(x, dim=-1, auto=False, fused=True):
     
     else:
         
- 
+        if fused and not FUSED_AVAIL:
+            if not FLAG_ONCE:
+                warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
+                FLAG_ONCE = True
+            fused = False
+
         if not fused:
             # Numerical stability: subtract max along dim
             max_val = np.max(x.data, axis=dim, keepdims=True)
@@ -1845,6 +1866,8 @@ def softmax(x, dim=-1, auto=False, fused=True):
                     else:
                         x.grad += grad_input
         else:
+            
+            assert "cuda" in x.device, "Fused Operations can only be performed on Cuda Tensors!"
 
             ### Fused Ops Need Access to Raw Arrays and they must be on CUDA ###
             if hasattr(x.data, "_array"):
@@ -1944,7 +1967,7 @@ def softmax(x, dim=-1, auto=False, fused=True):
 
         return out
 
-def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
+def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
 
     """
     Standard cross entropy loss between raw logits and targets
@@ -1999,6 +2022,12 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
         return loss
     
     else:
+
+        if fused and not FUSED_AVAIL:
+            if not FLAG_ONCE:
+                warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
+                FLAG_ONCE = True
+            fused = False
 
         if not fused:
             # Our Logits will be some (N x NUM_CLASSES)
@@ -2058,6 +2087,8 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=True):
         
         else:
             
+            assert "cuda" in logits.device, "Fused Operations can only be performed on Cuda Tensors!"
+
             ### Fused Op only happens in float32 ###
             logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
 
@@ -2145,6 +2176,9 @@ def mse_loss(pred, labels, auto=False):
         return out
 
 def scaled_dot_product_attention(Q, K, V, causal=False, softmax_scale=None):
+    
+    if not FUSED_AVAIL:
+        raise Exception("Fused ops not available, install Triton!!!")
     
     Q_data = Q.data
     K_data = K.data
