@@ -9,10 +9,16 @@ import os
 import cupy as cp
 import numpy as np
 from cupyx.distributed import NCCLBackend
-import mytorch
 import pickle
 from safetensors.numpy import save_file, load_file
 import warnings
+
+from .nn import *
+from .optim import *
+from .utils import data
+from .tensor import Tensor, zeros_like, zeros
+from .dtypes import *
+from .ops import concatenate
 
 try:
     import wandb
@@ -179,6 +185,10 @@ class Accelerator:
         return f"cuda:{self.rank}"
     
     @property
+    def num_processes(self):
+        return self.world_size
+    
+    @property
     def sync_grad(self):
         return self.step_counter % self.gradient_accumulation_steps == 0
     
@@ -191,11 +201,11 @@ class Accelerator:
         prepared = []
 
         for obj in args:
-            if isinstance(obj, mytorch.nn.Module):
+            if isinstance(obj, Module):
                 prepared.append(self.prepare_model(obj))
-            elif isinstance(obj, mytorch.optim.Optimizer):
+            elif isinstance(obj, Optimizer):
                 prepared.append(self.prepare_optimizer(obj))
-            elif isinstance(obj, mytorch.data.DataLoader):
+            elif isinstance(obj, data.DataLoader):
                 prepared.append(self.prepare_dataloaders(obj))
         
         return prepared
@@ -212,7 +222,7 @@ class Accelerator:
 
         ### Set Up Mixed-Precision Training ###
         if self.mixed_precision:
-
+    
             ### We will keep an internal copy of fp32 weights 
             ### the model may be trained in float16, but we will keep our  
             ### internal buffer in float32 and copy it back after every iteration
@@ -236,7 +246,7 @@ class Accelerator:
 
                 ### otherwise load like normal 
                 else:
-                    fp32_param = mytorch.Tensor(param.data._array.copy(), dtype=mytorch.float32)
+                    fp32_param = Tensor(param.data._array.copy(), dtype=float32)
                     fp32_param.requires_grad = param.requires_grad
                     seen[data_ptr] = fp32_param
 
@@ -245,7 +255,7 @@ class Accelerator:
             ### Now cast all our parameters to float16 ###
             for param in self.model._parameters_no_dedup():
                 param.data._array = param.data._array.astype("float16")
-        
+       
         return self.model
     
     def prepare_optimizer(self, optimizer):
@@ -261,17 +271,17 @@ class Accelerator:
 
         if not 'Fused' in optimizer.__class__.__name__:
             if hasattr(optimizer, "m"):
-                optimizer.m = [mytorch.zeros_like(p).data for p in optimizer.params]
+                optimizer.m = [zeros_like(p).data for p in optimizer.params]
             if hasattr(optimizer, "v"):
-                optimizer.v = [mytorch.zeros_like(p).data for p in optimizer.params]
+                optimizer.v = [zeros_like(p).data for p in optimizer.params]
         else:
             
             if hasattr(optimizer, "flat_params"):
-                optimizer.flat_params = mytorch.concatenate([p.reshape(-1) for p in optimizer.params]).data
+                optimizer.flat_params = concatenate([p.reshape(-1) for p in optimizer.params]).data
             if hasattr(optimizer, "m"):
-                optimizer.m = mytorch.zeros(optimizer.total_size, device=accelerator.device).data
+                optimizer.m = zeros(optimizer.total_size, device=accelerator.device).data
             if hasattr(optimizer, "v"):
-                optimizer.v = mytorch.zeros(optimizer.total_size, device=accelerator.device).data
+                optimizer.v = zeros(optimizer.total_size, device=accelerator.device).data
 
 
         class OptimizerWrapper:
@@ -578,7 +588,7 @@ class Accelerator:
         self._grad_norm = total_norm
 
     def gather_for_metrics(self, value):
-        assert isinstance(value, mytorch.Tensor), "Value must be a Tensor"
+        assert isinstance(value, Tensor), "Value must be a Tensor"
         assert value.shape == (), "Value must be a Scalar"
         
         if self.world_size == 1 or self.comm is None:
