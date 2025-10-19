@@ -255,13 +255,24 @@ class Accelerator:
         ### We will update Full Precision Params but train w/ Half Precision ###
         if self.mixed_precision:
             optimizer.params = self.fp32_params
-            
+        
         ### Adam has momentum params that have already been initialized ###
         ### we need to reinit them on the correct device ###
-        if hasattr(optimizer, "m"):
-            optimizer.m = [mytorch.zeros_like(p).data for p in optimizer.params]
-        if hasattr(optimizer, "v"):
-            optimizer.v = [mytorch.zeros_like(p).data for p in optimizer.params]
+
+        if not 'Fused' in optimizer.__class__.__name__:
+            if hasattr(optimizer, "m"):
+                optimizer.m = [mytorch.zeros_like(p).data for p in optimizer.params]
+            if hasattr(optimizer, "v"):
+                optimizer.v = [mytorch.zeros_like(p).data for p in optimizer.params]
+        else:
+            
+            if hasattr(optimizer, "flat_params"):
+                optimizer.flat_params = mytorch.concatenate([p.reshape(-1) for p in optimizer.params]).data
+            if hasattr(optimizer, "m"):
+                optimizer.m = mytorch.zeros(optimizer.total_size, device=accelerator.device).data
+            if hasattr(optimizer, "v"):
+                optimizer.v = mytorch.zeros(optimizer.total_size, device=accelerator.device).data
+
 
         class OptimizerWrapper:
             def __init__(self, base_optimizer):
