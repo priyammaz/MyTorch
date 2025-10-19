@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=77", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mytorch"
+version = "0.1.0"
+authors = [
+    {name = "Priyam Mazumdar"}
+]
+description = "A package for GPU-accelerated training with CuPy and optional Triton kernels"
+readme = "README.md"
+requires-python = ">=3.8,<3.14"
+dependencies = [
+    "requests",
+    "datasets<4.0.0",
+    "wandb",
+    "tqdm",
+    "tiktoken",
+    "safetensors",
+    "cupy-cuda12x",
+]
+
+[project.optional-dependencies]
+triton = [
+    "torch>=2.0.0",
+    "triton==3.5",
+]
+
+[project.urls]
+Homepage = "https://github.com/priyammaz/MyTorch"
+Repository = "https://github.com/priyammaz/MyTorch"
+
+[tool.setuptools]
+packages = ["mytorch"]
