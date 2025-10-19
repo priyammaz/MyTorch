@@ -6,14 +6,13 @@ import signal
 
 def main():
     parser = argparse.ArgumentParser(description="mytorch distributed launch")
+    parser.add_argument("training_script", type=str) # <- Only positional argument (expected in first position)
     parser.add_argument("--num_gpus", type=int, required=True)
-    parser.add_argument("--training_script", type=str, required=True)
     parser.add_argument("--master_addr", type=str, default="127.0.0.1")
     parser.add_argument("--master_port", type=str, default="13333")
 
     # Parse only launcher-specific args
     args, training_args = parser.parse_known_args()
-
     world_size = args.num_gpus
     procs = []
 
