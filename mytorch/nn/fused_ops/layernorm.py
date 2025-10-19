@@ -870,227 +870,228 @@ def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True):
         return dx, dgamma
 
 
-### Testing DLPACK ###
-def _dlpack_fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True):
-    """
-    x: Input (N, E)
-    gamma: scale parameter (E,)
-    beta: shift parameter (E,)
-    Returns:
-        y: Output (N, E)
-        x_hat: Normed x before shift/scale (N,E)
-        inv_var: Inverse variance per sample in batch (N,)
-    """
+# ### Testing DLPACK ###
+# import cupy as cp
+# import torch
+# from torch.utils.dlpack import from_dlpack
+# def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True):
+#     """
+#     x: Input (N, E)
+#     gamma: scale parameter (E,)
+#     beta: shift parameter (E,)
+#     Returns:
+#         y: Output (N, E)
+#         x_hat: Normed x before shift/scale (N,E)
+#         inv_var: Inverse variance per sample in batch (N,)
+#     """
     
-    # Detect tensor type
-    is_torch = isinstance(x, torch.Tensor)
-    is_cupy = not is_torch and hasattr(x, '__cuda_array_interface__')
+#     # Detect tensor type
+#     is_torch = isinstance(x, torch.Tensor)
+#     is_cupy = not is_torch and hasattr(x, '__cuda_array_interface__')
     
-    # Convert CuPy to PyTorch for better Triton performance
-    if is_cupy:
+#     # Convert CuPy to PyTorch for better Triton performance
+#     if is_cupy:
         
-        x = from_dlpack(x)
-        gamma = from_dlpack(gamma)
-        if beta is not None:
-            beta = from_dlpack(beta)
+#         x = from_dlpack(x)
+#         gamma = from_dlpack(gamma)
+#         if beta is not None:
+#             beta = from_dlpack(beta)
     
-    n_rows, n_cols = x.shape
-    BLOCK_SIZE = triton.next_power_of_2(n_cols)
+#     n_rows, n_cols = x.shape
+#     BLOCK_SIZE = triton.next_power_of_2(n_cols)
     
-    # Allocate outputs
-    y = torch.empty_like(x)
-    x_hat = torch.empty_like(x)
-    inv_var = torch.empty(n_rows, dtype=x.dtype, device=x.device)
+#     # Allocate outputs
+#     y = torch.empty_like(x)
+#     x_hat = torch.empty_like(x)
+#     inv_var = torch.empty(n_rows, dtype=x.dtype, device=x.device)
     
-    # Compute strides in elements for each array
-    x_row_stride = x.stride(0)
-    y_row_stride = y.stride(0)
-    x_hat_row_stride = x_hat.stride(0)
+#     # Compute strides in elements for each array
+#     x_row_stride = x.stride(0)
+#     y_row_stride = y.stride(0)
+#     x_hat_row_stride = x_hat.stride(0)
     
-    # Map dtype to Triton flag
-    dtype_flag = 0 if x.dtype == torch.float32 else 1  # 0=float32, 1=float16
+#     # Map dtype to Triton flag
+#     dtype_flag = 0 if x.dtype == torch.float32 else 1  # 0=float32, 1=float16
     
-    ### Set Grid ###
-    grid = (n_rows,)
+#     ### Set Grid ###
+#     grid = (n_rows,)
     
-    ### When in training mode
-    if training:
-        ### if we have a beta 
-        if beta is not None:
-            layernorm_kernel_forward_training[grid](
-                y,                   # output_ptr
-                inv_var,             # inv_var_ptr
-                x_hat,               # x_hat_ptr
-                x,                   # input_ptr
-                gamma,               # gamma_ptr
-                beta,                # beta_ptr
-                x_row_stride,        # input_row_stride
-                y_row_stride,        # output_row_stride
-                x_hat_row_stride,    # x_hat_row_stride
-                dtype_flag,          # dtype_flag (constexpr)
-                eps,                 # eps (constexpr)
-                n_cols,              # n_cols (constexpr)
-                BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-            )
-        else:
-            layernorm_kernel_forward_training_no_bias[grid](
-                y,                   # output_ptr
-                inv_var,             # inv_var_ptr
-                x_hat,               # x_hat_ptr
-                x,                   # input_ptr
-                gamma,               # gamma_ptr
-                x_row_stride,        # input_row_stride
-                y_row_stride,        # output_row_stride
-                x_hat_row_stride,    # x_hat_row_stride
-                dtype_flag,          # dtype_flag (constexpr)
-                eps,                 # eps (constexpr)
-                n_cols,              # n_cols (constexpr)
-                BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-            )
+#     ### When in training mode
+#     if training:
+#         ### if we have a beta 
+#         if beta is not None:
+#             layernorm_kernel_forward_training[grid](
+#                 y,                   # output_ptr
+#                 inv_var,             # inv_var_ptr
+#                 x_hat,               # x_hat_ptr
+#                 x,                   # input_ptr
+#                 gamma,               # gamma_ptr
+#                 beta,                # beta_ptr
+#                 x_row_stride,        # input_row_stride
+#                 y_row_stride,        # output_row_stride
+#                 x_hat_row_stride,    # x_hat_row_stride
+#                 dtype_flag,          # dtype_flag (constexpr)
+#                 eps,                 # eps (constexpr)
+#                 n_cols,              # n_cols (constexpr)
+#                 BLOCK_SIZE           # BLOCK_SIZE (constexpr)
+#             )
+#         else:
+#             layernorm_kernel_forward_training_no_bias[grid](
+#                 y,                   # output_ptr
+#                 inv_var,             # inv_var_ptr
+#                 x_hat,               # x_hat_ptr
+#                 x,                   # input_ptr
+#                 gamma,               # gamma_ptr
+#                 x_row_stride,        # input_row_stride
+#                 y_row_stride,        # output_row_stride
+#                 x_hat_row_stride,    # x_hat_row_stride
+#                 dtype_flag,          # dtype_flag (constexpr)
+#                 eps,                 # eps (constexpr)
+#                 n_cols,              # n_cols (constexpr)
+#                 BLOCK_SIZE           # BLOCK_SIZE (constexpr)
+#             )
         
-        # Convert back to CuPy if needed
-        if is_cupy:
-            import cupy as cp
-            y = cp.from_dlpack(y)
-            x_hat = cp.from_dlpack(x_hat)
-            inv_var = cp.from_dlpack(inv_var)
+#         # Convert back to CuPy if needed
+#         if is_cupy:
+#             import cupy as cp
+#             y = cp.from_dlpack(y)
+#             x_hat = cp.from_dlpack(x_hat)
+#             inv_var = cp.from_dlpack(inv_var)
         
-        return y, x_hat, inv_var
+#         return y, x_hat, inv_var
     
-    else:
-        if beta is not None:
-            layernorm_kernel_forward_inference[grid](
-                y,                   # output_ptr
-                inv_var,             # inv_var_ptr
-                x_hat,               # x_hat_ptr
-                x,                   # input_ptr
-                gamma,               # gamma_ptr
-                beta,                # beta_ptr
-                x_row_stride,        # input_row_stride
-                y_row_stride,        # output_row_stride
-                x_hat_row_stride,    # x_hat_row_stride
-                dtype_flag,          # dtype_flag (constexpr)
-                eps,                 # eps (constexpr)
-                n_cols,              # n_cols (constexpr)
-                BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-            )
-        else:
-            layernorm_kernel_forward_inference_no_bias[grid](
-                y,                   # output_ptr
-                inv_var,             # inv_var_ptr
-                x_hat,               # x_hat_ptr
-                x,                   # input_ptr
-                gamma,               # gamma_ptr
-                x_row_stride,        # input_row_stride
-                y_row_stride,        # output_row_stride
-                x_hat_row_stride,    # x_hat_row_stride
-                dtype_flag,          # dtype_flag (constexpr)
-                eps,                 # eps (constexpr)
-                n_cols,              # n_cols (constexpr)
-                BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-            )
+#     else:
+#         if beta is not None:
+#             layernorm_kernel_forward_inference[grid](
+#                 y,                   # output_ptr
+#                 inv_var,             # inv_var_ptr
+#                 x_hat,               # x_hat_ptr
+#                 x,                   # input_ptr
+#                 gamma,               # gamma_ptr
+#                 beta,                # beta_ptr
+#                 x_row_stride,        # input_row_stride
+#                 y_row_stride,        # output_row_stride
+#                 x_hat_row_stride,    # x_hat_row_stride
+#                 dtype_flag,          # dtype_flag (constexpr)
+#                 eps,                 # eps (constexpr)
+#                 n_cols,              # n_cols (constexpr)
+#                 BLOCK_SIZE           # BLOCK_SIZE (constexpr)
+#             )
+#         else:
+#             layernorm_kernel_forward_inference_no_bias[grid](
+#                 y,                   # output_ptr
+#                 inv_var,             # inv_var_ptr
+#                 x_hat,               # x_hat_ptr
+#                 x,                   # input_ptr
+#                 gamma,               # gamma_ptr
+#                 x_row_stride,        # input_row_stride
+#                 y_row_stride,        # output_row_stride
+#                 x_hat_row_stride,    # x_hat_row_stride
+#                 dtype_flag,          # dtype_flag (constexpr)
+#                 eps,                 # eps (constexpr)
+#                 n_cols,              # n_cols (constexpr)
+#                 BLOCK_SIZE           # BLOCK_SIZE (constexpr)
+#             )
         
-        # Convert back to CuPy if needed
-        if is_cupy:
-            import cupy as cp
-            y = cp.from_dlpack(y)
+#         # Convert back to CuPy if needed
+#         if is_cupy:
+#             import cupy as cp
+#             y = cp.from_dlpack(y)
         
-        return y
+#         return y
 
 
-def _dlpack_fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True):
-    """
-    x_hat: normalized input from forward (N, E)
-    inv_var: 1/sqrt(var + eps) per row (N,)
-    dy: upstream gradient (N, E)
-    gamma: scale parameter (E,)
+# def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True):
+#     """
+#     x_hat: normalized input from forward (N, E)
+#     inv_var: 1/sqrt(var + eps) per row (N,)
+#     dy: upstream gradient (N, E)
+#     gamma: scale parameter (E,)
     
-    Returns:
-        dx: gradient w.r.t input (N, E)
-        dgamma: gradient w.r.t gamma (E,)
-        dbeta: gradient w.r.t beta (E,)
-    """
+#     Returns:
+#         dx: gradient w.r.t input (N, E)
+#         dgamma: gradient w.r.t gamma (E,)
+#         dbeta: gradient w.r.t beta (E,)
+#     """
     
-    # Detect tensor type
-    is_torch = isinstance(dy, torch.Tensor)
-    is_cupy = not is_torch and hasattr(dy, '__cuda_array_interface__')
+#     # Detect tensor type
+#     is_torch = isinstance(dy, torch.Tensor)
+#     is_cupy = not is_torch and hasattr(dy, '__cuda_array_interface__')
     
-    # Convert CuPy to PyTorch for better Triton performance
-    if is_cupy:
+#     # Convert CuPy to PyTorch for better Triton performance
+#     if is_cupy:
         
-        x_hat = from_dlpack(x_hat)
-        inv_var = from_dlpack(inv_var)
-        dy = from_dlpack(dy)
-        gamma = from_dlpack(gamma)
+#         x_hat = from_dlpack(x_hat)
+#         inv_var = from_dlpack(inv_var)
+#         dy = from_dlpack(dy)
+#         gamma = from_dlpack(gamma)
     
-    ### Lets just hardcode our tile size with something reasonable ###
-    GAMMA_BLOCK_SIZE = 64
-    GAMMA_ROW_BLOCK_SIZE = 64
-    n_rows, n_cols = dy.shape
+#     ### Lets just hardcode our tile size with something reasonable ###
+#     GAMMA_BLOCK_SIZE = 64
+#     GAMMA_ROW_BLOCK_SIZE = 64
+#     n_rows, n_cols = dy.shape
     
-    ### COMPUTE DX ###
-    dx = torch.empty_like(dy)
-    dx_row_stride = dx.stride(0)
-    dy_row_stride = dy.stride(0)
-    x_hat_row_stride = x_hat.stride(0)
-    dtype_flag = 0 if dy.dtype == torch.float32 else 1
-    dx_BLOCK_SIZE = triton.next_power_of_2(n_cols)
-    grid = (n_rows,)
+#     ### COMPUTE DX ###
+#     dx = torch.empty_like(dy)
+#     dx_row_stride = dx.stride(0)
+#     dy_row_stride = dy.stride(0)
+#     x_hat_row_stride = x_hat.stride(0)
+#     dtype_flag = 0 if dy.dtype == torch.float32 else 1
+#     dx_BLOCK_SIZE = triton.next_power_of_2(n_cols)
+#     grid = (n_rows,)
     
-    layernorm_kernel_backward[grid](
-        dx,
-        dy * gamma,  # dx_hat = dy * gamma
-        x_hat,
-        inv_var,
-        dx_row_stride,
-        dy_row_stride,
-        x_hat_row_stride,
-        dtype_flag,
-        n_cols,
-        dx_BLOCK_SIZE
-    )
+#     layernorm_kernel_backward[grid](
+#         dx,
+#         dy * gamma,  # dx_hat = dy * gamma
+#         x_hat,
+#         inv_var,
+#         dx_row_stride,
+#         dy_row_stride,
+#         x_hat_row_stride,
+#         dtype_flag,
+#         n_cols,
+#         dx_BLOCK_SIZE
+#     )
     
-    ### COMPUTE DGAMMA ###
-    num_col_programs = triton.cdiv(n_cols, GAMMA_BLOCK_SIZE)
-    num_row_programs = triton.cdiv(n_rows, GAMMA_ROW_BLOCK_SIZE)
-    dgamma = torch.empty(num_row_programs, n_cols, dtype=dy.dtype, device=dy.device)
-    grid = (num_col_programs, num_row_programs)
+#     ### COMPUTE DGAMMA ###
+#     num_col_programs = triton.cdiv(n_cols, GAMMA_BLOCK_SIZE)
+#     num_row_programs = triton.cdiv(n_rows, GAMMA_ROW_BLOCK_SIZE)
+#     dgamma = torch.empty(num_row_programs, n_cols, dtype=dy.dtype, device=dy.device)
+#     grid = (num_col_programs, num_row_programs)
     
-    layernorm_gamma_kernel_backward[grid](
-        dgamma,
-        x_hat,
-        dy,  # for dgamma, upstream is dy*gamma
-        x_hat.stride(0),
-        dy.stride(0),
-        dgamma.stride(0),
-        dtype_flag,
-        n_rows,
-        n_cols,
-        GAMMA_BLOCK_SIZE,
-        GAMMA_ROW_BLOCK_SIZE, 
-    )
-    dgamma = dgamma.sum(axis=0)
+#     layernorm_gamma_kernel_backward[grid](
+#         dgamma,
+#         x_hat,
+#         dy,  # for dgamma, upstream is dy*gamma
+#         x_hat.stride(0),
+#         dy.stride(0),
+#         dgamma.stride(0),
+#         dtype_flag,
+#         n_rows,
+#         n_cols,
+#         GAMMA_BLOCK_SIZE,
+#         GAMMA_ROW_BLOCK_SIZE, 
+#     )
+#     dgamma = dgamma.sum(axis=0)
     
-    ### COMPUTE DBETA ###
-    if bias:
-        dbeta = dy.sum(axis=0)
+#     ### COMPUTE DBETA ###
+#     if bias:
+#         dbeta = dy.sum(axis=0)
         
-        # Convert back to CuPy if needed
-        if is_cupy:
-            import cupy as cp
-            dx = cp.from_dlpack(dx)
-            dgamma = cp.from_dlpack(dgamma)
-            dbeta = cp.from_dlpack(dbeta)
+#         # Convert back to CuPy if needed
+#         if is_cupy:
+#             dx = cp.from_dlpack(dx)
+#             dgamma = cp.from_dlpack(dgamma)
+#             dbeta = cp.from_dlpack(dbeta)
         
-        return dx, dgamma, dbeta
-    else:
-        # Convert back to CuPy if needed
-        if is_cupy:
-            import cupy as cp
-            dx = cp.from_dlpack(dx)
-            dgamma = cp.from_dlpack(dgamma)
+#         return dx, dgamma, dbeta
+#     else:
+#         # Convert back to CuPy if needed
+#         if is_cupy:
+#             dx = cp.from_dlpack(dx)
+#             dgamma = cp.from_dlpack(dgamma)
         
-        return dx, dgamma
+#         return dx, dgamma
 
 if __name__ == "__main__":
 

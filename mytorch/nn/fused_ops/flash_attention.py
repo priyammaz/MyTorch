@@ -22,7 +22,7 @@ import triton.language as tl
 def get_fwd_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
     mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
-    
+
     if mode == "none":
         return [
             triton.Config(
@@ -1216,176 +1216,177 @@ def fused_sdpa_backward(dO,
 
     return dQ, dK, dV
 
-#### TESTING DLPACK IMPLEMENTATION ###
+# ### TESTING DLPACK IMPLEMENTATION ###
+# import cupy as cp
+# import torch
+# from torch.utils.dlpack import from_dlpack
+# def fused_sdpa_forward(Q, K, V, 
+#                        causal, 
+#                        softmax_scale=None):
 
-def _dlpack_fused_sdpa_forward(Q, K, V, 
-                       causal, 
-                       softmax_scale=None):
-
-
-    # Detect tensor type    
-    is_torch = isinstance(Q, torch.Tensor)
-    is_cupy = not is_torch and hasattr(Q, '__cuda_array_interface__')
+#     # Detect tensor type    
+#     is_torch = isinstance(Q, torch.Tensor)
+#     is_cupy = not is_torch and hasattr(Q, '__cuda_array_interface__')
     
-    # Convert CuPy to PyTorch for better Triton performance
-    if is_cupy:
-        Q_orig, K_orig, V_orig = Q, K, V
-        Q = from_dlpack(Q)
-        K = from_dlpack(K)
-        V = from_dlpack(V)
+#     # Convert CuPy to PyTorch for better Triton performance
+#     if is_cupy:
+#         Q_orig, K_orig, V_orig = Q, K, V
+#         Q = from_dlpack(Q)
+#         K = from_dlpack(K)
+#         V = from_dlpack(V)
     
-    HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
-    HEAD_DIM_V = V.shape[-1]
-    BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
-    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
-    assert Q.dtype == K.dtype and K.dtype == V.dtype, "Expect all Q,K,V Tensors to have the same data type"
+#     HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
+#     HEAD_DIM_V = V.shape[-1]
+#     BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
+#     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
+#     assert Q.dtype == K.dtype and K.dtype == V.dtype, "Expect all Q,K,V Tensors to have the same data type"
 
-    ### Make sure there is contiguous memory layout ####
-    if not Q.is_contiguous():
-        Q = Q.contiguous()
-    if not K.is_contiguous():
-        K = K.contiguous()
-    if not V.is_contiguous():
-        V = V.contiguous()
+#     ### Make sure there is contiguous memory layout ####
+#     if not Q.is_contiguous():
+#         Q = Q.contiguous()
+#     if not K.is_contiguous():
+#         K = K.contiguous()
+#     if not V.is_contiguous():
+#         V = V.contiguous()
     
-    if softmax_scale is None:
-        softmax_scale = 1 / HEAD_DIM**0.5
+#     if softmax_scale is None:
+#         softmax_scale = 1 / HEAD_DIM**0.5
 
-    # Create output tensors
-    O = torch.empty_like(Q)
-    M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
-    grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+#     # Create output tensors
+#     O = torch.empty_like(Q)
+#     M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
+#     grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
 
-    _attn_fwd[grid](
-        Q=Q,
-        K=K,
-        V=V,
-        softmax_scale=softmax_scale,
-        M=M,
-        O=O,
-        stride_Q_batch=Q.stride(0),
-        stride_Q_head=Q.stride(1),
-        stride_Q_seq=Q.stride(2),
-        stride_Q_dim=Q.stride(3),
-        stride_K_seq=K.stride(2),
-        stride_K_dim=K.stride(3),
-        stride_V_seq=V.stride(2),
-        stride_V_dim=V.stride(3),
-        stride_O_seq=O.stride(2),
-        stride_O_dim=O.stride(3),
-        NUM_HEADS=NUM_HEADS,
-        SEQ_LEN=SEQ_LEN,
-        HEAD_DIM=HEAD_DIM_Q,
-        ATTN_MODE=1 if causal else 0,
-        DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
-    )
+#     _attn_fwd[grid](
+#         Q=Q,
+#         K=K,
+#         V=V,
+#         softmax_scale=softmax_scale,
+#         M=M,
+#         O=O,
+#         stride_Q_batch=Q.stride(0),
+#         stride_Q_head=Q.stride(1),
+#         stride_Q_seq=Q.stride(2),
+#         stride_Q_dim=Q.stride(3),
+#         stride_K_seq=K.stride(2),
+#         stride_K_dim=K.stride(3),
+#         stride_V_seq=V.stride(2),
+#         stride_V_dim=V.stride(3),
+#         stride_O_seq=O.stride(2),
+#         stride_O_dim=O.stride(3),
+#         NUM_HEADS=NUM_HEADS,
+#         SEQ_LEN=SEQ_LEN,
+#         HEAD_DIM=HEAD_DIM_Q,
+#         ATTN_MODE=1 if causal else 0,
+#         DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+#     )
 
-    # Convert back to CuPy if needed
-    if is_cupy:
-        import cupy as cp
-        Q = cp.from_dlpack(Q)
-        K = cp.from_dlpack(K)
-        V = cp.from_dlpack(V)
-        O = cp.from_dlpack(O)
-        M = cp.from_dlpack(M)
+#     # Convert back to CuPy if needed
+#     if is_cupy:
+        
+#         Q = cp.from_dlpack(Q)
+#         K = cp.from_dlpack(K)
+#         V = cp.from_dlpack(V)
+#         O = cp.from_dlpack(O)
+#         M = cp.from_dlpack(M)
 
-    return Q, K, V, O, M
+#     return Q, K, V, O, M
 
-def _dlpack_fused_sdpa_backward(dO, 
-                        Q, K, V, 
-                        O, M, 
-                        causal,
-                        softmax_scale=None):
+# def fused_sdpa_backward(dO, 
+#                         Q, K, V, 
+#                         O, M, 
+#                         causal,
+#                         softmax_scale=None):
 
-    # Detect tensor type
-    is_torch = isinstance(Q, torch.Tensor)
-    is_cupy = not is_torch and hasattr(Q, '__cuda_array_interface__')
+#     # Detect tensor type
+#     is_torch = isinstance(Q, torch.Tensor)
+#     is_cupy = not is_torch and hasattr(Q, '__cuda_array_interface__')
     
-    # Convert CuPy to PyTorch for better Triton performance
-    if is_cupy:
+#     # Convert CuPy to PyTorch for better Triton performance
+#     if is_cupy:
 
-        dO = from_dlpack(dO)
-        Q = from_dlpack(Q)
-        K = from_dlpack(K)
-        V = from_dlpack(V)
-        O = from_dlpack(O)
-        M = from_dlpack(M)
+#         dO = from_dlpack(dO)
+#         Q = from_dlpack(Q)
+#         K = from_dlpack(K)
+#         V = from_dlpack(V)
+#         O = from_dlpack(O)
+#         M = from_dlpack(M)
 
-    HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
-    HEAD_DIM_V = V.shape[-1]
-    BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
-    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
-    assert Q.dtype == K.dtype and K.dtype == V.dtype and V.dtype == O.dtype, "Expect all Q,K,V,O Tensors to have the same data type"
+#     HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
+#     HEAD_DIM_V = V.shape[-1]
+#     BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
+#     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
+#     assert Q.dtype == K.dtype and K.dtype == V.dtype and V.dtype == O.dtype, "Expect all Q,K,V,O Tensors to have the same data type"
 
-    ### Ensure our grads are contiguous ###
-    if not dO.is_contiguous():
-        dO = dO.contiguous()
+#     ### Ensure our grads are contiguous ###
+#     if not dO.is_contiguous():
+#         dO = dO.contiguous()
 
-    ### Ensure grads have the same dtype
-    if not dO.dtype == Q.dtype:
-        dO = dO.to(Q.dtype) if is_torch else dO.type(Q.dtype)
+#     ### Ensure grads have the same dtype
+#     if not dO.dtype == Q.dtype:
+#         dO = dO.to(Q.dtype) if is_torch else dO.type(Q.dtype)
 
-    ### Create Empty Grads to populate ###
-    dQ = torch.zeros_like(Q, dtype=Q.dtype)
-    dK = torch.zeros_like(K, dtype=K.dtype)
-    dV = torch.zeros_like(V, dtype=V.dtype)
-    D = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
+#     ### Create Empty Grads to populate ###
+#     dQ = torch.zeros_like(Q, dtype=Q.dtype)
+#     dK = torch.zeros_like(K, dtype=K.dtype)
+#     dV = torch.zeros_like(V, dtype=V.dtype)
+#     D = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
    
 
-    ### Default softmax scale if not provided ###    
-    if softmax_scale is None:
-        softmax_scale = 1 / HEAD_DIM**0.5
+#     ### Default softmax scale if not provided ###    
+#     if softmax_scale is None:
+#         softmax_scale = 1 / HEAD_DIM**0.5
 
-    preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
+#     preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
 
-    # Compute all the elements Di
-    attn_backward_preprocess[preprocess_grid](
-        O_ptr=O, 
-        dO_ptr=dO,
-        D_ptr=D,
-        stride_O_heads=O.stride(1), 
-        stride_O_len=O.stride(2), 
-        stride_O_embed=O.stride(3),
-        stride_dO_heads=dO.stride(1), 
-        stride_dO_len=dO.stride(2), 
-        stride_dO_embed=dO.stride(3),
-        stride_D_head=D.stride(1),
-        SEQ_LEN=SEQ_LEN,
-        EMBED_DIM=HEAD_DIM,
-        DTYPE_FLAG=0 if dO.dtype == torch.float32 else 1
-    )
+#     # Compute all the elements Di
+#     attn_backward_preprocess[preprocess_grid](
+#         O_ptr=O, 
+#         dO_ptr=dO,
+#         D_ptr=D,
+#         stride_O_heads=O.stride(1), 
+#         stride_O_len=O.stride(2), 
+#         stride_O_embed=O.stride(3),
+#         stride_dO_heads=dO.stride(1), 
+#         stride_dO_len=dO.stride(2), 
+#         stride_dO_embed=dO.stride(3),
+#         stride_D_head=D.stride(1),
+#         SEQ_LEN=SEQ_LEN,
+#         EMBED_DIM=HEAD_DIM,
+#         DTYPE_FLAG=0 if dO.dtype == torch.float32 else 1
+#     )
 
-    grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
-    _attn_bwd[grid](
-        Q_ptr=Q, 
-        K_ptr=K, 
-        V_ptr=V, 
-        dO_ptr=dO, 
-        dQ_ptr=dQ, 
-        dK_ptr=dK, 
-        dV_ptr=dV, 
-        M_ptr=M, 
-        D_ptr=D, 
-        softmax_scale=softmax_scale, 
-        stride_batch=Q.stride(0),
-        stride_head=Q.stride(1),
-        stride_len=Q.stride(2),
-        stride_embed=Q.stride(3), 
-        NUM_HEADS=NUM_HEADS, 
-        SEQ_LEN=SEQ_LEN, 
-        HEAD_DIM=HEAD_DIM, 
-        CAUSAL=1 if causal else 0, 
-        DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
-    )
+#     grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
+#     _attn_bwd[grid](
+#         Q_ptr=Q, 
+#         K_ptr=K, 
+#         V_ptr=V, 
+#         dO_ptr=dO, 
+#         dQ_ptr=dQ, 
+#         dK_ptr=dK, 
+#         dV_ptr=dV, 
+#         M_ptr=M, 
+#         D_ptr=D, 
+#         softmax_scale=softmax_scale, 
+#         stride_batch=Q.stride(0),
+#         stride_head=Q.stride(1),
+#         stride_len=Q.stride(2),
+#         stride_embed=Q.stride(3), 
+#         NUM_HEADS=NUM_HEADS, 
+#         SEQ_LEN=SEQ_LEN, 
+#         HEAD_DIM=HEAD_DIM, 
+#         CAUSAL=1 if causal else 0, 
+#         DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+#     )
 
-    # Convert back to CuPy if needed
-    if is_cupy:
-        import cupy as cp
-        dQ = cp.from_dlpack(dQ)
-        dK = cp.from_dlpack(dK)
-        dV = cp.from_dlpack(dV)
+#     # Convert back to CuPy if needed
+#     if is_cupy:
 
-    return dQ, dK, dV
+#         dQ = cp.from_dlpack(dQ)
+#         dK = cp.from_dlpack(dK)
+#         dV = cp.from_dlpack(dV)
+
+#     return dQ, dK, dV
 
 if __name__ == "__main__":
     import torch

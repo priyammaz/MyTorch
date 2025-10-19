@@ -212,7 +212,10 @@ def fused_cross_entropy_backward(
 
     return grad
 
-
+# ### TESTING DLPACK ###
+# import cupy as cp
+# import torch
+# from torch.utils.dlpack import from_dlpack
 # def fused_cross_entropy_forward(logits, labels):
 #     # Detect tensor type
 #     is_torch = isinstance(logits, torch.Tensor)
@@ -249,7 +252,6 @@ def fused_cross_entropy_backward(
     
 #     return loss, logsumexp
 
-# from torch.utils.dlpack import from_dlpack
 # def fused_cross_entropy_backward(
 #         logits, labels, logsumexp, BLOCK_SIZE=128
 # ):
