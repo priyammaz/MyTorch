@@ -1,1 +1,1 @@
-python prepare_data/prepare_shakespear.py --path_to_save "data/shakespear"
+python prepare_data/prepare_shakespeare.py --path_to_save "data/shakespeare"
