@@ -68,7 +68,164 @@ def load_config(config_path=None):
     except Exception as e:
         print(f"Warning: Failed to load config from {config_path}: {e}")
         return DEFAULT_CONFIG_ENV.copy()
+
+def test():
+    """Handle test subcommand."""
+    from pathlib import Path
     
+    # Get the tests directory
+    mytorch_root = Path(__file__).parent
+    tests_dir = mytorch_root / "tests"
+    
+    # Load config
+    config = load_config()
+    num_gpus = config.get("num_gpus", 1)
+    compute_environment = config.get("compute_environment", "No Distributed Training")
+    mixed_precision = config.get("mixed_precision", "No")
+    
+    print("=" * terminal_width)
+    print("Running MyTorch Environment Tests")
+    print("=" * terminal_width)
+    print(f"\nConfiguration:")
+    print(f"  Compute Environment: {compute_environment}")
+    print(f"  Number of GPUs: {num_gpus}")
+    print(f"  Mixed Precision: {mixed_precision}")
+    print("=" * terminal_width)
+    
+    test_number = 1
+    
+    # Test 1: NCCL AllReduce (only if multi-GPU)
+    if compute_environment == "Multi-GPU Training":
+        allreduce_test_script = tests_dir / "all_reduce_test_w_launch.py"
+        
+        if not allreduce_test_script.exists():
+            print(f"\nWarning: AllReduce test script not found at {allreduce_test_script}")
+        else:
+            print(f"\nTest {test_number}: NCCL AllReduce Communication Test")
+            print("-" * terminal_width)
+            print(f"Testing with {num_gpus} GPUs...")
+            
+            from mytorch.distributed.launch import main as launch_main
+            
+            sys.argv = [
+                'mytorchrun',
+                '--num_gpus', str(num_gpus),
+                str(allreduce_test_script),
+                '--master_addr', config.get("master_addr", "127.0.0.1"),
+                '--master_port', config.get("master_port", "13333")
+            ]
+            
+            try:
+                launch_main()
+                print(f"\n✓ Test {test_number} passed: NCCL AllReduce")
+            except Exception as e:
+                print(f"\n✗ Test {test_number} failed: {e}")
+                sys.exit(1)
+            
+            test_number += 1
+    
+    # Test 2: Training Pipeline - No mixed precision, No gradient accumulation
+    training_test_script = tests_dir / "test_training.py"
+    
+    if not training_test_script.exists():
+        print(f"\nError: Training test script not found at {training_test_script}")
+        sys.exit(1)
+    
+    print(f"\nTest {test_number}: Training Pipeline (No Mixed Precision, No Grad Accum)")
+    print("-" * terminal_width)
+    
+    from mytorch.distributed.launch import main as launch_main
+    
+    sys.argv = [
+        'mytorchrun',
+        '--num_gpus', str(num_gpus),
+        str(training_test_script),
+        '--master_addr', config.get("master_addr", "127.0.0.1"),
+        '--master_port', config.get("master_port", "13333")
+    ]
+    
+    try:
+        launch_main()
+        print(f"\n✓ Test {test_number} passed: Basic training pipeline")
+    except Exception as e:
+        print(f"\n✗ Test {test_number} failed: {e}")
+        sys.exit(1)
+    
+    test_number += 1
+    
+    # Test 3: Training Pipeline - With gradient accumulation
+    print(f"\nTest {test_number}: Training Pipeline (Gradient Accumulation)")
+    print("-" * terminal_width)
+    
+    sys.argv = [
+        'mytorchrun',
+        '--num_gpus', str(num_gpus),
+        str(training_test_script),
+        '--master_addr', config.get("master_addr", "127.0.0.1"),
+        '--master_port', config.get("master_port", "13333"),
+        '--gradient_accumulation_steps', '4'
+    ]
+    
+    try:
+        launch_main()
+        print(f"\n✓ Test {test_number} passed: Gradient accumulation")
+    except Exception as e:
+        print(f"\n✗ Test {test_number} failed: {e}")
+        sys.exit(1)
+    
+    test_number += 1
+    
+    # Test 4: Training Pipeline - With mixed precision (if configured)
+    if mixed_precision == "fp16":
+        print(f"\nTest {test_number}: Training Pipeline (Mixed Precision fp16)")
+        print("-" * terminal_width)
+        
+        sys.argv = [
+            'mytorchrun',
+            '--num_gpus', str(num_gpus),
+            str(training_test_script),
+            '--master_addr', config.get("master_addr", "127.0.0.1"),
+            '--master_port', config.get("master_port", "13333"),
+            '--mixed_precision'
+        ]
+        
+        try:
+            launch_main()
+            print(f"\n✓ Test {test_number} passed: Mixed precision training")
+        except Exception as e:
+            print(f"\n✗ Test {test_number} failed: {e}")
+            sys.exit(1)
+        
+        test_number += 1
+        
+        # Test 5: Training Pipeline - Mixed precision + Gradient accumulation
+        print(f"\nTest {test_number}: Training Pipeline (Mixed Precision + Grad Accum)")
+        print("-" * terminal_width)
+        
+        sys.argv = [
+            'mytorchrun',
+            '--num_gpus', str(num_gpus),
+            str(training_test_script),
+            '--master_addr', config.get("master_addr", "127.0.0.1"),
+            '--master_port', config.get("master_port", "13333"),
+            '--mixed_precision',
+            '--gradient_accumulation_steps', '4'
+        ]
+        
+        try:
+            launch_main()
+            print(f"\n✓ Test {test_number} passed: Mixed precision + gradient accumulation")
+        except Exception as e:
+            print(f"\n✗ Test {test_number} failed: {e}")
+            sys.exit(1)
+    
+    # Final summary
+    print("\n" + "=" * terminal_width)
+    print("✓ ALL TESTS PASSED")
+    print("=" * terminal_width)
+    print("\nYour MyTorch environment is properly configured!")
+    print()
+
 def launch():
     from mytorch.distributed.launch import main as launch_main
     
@@ -169,12 +326,12 @@ def interactive_config():
 
         config["master_port"] = master_port
 
-    print("\n" + "=" * terminal_width)
+    print("\n" + "-" * terminal_width)
     print("Configuration Summary:")
-    print("=" * terminal_width)
+    print("-" * terminal_width)
     for key, value in config.items():
         print(f"  {key}: {value}")
-    print("=" * terminal_width)
+    print("-" * terminal_width)
 
     confirm = questionary.confirm(
         "Save this configuration?",
@@ -202,7 +359,7 @@ def main():
                           help='Launch distributed training',
                           add_help=False)
     subparsers.add_parser('test', 
-                         help='Run tests')
+                         help='Run environment tests')
     subparsers.add_parser('config', 
                          help='Run tests')
     
@@ -214,6 +371,9 @@ def main():
 
     elif args.command == "config":
         interactive_config()
+
+    elif args.command == "test":
+        test()
 
     else:
         parser.print_help()
