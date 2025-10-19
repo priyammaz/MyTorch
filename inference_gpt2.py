@@ -3,12 +3,13 @@ import mytorch
 from models.gpt2 import GPT2, GPT2Config
 import argparse
 import pickle
+import time
 import tiktoken
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GPT2 with MyTorch")
 
-    ### Experiment Config ###
+    ### Inference Config ###
     parser.add_argument("path_to_project_dir", type=str, help="Path to project directory")
     parser.add_argument("--checkpoint_dir", type=str)
     parser.add_argument("--fused", action="store_true")
@@ -16,6 +17,7 @@ def parse_args():
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--temperature", type=float, default=1.0)
     parser.add_argument("--topk", type=int)
+    parser.add_argument("--compute_tok_per_sec", action="store_true")
 
     ### Inference Config ###
     parser.add_argument("--start", type=str, default="\n")
@@ -86,6 +88,13 @@ seed = mytorch.Tensor(generated, dtype=mytorch.int32).unsqueeze(0).to(args.devic
 context = seed
 
 # Generation loop
+### Get Start time ###
+
+if args.compute_tok_per_sec:
+    start_time = time.time()
+    num_tokens_to_generate = args.max_tokens_gen if args.max_tokens_gen is not None else model_config["context_length"]
+
+### Start the print off with whatever our input was!
 print(args.start, end="", flush=True)
 for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model_config["context_length"]):
     seed = mytorch.Tensor(
@@ -128,3 +137,13 @@ for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model
     print(token, end="", flush=True)
 
 print("\n")
+
+if args.compute_tok_per_sec:
+    end_time = time.time()
+
+    elapsed = end_time - start_time
+    tokens_generated = num_tokens_to_generate
+    tps = tokens_generated / elapsed
+
+    print(f"\n\nGenerated {tokens_generated} tokens in {elapsed:.2f} seconds "
+        f"({tps:.2f} tokens/sec)")
