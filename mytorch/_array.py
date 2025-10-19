@@ -117,8 +117,9 @@ class Array:
                 # Default fallback
                 dtype = "float32"
         else:
+            
             if not isinstance(dtype, str):
-                raise TypeError("dtypes need to be provided as mytorch.float32 or `float32`")
+                dtype = str(dtype)
                 
         ### If input is already Array Type, grab its data
         if isinstance(data, Array):
@@ -154,7 +155,7 @@ class Array:
         self._xp = np if isinstance(self._array, np.ndarray) else cp
         self._dev_id = None if self._xp is np else self._array.device.id
         self._device = "cpu" if self._xp is np else f"cuda:{self._dev_id}"
-        self._dtype = str(self._array.dtype)
+        # self._dtype = str(self._array.dtype)
 
     @property
     def xp(self):
@@ -166,7 +167,7 @@ class Array:
 
     @property
     def dtype(self):
-        return self._dtype
+        return self._array.dtype
 
     @property
     def shape(self):
@@ -185,14 +186,14 @@ class Array:
         return Array(self._array.T, device=self._device)
 
     def astype(self, dtype):
-        if self._dtype == dtype:
+        if self.dtype == dtype:
             return self
         if self._xp is np:
             self._array = self._array.astype(dtype)
         else:
             with cp.cuda.Device(self._dev_id):
                 self._array = self._array.astype(dtype)
-        self._dtype = str(self._array.dtype)
+        # self._dtype = str(self._array.dtype)
         return self
     
     def to(self, device):
@@ -216,7 +217,7 @@ class Array:
                                                 tgt_dev=tgt_dev, 
                                                 tgt_dev_idx=tgt_dev_idx),
                          device=device, 
-                         dtype=self._dtype)
+                         dtype=self.dtype)
 
     def __parse_cuda_str(self, device_str):
         tgt_device = "cuda"
