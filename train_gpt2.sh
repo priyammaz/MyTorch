@@ -7,6 +7,7 @@ CUPYX_DISTRIBUTED_HOST="127.0.0.1"
 CUPYX_DISTRIBUTED_PORT="13333"
 FUSED=false
 MIXED_PRECISION=false
+LOG_WANDB=false
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -34,9 +35,12 @@ while [[ $# -gt 0 ]]; do
         --mixed_precision)
             MIXED_PRECISION=true
             ;;
+        --log_wandb)
+            LOG_WANDB=true
+            ;;
         *)
             echo "Error: Unknown argument: $1"
-            echo "Usage: $0 [owt|shakespeare] [--num_gpus N] [--host HOST] [--port PORT] [--triton_autotune] [--fused] [--mixed_precision]"
+            echo "Usage: $0 [owt|shakespeare] [--num_gpus N] [--host HOST] [--port PORT] [--triton_autotune] [--fused] [--mixed_precision] [--log_wandb]"
             exit 1
             ;;
     esac
@@ -66,6 +70,9 @@ fi
 if [[ "$MIXED_PRECISION" == true ]]; then
     EXTRA_ARGS+=" --mixed_precision"
 fi
+if [[ "$LOG_WANDB" == true ]]; then
+    EXTRA_ARGS+=" --log_wandb"
+fi
 
 case "$TARGET" in
     owt)
@@ -81,8 +88,8 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size 384 \
-            --gradient_accumulation_steps 12 \
+            --batch_size 64 \
+            --gradient_accumulation_steps 4 \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
