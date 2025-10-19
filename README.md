@@ -113,11 +113,7 @@ This will install a local version of NVCC into your Conda environment and you wi
 
 If you can't do this, then you need to make a system level update and change your Cuda Version following Nvidias documentations on the [Cuda Toolkit](https://developer.nvidia.com/cuda-toolkit)
 
-
-Installation is mostly simple, unless you want distributed training AND Triton Kernels for fused ops! The potential issue is that Triton has a Torch requirement and Torch has its own version of NCCL that can conflict with Cupy. So we just need to do the following:
-
 </details>
-
 
 <details>
 <summary><b><span style="font-size: 1.3em;">Step 4: Install Cupy and PyTorch</span></b></summary>
