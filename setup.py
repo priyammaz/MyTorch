@@ -1,4 +1,3 @@
-import os
 from setuptools import setup, find_packages
 
 # Base dependencies for mytorch
@@ -16,7 +15,7 @@ INSTALL_REQUIRES = [
 EXTRAS_REQUIRE = {
     "triton": [
         "torch>=2.0.0",
-        "triton==3.5",
+        "triton>3.3",
     ]
 }
 

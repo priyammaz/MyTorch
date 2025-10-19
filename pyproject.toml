@@ -26,7 +26,7 @@ dependencies = [
 [project.optional-dependencies]
 triton = [
     "torch>=2.0.0",
-    "triton==3.5",
+    "triton>3.3",
 ]
 
 [project.urls]
