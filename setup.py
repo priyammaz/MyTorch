@@ -27,7 +27,7 @@ setup(
     description="A package for GPU-accelerated training with CuPy and optional Triton kernels",
     url="https://github.com/priyammaz/MyTorch",
     packages=find_packages(),
-    python_requires=">=3.10,<3.14",
+    python_requircoes=">=3.10,<3.14",
     install_requires=INSTALL_REQUIRES,
     extras_require=EXTRAS_REQUIRE,
 )

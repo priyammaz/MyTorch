@@ -19,6 +19,8 @@ dependencies = [
     "tiktoken",
     "safetensors",
     "cupy-cuda12x",
+    "pyyaml",
+    "questionary",
 ]
 
 [project.optional-dependencies]
@@ -30,6 +32,9 @@ triton = [
 [project.urls]
 Homepage = "https://github.com/priyammaz/MyTorch"
 Repository = "https://github.com/priyammaz/MyTorch"
+
+[project.scripts]
+mytorchrun = "mytorch.cli:main"
 
 [tool.setuptools]
 packages = ["mytorch"]
