@@ -12,8 +12,9 @@ class no_grad:
         Tensor._build_graph = False
         return self
 
-    def __exit__(self):
+    def __exit__(self, exc_type, exc_val, exc_tb):
         Tensor._build_graph = self.old_state
+        # Returning False ensures exceptions inside the block are not suppressed
         return False
 
     def __call__(self, func):
@@ -21,7 +22,6 @@ class no_grad:
             with self:
                 return func(*args, **kwargs)
         return wrapper
-
 class Tensor:
     
     _build_graph = True
@@ -178,8 +178,15 @@ class Tensor:
 
         self._retain_grad = True
 
-    def backward(self, grad=None):
+    def backward(self, grad=None, retain_graph=False):
         
+        if retain_graph:
+            if not self._warn_retain_grad:
+                warnings.warn(
+                    "You are retaining graph, intermediate gradients may not be cleared!!"
+                )
+                self._warn_retain_grad = True
+
         # Initialize output gradient
         if grad is None:
             grad = ap.Array.ones_like(self.data, dtype=self.dtype, device=self.device)
@@ -211,15 +218,27 @@ class Tensor:
                 t.grad_fn(t.grad)  # accumulate into parents
                 
                 ### Drop references immediately ###
-                if not getattr(t, "_retain_grad", False):
-                    # Clear backward references so they can be GC'ed
+                retain_this = getattr(t, "_retain_grad", False) or retain_graph
+                
+                if not retain_this:
+                    # Clear backward references for GC
                     t.grad_fn = None
                     t._parents = None
 
-                    ### If we are not a leaf tensors, we dont need grad anymore either!
+                    # Non-leaf tensors don't need their grad anymore
                     if not t.is_leaf:
                         t.grad = None
 
+
+    ###################################
+    ######## BINARY OPERATIONS ########
+    ###################################
+
+    """
+    Binary operations are those that happen between two different Tensors!
+    Simple examples are Sum, Subtract, Mult, Div, MatMul, etc... These are all
+    operations that occur between two different inputs!
+    """
     def __add__(self, val):
 
         """
@@ -879,6 +898,14 @@ class Tensor:
 
         return self
 
+    ########################
+    ### UNARY OPERATIONS ###
+    ########################
+    
+    """
+    Unary operations are those that only have a single input. These are operations
+    that are performed on each element of the tensors independently. 
+    """
     def __pow__(self, exponent):
 
         """
@@ -911,6 +938,297 @@ class Tensor:
 
         return output
     
+    def exp(self):
+        """
+        Element-wise exponentiation of the base e.
+        O = e^A
+        dO/dA = e^A
+        """
+        out_data = np.exp(self.data)
+
+        def _exp_backward(input_grad):
+            if self.requires_grad:
+                self_grad = input_grad * out_data  # use forward output to save recomputation
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+
+                self_grad = None
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_exp_backward if requires_grad else None,
+            grad_fn_name="<ExpBackward>" if requires_grad else None,
+            device=self.device
+        )
+
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+    
+    def log(self):
+
+        """
+        Element-wise log with base e
+        O = log(A)
+        dO/dA = 1/a
+        """
+
+        output = np.log(self.data)
+   
+        def _log_backward(input_grad): 
+
+            if self.requires_grad:
+                self_grad = input_grad * (1/self.data)
+
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output, 
+                        requires_grad=requires_grad,
+                        grad_fn=_log_backward if requires_grad else None, 
+                        grad_fn_name="<LogBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+
+        return output
+
+    def abs(self):
+        """
+        Element-wise absolute value
+        O = |A|
+        dO/dA = sign(A) where sign(0) = 0
+        """
+        output = np.abs(self.data)
+        
+        def _abs_backward(input_grad):
+            if self.requires_grad:
+                print("WOW")
+                # Gradient is sign of input: 1 for positive, -1 for negative, 0 for zero
+                self_grad = input_grad * np.sign(self.data)
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_abs_backward if requires_grad else None,
+                        grad_fn_name="<AbsBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+        return output
+
+    def clamp(self, min_val=None, max_val=None):
+        """
+        Element-wise clamp (clip) values between min and max
+        O = clamp(A, min, max)
+        dO/dA = 1 if min <= A <= max, else 0
+        """
+        output = np.clip(self.data, min_val, max_val)
+        
+        def _clamp_backward(input_grad):
+            if self.requires_grad:
+                # Gradient is 1 where value is within bounds, 0 where clamped
+                mask = (self.data >= (min_val if min_val is not None else -np.inf)) & \
+                    (self.data <= (max_val if max_val is not None else np.inf))
+                self_grad = input_grad * mask
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_clamp_backward if requires_grad else None,
+                        grad_fn_name="<ClampBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+        return output
+
+    def sqrt(self):
+        """
+        Element-wise square root
+        O = sqrt(A)
+        dO/dA = 1 / (2 * sqrt(A))
+        """
+
+        if (self<0).any():
+            warnings.warn("sqrt operation received negative values, which will produce NaN", 
+                        RuntimeWarning)
+        
+        output = np.sqrt(self.data)
+        
+        def _sqrt_backward(input_grad):
+            if self.requires_grad:
+                # Gradient is 1 / (2 * sqrt(A))
+                self_grad = input_grad * (1 / (2 * np.sqrt(self.data)))
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_sqrt_backward if requires_grad else None,
+                        grad_fn_name="<SqrtBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+        return output
+
+    def sin(self):
+        """
+        Element-wise sine
+        O = sin(A)
+        dO/dA = cos(A)
+        """
+        output = np.sin(self.data)
+        
+        def _sin_backward(input_grad):
+            if self.requires_grad:
+                # Gradient is cos(A)
+                self_grad = input_grad * np.cos(self.data)
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_sin_backward if requires_grad else None,
+                        grad_fn_name="<SinBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+        return output
+
+    def cos(self):
+        """
+        Element-wise cosine
+        O = cos(A)
+        dO/dA = -sin(A)
+        """
+        output = np.cos(self.data)
+        
+        def _cos_backward(input_grad):
+            if self.requires_grad:
+                # Gradient is -sin(A)
+                self_grad = input_grad * (-np.sin(self.data))
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_cos_backward if requires_grad else None,
+                        grad_fn_name="<CosBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+        return output
+
+    def tan(self):
+        """
+        Element-wise tangent
+        O = tan(A)
+        dO/dA = sec^2(A) = 1/cos^2(A)
+        """
+        output = np.tan(self.data)
+        
+        def _tan_backward(input_grad):
+            if self.requires_grad:
+                # Gradient is sec^2(A) = 1/cos^2(A)
+                self_grad = input_grad * (1 / np.cos(self.data)**2)
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+        
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_tan_backward if requires_grad else None,
+                        grad_fn_name="<TanBackward>" if requires_grad else None,
+                        device=self.device)
+        
+        if requires_grad:
+            output._add_parents(self)
+        return output
+
+
+    ######################
+    ### COMPARISON OPS ###
+    ######################
+    """
+    These are non-differentiable ops that just let us do some
+    comparisons between tensors!
+    """
+    def _compare(self, other, op):
+        if isinstance(other, Tensor):
+            other_data = other.data
+        else:
+            other_data = other
+        return Tensor(op(self.data, other_data), requires_grad=False)
+
+    def __eq__(self, other):
+        return self._compare(other, lambda a, b: a == b)
+
+    def __ne__(self, other):
+        return self._compare(other, lambda a, b: a != b)
+
+    def __lt__(self, other):
+        return self._compare(other, lambda a, b: a < b)
+
+    def __le__(self, other):
+        return self._compare(other, lambda a, b: a <= b)
+
+    def __gt__(self, other):
+        return self._compare(other, lambda a, b: a > b)
+
+    def __ge__(self, other):
+        return self._compare(other, lambda a, b: a >= b)
+    
+    def any(self):
+        return self.xp.any(self.data._array)
+    
+    #####################################
+    ### INDEXING/RESHAPING OPERATIONS ###
+    #####################################
+    """
+    These operations involve either indexing a tensor or
+    reshaping them in some way!
+    """
     def __getitem__(self, idx):
         """
         Supports slices, ints, arrays, and tuple-of-arrays indexing.
@@ -963,11 +1281,9 @@ class Tensor:
         Performs in-place assignment on .data.
         Gradient is not tracked for item assignment (non-differentiable op).
         """
-        # --- Handle Tensor index ---
         if isinstance(idx, Tensor):
             idx = idx.data
 
-        # --- Handle list or tuple indices (possibly containing Tensors) ---
         if isinstance(idx, (list, tuple)):
             idx = tuple(
                 (i.data.astype(self.xp.int64) if isinstance(i, Tensor) else self.xp.array(i, dtype=self.xp.int64))
@@ -975,41 +1291,11 @@ class Tensor:
                 for i in idx
             )
 
-        # --- Handle Tensor value ---
         if isinstance(value, Tensor):
             value = value.data
 
-        # --- In-place assignment ---
         self.data[idx] = value
 
-    def _compare(self, other, op):
-        if isinstance(other, Tensor):
-            other_data = other.data
-        else:
-            other_data = other
-        return Tensor(op(self.data, other_data), requires_grad=False)
-
-    def __eq__(self, other):
-        return self._compare(other, lambda a, b: a == b)
-
-    def __ne__(self, other):
-        return self._compare(other, lambda a, b: a != b)
-
-    def __lt__(self, other):
-        return self._compare(other, lambda a, b: a < b)
-
-    def __le__(self, other):
-        return self._compare(other, lambda a, b: a <= b)
-
-    def __gt__(self, other):
-        return self._compare(other, lambda a, b: a > b)
-
-    def __ge__(self, other):
-        return self._compare(other, lambda a, b: a >= b)
-    
-    def __len__(self):
-        return self.shape[0]
-    
     def transpose(self, dim1, dim2):
         """
         Swap two dimensions of the tensor.
@@ -1101,6 +1387,59 @@ class Tensor:
   
         return out
     
+    def flatten(self, start_dim=0, end_dim=-1):
+        """
+        Flatten the tensor by reshaping it into a contiguous range of dimensions.
+
+        Args:
+            start_dim: first dimension to flatten (default: 0)
+            end_dim: last dimension to flatten (default: -1, meaning last dimension)
+
+        Gradients are reshaped back to the original shape during backprop.
+        """
+        # Handle negative indices
+        if end_dim < 0:
+            end_dim = self.data.ndim + end_dim
+        if start_dim < 0:
+            start_dim = self.data.ndim + start_dim
+
+        # Calculate new shape
+        if start_dim == 0 and end_dim == self.data.ndim - 1:
+            # Flatten everything
+            new_shape = (-1,)
+        else:
+            # Flatten only the specified range
+            new_shape = (
+                self.data.shape[:start_dim] +
+                (int(np.prod(self.data.shape[start_dim:end_dim+1])),) +
+                self.data.shape[end_dim+1:]
+            )
+
+        out_data = self.data.reshape(new_shape)
+
+        def _flatten_backward(input_grad):
+            if self.requires_grad:
+                self_grad = input_grad.reshape(self.data.shape)
+                if self.grad is None:
+                    self.grad = self_grad
+                else:
+                    self.grad += self_grad
+                self_grad = None
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_flatten_backward if requires_grad else None,
+            grad_fn_name="<FlattenBackward>" if requires_grad else None,
+            device=self.device
+        )
+
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+
     def unsqueeze(self, dim=0):
   
         out_data = np.expand_dims(self.data, axis=dim)
@@ -1175,73 +1514,78 @@ class Tensor:
             out._add_parents(self)
 
         return out
-
-    def exp(self):
-        """
-        Element-wise exponentiation of the base e.
-        O = e^A
-        dO/dA = e^A
-        """
-        out_data = np.exp(self.data)
-
-        def _exp_backward(input_grad):
-            if self.requires_grad:
-                self_grad = input_grad * out_data  # use forward output to save recomputation
-                if self.grad is None:
-                    self.grad = self_grad
-                else:
-                    self.grad += self_grad
-
-                self_grad = None
-
-        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-        out = Tensor(
-            out_data,
-            requires_grad=requires_grad,
-            grad_fn=_exp_backward if requires_grad else None,
-            grad_fn_name="<ExpBackward>" if requires_grad else None,
-            device=self.device
-        )
-
-        if requires_grad:
-            out._add_parents(self)
-
-        return out
     
-    def log(self):
+    def chunk(input, chunks, dim=0):
 
         """
-        Element-wise log with base e
-        O = log(A)
-        dO/dA = 1/a
+        Split a tensor into `chunks` along dimension `dim`.
+        Returns a list of Tensors.
+
+        to make this easy we use slices
+
+        a = ["a", "b", "c", "d", "e", "f", "g"]
+        a[1:3] = ["b", "c", "d"]
+        a[slice(1,3)] = ["b", "c", "d"]
         """
 
-        output = np.log(self.data)
-   
-        def _log_backward(input_grad): 
-
-            if self.requires_grad:
-                self_grad = input_grad * (1/self.data)
-
-                if self.grad is None:
-                    self.grad = self_grad
-                else:
-                    self.grad += self_grad
-
-                self_grad = None
+        size = input.shape[dim]
+        if size % chunks != 0:
+            raise ValueError(f"Cannot split dimension {dim} of size {size} into {chunks} equal chunks")
         
-        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-        output = Tensor(output, 
-                        requires_grad=requires_grad,
-                        grad_fn=_log_backward if requires_grad else None, 
-                        grad_fn_name="<LogBackward>" if requires_grad else None,
-                        device=self.device)
-        
-        if requires_grad:
-            output._add_parents(self)
+        chunk_size = size // chunks
+        out_tensors = []
 
-        return output
+        for i in range(chunks):
+            start, end = i * chunk_size, (i + 1) * chunk_size
 
+            # Slice the underlying array directly
+            idx = [slice(None)] * input.ndim
+            idx[dim] = slice(start, end)
+            slice_data = input.data[tuple(idx)]
+
+            def _chunk_backward(input_grad, start=start, end=end):
+                if input.requires_grad:
+                    grad = input.xp.zeros_like(input.data, dtype=input.data.dtype)
+                    
+                    # Ensure input_grad has the correct shape
+                    grad_slice_shape = list(grad.shape)
+                    grad_slice_shape[dim] = end - start
+                    grad_slice = input_grad.reshape(grad_slice_shape)
+
+                    # Insert gradient slice into the right position
+                    grad_idx = [slice(None)] * grad.ndim
+                    grad_idx[dim] = slice(start, end)
+                    grad[tuple(grad_idx)] = grad_slice
+
+                    # Accumulate gradients
+                    if input.grad is None:
+                        input.grad = grad
+                    else:
+                        input.grad += grad
+
+            requires_grad = input.requires_grad and Tensor.build_graph_enabled()
+            out = Tensor(
+                slice_data,
+                requires_grad=requires_grad,
+                grad_fn=_chunk_backward if requires_grad else None,
+                grad_fn_name="<ChunkBackward>" if requires_grad else None,
+                device=input.device
+            )
+
+            if requires_grad:
+                out._add_parents(input)
+
+            out_tensors.append(out)
+
+        return out_tensors
+
+    ############################
+    ### REDUCTION OPERATIONS ###
+    ############################
+    """
+    These operations compute some value across
+    one or more dimensions of a single tensor!
+    """
     def sum(self, dim=None, keepdims=False):
         """
         Sum across a dimension.
@@ -1489,7 +1833,13 @@ class Tensor:
             out._add_parents(self)
 
         return out
-    
+
+    #################
+    ### OTHER OPS ###
+    #################
+    """
+    These are just a collection of helpful operations that come in handy!
+    """
     def masked_fill(self, mask, value):
 
 
@@ -1626,7 +1976,9 @@ class Tensor:
     
     def numpy(self):
         return self.data.asnumpy()
-
+    
+    def __len__(self):
+        return self.shape[0]
 
 ##################################################################
 ### TENSOR FACTORY ###############################################

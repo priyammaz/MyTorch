@@ -37,69 +37,28 @@ def argmax(input, dim=None):
 def masked_fill(input, mask, value):
     return input.masked_fill(mask, value)
 
-### Additional Ops ###
+def abs(input):
+    return input.abs()
+
+def clamp(input, min, max):
+    return input.clamp(min, max)
+
+def sqrt(input):
+    return input.sqrt()
+
+def sin(input):
+    return input.sin()
+
+def cos(input):
+    return input.cos()
+
+def tan(input):
+    return input.tan()
+
 def chunk(input, chunks, dim=0):
-    """
-    Split a tensor into `chunks` along dimension `dim`.
-    Returns a list of Tensors.
+    return input.chunk(chunks=chunks, dim=dim)
 
-    to make this easy we use slices
-
-    a = ["a", "b", "c", "d", "e", "f", "g"]
-    a[1:3] = ["b", "c", "d"]
-    a[slice(1,3)] = ["b", "c", "d"]
-    """
-    size = input.shape[dim]
-    if size % chunks != 0:
-        raise ValueError(f"Cannot split dimension {dim} of size {size} into {chunks} equal chunks")
-    
-    chunk_size = size // chunks
-    out_tensors = []
-
-    for i in range(chunks):
-        start, end = i * chunk_size, (i + 1) * chunk_size
-
-        # Slice the underlying array directly
-        idx = [slice(None)] * input.ndim
-        idx[dim] = slice(start, end)
-        slice_data = input.data[tuple(idx)]
-
-        def _chunk_backward(input_grad, start=start, end=end):
-            if input.requires_grad:
-                grad = input.xp.zeros_like(input.data, dtype=input.data.dtype)
-                
-                # Ensure input_grad has the correct shape
-                grad_slice_shape = list(grad.shape)
-                grad_slice_shape[dim] = end - start
-                grad_slice = input_grad.reshape(grad_slice_shape)
-
-                # Insert gradient slice into the right position
-                grad_idx = [slice(None)] * grad.ndim
-                grad_idx[dim] = slice(start, end)
-                grad[tuple(grad_idx)] = grad_slice
-
-                # Accumulate gradients
-                if input.grad is None:
-                    input.grad = grad
-                else:
-                    input.grad += grad
-
-        requires_grad = input.requires_grad and Tensor.build_graph_enabled()
-        out = Tensor(
-            slice_data,
-            requires_grad=requires_grad,
-            grad_fn=_chunk_backward if requires_grad else None,
-            grad_fn_name="<ChunkBackward>" if requires_grad else None,
-            device=input.device
-        )
-
-        if requires_grad:
-            out._add_parents(input)
-
-        out_tensors.append(out)
-
-    return out_tensors
-
+### MultiTensor Ops ###
 def concatenate(tensors, dim=0):
 
     if len(tensors) == 0:
