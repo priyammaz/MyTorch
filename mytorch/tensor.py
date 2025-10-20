@@ -1,20 +1,26 @@
 import numpy as np
 import weakref
+from functools import wraps
 from contextlib import contextmanager
 import warnings
 from . import _array as ap
 from .dtypes import *
 
-@contextmanager
-def no_grad():
-    old_state = Tensor._build_graph
-    Tensor._build_graph = False
-    try:
-        # Yield is where we get the 'with' statement to execute
-        yield
-    finally:
-        # Finally ensures that no matter what the original _build_graph is restored
-        Tensor._build_graph = old_state
+class no_grad:
+    def __enter__(self):
+        self.old_state = Tensor._build_graph
+        Tensor._build_graph = False
+        return self
+
+    def __exit__(self):
+        Tensor._build_graph = self.old_state
+        return False
+
+    def __call__(self, func):
+        def wrapper(*args, **kwargs):
+            with self:
+                return func(*args, **kwargs)
+        return wrapper
 
 class Tensor:
     
@@ -43,6 +49,8 @@ class Tensor:
         self._is_leaf = self.requires_grad and (self.grad_fn is None)
         self._parents = ()
         self._version = 0
+        self._retain_grad = False
+        self._warn_retain_grad = False
 
     @property
     def xp(self):
@@ -158,10 +166,12 @@ class Tensor:
     
     def retain_grad(self):
         
-        if not self._warn_retaingrad:
+        if not self._warn_retain_grad:
             warnings.warn(
                 "You are retaining graph, intermediate gradients may not be cleared!!"
             )
+            self._warn_retain_grad = True
+
         ### Leaf Tensors always retain grad ###
         if self.is_leaf:
             return 
@@ -206,9 +216,10 @@ class Tensor:
                     t.grad_fn = None
                     t._parents = None
 
-            if not t.is_leaf:
-                t.grad = None
-  
+                    ### If we are not a leaf tensors, we dont need grad anymore either!
+                    if not t.is_leaf:
+                        t.grad = None
+
     def __add__(self, val):
 
         """
@@ -1628,19 +1639,23 @@ def _tensor_from_array(func, device="cpu", dtype=None, requires_grad=False):
     return Tensor(arr, device=device, dtype=dtype or str(arr.dtype), requires_grad=requires_grad)
 
 # Shape-based factories
-def zeros(shape, device="cpu", dtype=float32, requires_grad=False):
+def zeros(*shape, device="cpu", dtype=float32, requires_grad=False):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)): shape = shape[0]
     return _tensor_from_array(lambda: ap.Array.zeros(shape, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 
-def ones(shape, device="cpu", dtype=float32, requires_grad=False):
+def ones(*shape, device="cpu", dtype=float32, requires_grad=False):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)): shape = shape[0]
     return _tensor_from_array(lambda: ap.Array.ones(shape, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 
-def empty(shape, device="cpu", dtype=float32, requires_grad=False):
+def empty(*shape, device="cpu", dtype=float32, requires_grad=False):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)): shape = shape[0]
     return _tensor_from_array(lambda: ap.Array.empty(shape, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 
-def full(shape, fill_value, device="cpu", dtype=float32, requires_grad=False):
+def full(*shape, fill_value, device="cpu", dtype=float32, requires_grad=False):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)): shape = shape[0]
     return _tensor_from_array(lambda: ap.Array.full(shape, fill_value, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 # Sequences 
@@ -1660,11 +1675,13 @@ def tril(x, k=0, device="cpu", dtype=float32, requires_grad=False):
     return _tensor_from_array(lambda: ap.Array.tril(x.data, k=k, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 # Random arrays
-def randn(shape, device="cpu", dtype=float32, requires_grad=False):
+def randn(*shape, device="cpu", dtype=float32, requires_grad=False):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)): shape = shape[0]
     return _tensor_from_array(lambda: ap.Array.randn(shape, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 
-def rand(shape, device="cpu", dtype=float32, requires_grad=False):
+def rand(*shape, device="cpu", dtype=float32, requires_grad=False):
+    if len(shape) == 1 and isinstance(shape[0], (tuple, list)): shape = shape[0]
     return _tensor_from_array(lambda: ap.Array.rand(shape, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 
