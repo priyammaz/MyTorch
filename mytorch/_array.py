@@ -363,7 +363,7 @@ class Array:
         You can find more info here: https://numpy.org/doc/stable/reference/arrays.classes.html
 
         """
-
+        
         ### I am only building this assuming everything is of Array type ###
         if not all(issubclass(t, Array) for t in types):
             return NotImplemented
@@ -423,6 +423,7 @@ class Array:
         """
         Handle numpy/cupy ufuncs, enforcing device consistency.
         """
+        
         arrays = []
         devices = set()
 
