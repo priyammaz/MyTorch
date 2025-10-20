@@ -5,7 +5,7 @@ import mytorch
 import mytorch.nn as nn
 import mytorch.optim as optim
 from models.gpt2 import GPT2, GPT2Config
-from miniddp.accelerate import Accelerator
+from mytorch import Accelerator
 from tqdm import tqdm
 import pickle
 

@@ -58,7 +58,7 @@ fi
 
 if [[ "$NUM_GPUS" -gt 1 ]]; then
     DISTRIBUTED_ARGS="--num_gpus ${NUM_GPUS} --master_addr ${CUPYX_DISTRIBUTED_HOST} --master_port ${CUPYX_DISTRIBUTED_PORT}"
-    CMD="python -m mytorch.distributed.launch ${DISTRIBUTED_ARGS} --training_script"
+    CMD="python -m mytorch.distributed.launch ${DISTRIBUTED_ARGS}"
 else
     CMD="python"
 fi
