@@ -681,3 +681,4 @@ I am not even close to done! Here are some of the stuff I want to work on next t
   - [ ] Fused Kernel for KV Caching
 - [ ] Reimplement and Reproduce Llama
   - [ ] Rotary Embeddings
+- [ ] Benchmark Scripts to scope gains from Fused Ops
