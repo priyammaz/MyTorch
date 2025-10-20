@@ -3,14 +3,26 @@ requires = ["setuptools>=77", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "mytorch"
+name = "mytorch-core"
 version = "0.1.0"
-authors = [
-    {name = "Priyam Mazumdar"}
-]
+authors = [{ name = "Priyam Mazumdar", email="priyammazumdar1@gmail.com"}]
 description = "A package for GPU-accelerated training with CuPy and optional Triton kernels"
 readme = "README.md"
-requires-python = ">=3.8,<3.14"
+requires-python = ">=3.10,<3.14"
+keywords = ["deep learning", "gpu", "cupy", "triton", "torch", "ddp", "mixed_precision"]
+
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
 dependencies = [
     "requests",
     "datasets<4.0.0",
@@ -36,5 +48,5 @@ Repository = "https://github.com/priyammaz/MyTorch"
 [project.scripts]
 mytorchrun = "mytorch.cli:main"
 
-[tool.setuptools]
-packages = ["mytorch"]
+[tool.setuptools.packages.find]
+include = ["mytorch*"]
