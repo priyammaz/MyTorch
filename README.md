@@ -1,191 +1,578 @@
-<img src="src/banner.png" alt="drawing" width="600"/>
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/banner.png?raw=true" alt="drawing" width="600"/>
 
-## The Goal
+--------------------------------------------------------------------------------
 
-Build a relatively robust Deep Learning Framework that has the following feautures:
+The aim of MyTorch is to build a lightweight, readable and performant deep learning framework with the following features:
 
-- Automatic Differentiation for most common set of ops
-- Manual Differentiation for known groupings of ops
-- CPU/GPU support
-- Fused Kernels w/ Triton to make GPUs go brrrrr
-- Distributed training using Cupys NCCL Backend
-- Mixed Precision Training support with Dynamic Grad Scaling
-- Make it as educational as possible!
+- **Automatic Differentiation** for the most commonly used operations
+- **Manual Differentiation** support for known composites of operations to push performance
+- **CPU & GPU** support leveraging [Cupy](https://github.com/cupy/cupy) and [Numpy](https://github.com/numpy/numpy)
+- **Fused GPU Kernels** via [Triton](https://github.com/triton-lang/triton) to make GPUs go brrrrr
+- **Distributed training** using Cupys NCCL Backend for multi-GPU setups
+- **Mixed Precision Training** support in fp16 with dynamic gradient scaling for faster and memory efficient training
+- **Education Focus**: Try to be as readable as possible to be hackable and transparent!
+
+### Installation
+
+Installation is very easy! [STILL TESTING NOT ON PYPI YET!!!]
+
+```
+pip install mytorch-core
+```
+
+If you want fused GPU operations for maximum performance, you can install the optional Triton support. Triton relies on a minimal PyTorch dependency to manage devices and drivers, but you won’t need PyTorch for typical use:
+
+```
+pip install mytorch-core[triton]
+```
+
+## Usage
+
+### MyTorch Structure
+
+Using MyTorch will be nearly identical to PyTorch and Huggingface Accelerate! Here are some of the key features:
+
+<img src="src/high_level_structure.png" alt="drawing" width="600"/>
+
+
+### Array Module
+
+The ```mytorch.Tensor``` is a wrapper on our ```Array``` class. The ```Array``` is again just another wrapper that homogenizes ```Cupy``` and ```Numpy```. This allows us to use ```numpy``` method on tensors existing on the GPU, with the ```Array``` module automatically mapping to either Cupy or Numpy based on the device. 
+
+All learnable parameters will be a ```Tensor``` as we need the methods to do autograd. But other things like our gradients, optimizer states, etc... will just be ```Arrays``` as we don't need that extra machinery.  
+
+If you want to learn more about Numpy/Cupy array classes you can read about them [here](https://numpy.org/doc/stable/reference/arrays.classes.html)
+
+```python
+import mytorch
+a = mytorch.randn(1,2)
+print(a)
+# Output:
+# tensor([[-0.88644 -1.72318]], requires_grad=True)
+
+print(a.data)
+# Output:
+# Array([[-0.88644 -1.72318]], dtype=float32)
+```
 
 <details>
-<summary><b><span style="font-size: 2em;">Installation</span></b></summary>
 
-### Basic Setup 
+<summary>Numpy Operations on GPU (Cupy) Arrays</summary>
 
-We need to install cupy, conda makes this the easiest!
+This is a quick example showing how our ```Array``` module can pipe gpu or cpu tensors
+through cupy or numpy respectively! The reason this works is because Cupy is nearly identical in usage to numpy so all of the method names are the same! You can explore this in the ```mytorch/_array.py```
+
+```python
+import mytorch
+import numpy as np
+
+# Create a random tensor on GPU
+a = mytorch.randn(1,2, device="cuda")
+print(a)
+# Output
+# tensor([[0.41041 0.60190]], device=cuda:0)
+
+# The underlying .data is our `Array` Class
+print(a.data)
+# Output
+# Array([[0.41041 0.60190]], dtype=float32, device='cuda:0')
+
+# We can verify its type here that it is `Array`
+print(type(a.data))
+# Output
+# <class 'mytorch._array.Array'>
+
+# Each `Array` has an underlying ._array that is its numpy (if cpu) or cupy (if gpu)
+print(type(a.data._array))
+# Output
+# <class 'cupy.ndarray'>
+
+# We can use our np. methods even though it is a cupy (gpu) array underneath the hood!
+print(np.pow(a.data, 2))
+# Output
+# Array([[0.16844 0.36228]], dtype=float32, device='cuda:0')
 ```
-conda install -c conda-forge cupy cudnn cutensor nccl
-```
+</details>
 
-Just need a few other packages for our training scripts!
-```
-pip install requests "datasets<4.0.0" wandb requests tqdm tiktoken safetensors
-```
 
-With this you are ready for training, with support for mixed precision and distributed training!
+### Autograd
 
+```py
+a = mytorch.ones([1], requires_grad=True, device="cuda")
+b = 2 * a
+c = b**2
+c.backward()
+
+print("a.grad:", a.grad)
+# Output:
+# a.grad: Array([8.00000], dtype=float32, device='cuda:0')
+
+print("b.grad:", b.grad)
+# Output:
+# b.grad: None
+```
 <details>
-<summary><b><span style="font-size: 2em;">Advanced Setup for Fused Operations</span></b></summary>
 
-To access fused operations we need to install [Triton](https://github.com/triton-lang/triton) which defines all of our kernels! The main issue you will face is that Triton has a torch dependency, and torch comes with its own version of cuda. We need to ensure our cuda versions all match up so they don't conflict!
+<summary>Keep Non-Leaf Node Grads</summary>
 
-<details>
-<summary><b><span style="font-size: 1.3em;">Step 1: Check Your Max Supported Cuda Version</span></b></summary>
+In the example above, ```b.grad``` was None as it isn't a leaf node, so 
+we prune gradients automatically to conserve memory. If you need to see 
+the grads for intermediate operations you can either tag the specific outputs 
+you want with ```.retain_grad()```:
 
-Run the following
+
+```py
+import mytorch
+
+a= mytorch.ones([1], requires_grad=True, device="cuda")
+b = 2 * a
+c = b**2
+d = c*9
+
+# Retain grad specifically for B
+b.retain_grad()
+
+d.backward(retain_graph=True)
+
+print("a.grad:", a.grad)
+# Output:
+# a.grad: Array([8.00000], dtype=float32, device='cuda:0')
+
+print("b.grad:", b.grad)
+# Output:
+# b.grad: Array([36.00000], dtype=float32, device='cuda:0')
+
+print("c.grad:", c.grad)
+# Output:
+# b.grad: None
+
 ```
-nvidia-smi
+
+Or you can keep all of them by just specifing ```retain_graph=True``` in our ```.backward()```
+```py
+import mytorch
+
+a= mytorch.ones([1], requires_grad=True, device="cuda")
+b = 2 * a
+c = b**2
+d = c*9
+
+d.backward(retain_graph=True)
+
+print("a.grad:", a.grad)
+# Output:
+# a.grad: Array([8.00000], dtype=float32, device='cuda:0')
+
+print("b.grad:", b.grad)
+# Output:
+# b.grad: Array([36.00000], dtype=float32, device='cuda:0')
+
+print("c.grad:", c.grad)
+# Output:
+# b.grad: Array([9.00000], dtype=float32, device='cuda:0')
+
 ```
 
-You will see something like:
+</details>
+
+### Operations
+
+Autograd only works through creating a composite of known functions. Here are the current list of methods we support or work on supporting. If you need other methods just submit a PR!
+
+| **Binary Ops** | **Unary Ops** | **Reduction Ops** | **Indexing/Reshaping Ops** | **Other** |
+|----------------|---------------|-------------------|----------------------------|-----------|
+| Add | Exp | Sum | Indexing | Masked Fill|
+| Sub | Log | Mean | Transpose |Sort |
+| Mul | Abs | Var | Permute |Argsort|
+| Div | Clamp | Max | Reshape | |
+| Pow | Sqrt | Argmax | Flatten | |
+| Matmul | Sin | Cumsum | Squeeze | |
+| | Cos | | Unsqueeze | |
+| | Tan | | Concat| |
+| | Pow | | Stack| |
+| | | | Chunk| |
+
+### Tensor Factory
+
+Creating tensors is also crucial, the following are available from the tensor factory:
+
+| **Constant Initialization** | **Sequential/Special** | **Random Initialization** | **Like Operations** |
+|------------------------------|------------------------|---------------------------|---------------------|
+| zeros | arange | randn | zeros_like |
+| ones | linspace | rand | ones_like |
+| empty | eye | randint | empty_like |
+| full | tril | | full_like |
+| | | | randn_like |
+| | | | rand_like |
+
+### Modules
+
+No Deep Learning Framework would be complete without a set of modules! These are a collection of the most important modules we would expect to have (and those we would like to add in the future!) Treat this as a roadmap of stuff that is to come!
+
+| **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** |
+|---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
+| **Core Layers** | | | **Convolutions** | | | **Pooling** | | |
+| Linear | ✅ | ❌ | Conv1d | ✅ | ❌ | MaxPool2d | ✅ | ❌ |
+| Embedding | ✅ | ❌ | Conv2d | ✅ | ❌ | AvgPool2d | ✅ | ❌ |
+| Dropout | ✅ | ❌ | ConvTranspose1d | ✅ | ❌ | MaxPool1d | ❌ | ❌ |
+| | | | ConvTranspose2d | ✅ | ❌ | AvgPool1d | ❌ | ❌ |
+| | | | | | | AdaptiveAvgPool2d | ✅ | ❌ |
+| | | | | | | AdaptiveMaxPool2d | ❌ | ❌ |
+| | | | | | | Upsample | ❌ | ❌ |
+
+| **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** |
+|---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
+| **Normalization** | | | **Activations** | | | **Recurrent** | | |
+| LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ | RNN | ❌ | ❌ |
+| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ | LSTM | ❌ | ❌ |
+| BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ❌ | GRU | ❌ | ❌ |
+| GroupNorm | ❌ | ❌ | Softmax | ✅ | ✅ | RNNCell | ❌ | ❌ |
+| InstanceNorm | ❌ | ❌ | LeakyReLU | ❌ | ❌ | LSTMCell | ❌ | ❌ |
+| RMSNorm | ❌ | ❌ | Tanh | ❌ | ❌ | GRUCell | ❌ | ❌ |
+| | | | ELU | ❌ | ❌ | | | |
+| | | | SiLU/Swish | ❌ | ❌ | | | |
+| | | | Mish | ❌ | ❌ | | | |
+| | | | Softplus | ❌ | ❌ | | | |
+| | | | LogSoftmax | ❌ | ❌ | | | |
+
+| **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** |
+|---------------|----------|-----------|---------------|----------|-----------|
+| **Losses** | | | **Attention** | | |
+| CrossEntropyLoss | ✅ | ✅ | ScaledDotProduct | ✅ | ✅ |
+| MSELoss | ✅ | ❌ | SlidingWindowAttention | ❌ | ❌ |
+| BCELoss | ❌ | ❌ | | | |
+| BCEWithLogitsLoss | ❌ | ❌ | | | |
+| L1Loss | ❌ | ❌ | | | |
+| SmoothL1Loss | ❌ | ❌ | | | |
+| NLLLoss | ❌ | ❌ | | | |
+| KLDivLoss | ❌ | ❌ | | | |
+| HuberLoss | ❌ | ❌ | | | |
+| CosineEmbeddingLoss | ❌ | ❌ | | | |
+| TripletMarginLoss | ❌ | ❌ | | | |
+
+
+### How to Use
+These operations can be accessed much like in PyTorch:
+
+```python
+import mytorch.nn as nn
+
+linear = nn.Linear(2,2)
+print(linear)
+# Output:
+# Linear(in_features=2, out_features=2, bias=True)
+
+print(linear.weight)
+# Output
+# tensor([[ 0.00530  0.30852]
+#         [-0.16999  0.65585]], requires_grad=True)
+
+print(linear.bias)
+# Output
+# tensor([0.59509 0.53882], requires_grad=True)
+
+```
+
+### Fused Operations
+
+Optionally we will work on providing fused ```Triton``` kernels to accelerate training! To utilize this, please install with:
+
+```
+pip install mytorch-core[triton]
+```
+
+Fused operations will be accessible by adding in:
+
+```python
+import mytorch.nn as nn
+
+# Not Fused
+ln = nn.Layernorm(256)
+
+# Fused
+ln_fused = nn.LayerNorm(256, fused=True)
+```
+### Structuring a Model 
+
+Building a model is identical to PyTorch. 
+
+```python
+class MyTorchMNIST(nn.Module):
+
+    def __init__(self):
+        super().__init__()
+
+        self.fc1 = nn.Linear(784, 256)
+        self.drop1 = nn.Dropout(0.1)
+        self.fc2 = nn.Linear(512, 10)
+        self.activation = nn.ReLU()
+
+    def forward(self, x):
+        x = self.drop1(self.activation(self.fc1(x)))
+        x = self.fc2(x)
+        return x
+
+model = MyTorchMNIST()
+print(model)
+# Output
+# MyTorchMNIST(
+#   (fc1): Linear(in_features=784, out_features=256, bias=True)
+#   (drop1): Dropout(p=0.1)
+#   (fc2): Linear(in_features=512, out_features=10, bias=True)
+#   (activation): ReLU()
+# )
+
+```
+
+### Optimizers
+
+| **Optimizer** | **Impl** |
+|---------------|----------|
+| SGD | ✅ |
+| Adam | ✅ |
+| AdamW | ✅ |
+| RMSprop | ❌ |
+| Adagrad | ❌ |
+| Adadelta | ❌ |
+
+
+To access optimizers you can simply do:
+
+```python
+from mytorch.optim import AdamW
+
+# .. model definition above
+model = MyModel()
+optimizer = AdamW(model.parameters(), lr=0.001)
+```
+
+## DataLoader 
+
+Efficiently loading data is another part of training! You can do this by leveraging our MyTorch Dataloader!
+
+```python
+from mytorch.utils.data import Dataset, DataLoader
+
+dataset = # Define your dataset as you normally do in PyTorch
+loader = DataLoader(dataset, num_workers=8)
+
+### Optionall you can provide a collate_fn
+def collate_fn(batch):
+    ### ... do collation
+    return collated_data
+
+loader = DataLoader(dataset, num_workers=8, collate_fn=collate_fn)
+
+```
+
+## Accelerator
+
+To enable ```mixed-precision``` training and ```DDP```, you can leverage the Accelerator Class. This is to build something close to the [Huggingface Accelerator](https://huggingface.co/docs/accelerate/en/index)
+
+### Configure the Accelerator
+
+You need to setup the distributed environment for your specific system! If you pip installed ```MyTorch``` then you will be able to run this! If instead you pulled the git repo, you have a few other options.
+
+Run the following and answer the questions!
+```bash
+mytorchrun config
+```
+
+### Verify Environment 
+
+To make sure your environment is properly configured you can run the following and check for errors
+
+```
+mytorchrun test
+```
+
+### Use the Accelerator 
+
+In your training code you can just use the accelerator as follows:
+
+```python
+# training_script.py
+
+from mytorch.accelerate import Accelerator
+
+accelerator = Accelerator(gradient_accumulation_steps=gradient_accumulation_steps,
+                          mixed_precision=mixed_precision,
+                          log_wandb=log_wandb)
+
+model = SomeModel()
+optimizer = AdamW(model.parameters(), lr=0.001)
+loader = DataLoader(dataset)
+
+### Prepare for Training ###
+model, optimizer, loader = accelerator.prepare(model, optimizer, loader)
+
+completed_steps = 0
+for batch in loader:
+
+    loss = model(batch)
+
+    ### Auto accumulated grads if grad_accum_steps > 1
+    accelerator.backward(loss)
+
+    # Clip gradients (and get the grads to check on training health)
+    grad_norm = accelerator.clip_grad_norm_(args.max_grad_norm)
+
+    ### Only actually runs after a full accumulation is complete, otherwise no-ops
+    optimizer.step()
+    optimizer.zero_grad()
+
+    ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
+    if accelerator.sync_grad:
+
+        completed_steps += 1
+        
+        ### Returns the average loss across ALL GPUS if in distributed mode otherwise no-op
+        loss = accelerator.gather_for_metrics(loss)
+
+        ### Will only print on main device (GPU Rank 0)
+        accelerator.print(log_statement)
+
+        ### Log with Wandb if enabled ###
+        logging_dict = {"loss": loss}
+        accelerator.log(logging_dict, step=completed_steps)
+
+```
+
+### Checkpointing 
+
+A common operation we need is to checkpoint our model as it goes! This is made very simple with:
+
+```python
+accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
+```
+
+This will store a ```model.safetensors```, ```optimizer.bin``` and optionally an ```mp_config.bin``` if training in mixed precision mode.
+
+To resume training you can just do 
+
+```python
+accelerator.load_state(<PATH_TO_CHECKPOINT_DIR>)
+```
+
+### Launch Training for DDP
+
+To actually run this training script in DDP mode you need to do:
 
 ```bash
-+-----------------------------------------------------------------------------------------+
-| NVIDIA-SMI 570.86.10              Driver Version: 570.86.10      CUDA Version: 12.8     |
-|-----------------------------------------+------------------------+----------------------+
-| GPU  Name                 Persistence-M | Bus-Id          Disp.A | Volatile Uncorr. ECC |
-| Fan  Temp   Perf          Pwr:Usage/Cap |           Memory-Usage | GPU-Util  Compute M. |
-|                                         |                        |               MIG M. |
-|=========================================+========================+======================|
-|   0  NVIDIA RTX A6000               Off |   00000000:41:00.0 Off |                  Off |
-| 30%   46C    P8              7W /  300W |      19MiB /  49140MiB |      0%      Default |
-|                                         |                        |                  N/A |
-+-----------------------------------------+------------------------+----------------------+
-
+mytorchrun launch training_script.py
 ```
-
-In my case you see a ```CUDA Version 12.8```. Now this doesn't necessarily mean that Cupy and PyTorch will use Cuda Version 12.8, just that it is the max supported version for the installed driver! But keep this in mind as when we do install any version greater than this Cuda version!
-</details>
 
 <details>
-<summary><b><span style="font-size: 1.3em;">Step 2: Check Prebuilt PyTorch Installs</span></b></summary>
-We need to ensure that everything we install matches the PyTorch version we will also install. You can take a look at their installation page to see supported. Pick whatever Cuda version you want to install! As long as its <= to your ```nvidia-smi``` version from earlier it should work. 
+<summary>What if you are using MyTorch Git Repo?</summary>
+
+If you are just cloned the git repo you have two options!
+
+#### Install From Source
+
+```python
+pip install .
+```
+
+#### Use Full Path To DDP Launcher
+
+```
+python -m mytorch.distributed.launch --num_gpus 2--master_addr 127.0.0.1 --master_port 13333 training_script.py
+```
 
 </details>
-<details>
-<summary><b><span style="font-size: 1.3em;">Step 3: Check your NVCC Version</span></b></summary>
+<br>
 
-Run the following
-```
-nvcc --version
-```
 
-You should see something like
+## Train GPT2:
+
+Although this repo is educational, it also can be used for some serious training tasks! My GPT2 Implementation here is intended to be closely matched to [NanoGPT](https://github.com/karpathy/nanoGPT)
+
+### Train Tiny Shakespeare (10M Parameters)
+
+First we have to prepare the data
 
 ```bash
-nvcc: NVIDIA (R) Cuda compiler driver
-Copyright (c) 2005-2025 NVIDIA Corporation
-Built on Wed_Jan_15_19:20:09_PST_2025
-Cuda compilation tools, release 12.8, V12.8.61
-Build cuda_12.8.r12.8/compiler.35404655_0
+python prepare_data/prepare_shakespeare.py --path_to_save "data/shakespeare"
 ```
 
-In my case you see a that my NVCC Version is also 12.8 so it matches my Cuda version from ```nvidia-smi``` and I am using the latest version my drivers support! Yours could be less, your ```nvidia-smi``` version could be 12.6, but ```nvcc``` is using 12.4. This is totally fine, the version we want to use is our NVCC version for all of our installs going forward
-
-### Problems
-### Problem #1: What if NVCC Doesn't exist?
-
-It is possible that ```NVCC``` doesn't exist on your computer. If you didn't install the cuda-toolkit then you wouldn't have it.
-
-
-### Problem #2: What if my NVCC Cuda Version Doesn't Match the Cuda Version I Want from PyTorch?
-
-This is the more likely issue, that your system may be using a specific cuda version that PyTorch doesn't have a prebuilt wheel for. For example, if your NVCC is version 12.3, but PyTorch doensn't have a specific install for this. PyTorch doesn't really care about your systenms cuda version anyway as it installs its own binaries within the environment. But Cupy does use your NVCC version and a mismatch here would cause issues down the line if we don't have everything be the same!
-
-## Solution (You should do this anyway)
-
-### Easy
-
-As long as we are using Cuda versions starting at 12 (sorry 11.8 folks) then you get an easy fix
+And from there you can launch your training!
 ```
-conda install -c conda-forge cuda-nvcc cuda-version=<DESIRED_VERSION>
+bash train_gpt2.sh shakespeare 
 ```
 
-This will install a local version of NVCC into your Conda environment and you will be good to go! Just make your Desired Version to be whatever Cuda version you wanted from PyTorch. 
-
-
-### Hard(ish)
-
-If you can't do this, then you need to make a system level update and change your Cuda Version following Nvidias documentations on the [Cuda Toolkit](https://developer.nvidia.com/cuda-toolkit)
-
-</details>
-
-<details>
-<summary><b><span style="font-size: 1.3em;">Step 4: Install Cupy and PyTorch</span></b></summary>
-
-#### Install Cupy With Your Selected Cuda Version
+Optionally you can add the following tags:
 
 ```
-conda install -c conda-forge cupy cudnn cutensor nccl cuda-version=<DESIRED_VERSION>
+bash train_gpt2.sh shakespeare  --mixed_precision --fused --num_gpus 2 --log_wandb
 ```
 
-#### Install PyTorch With Your Selected Cuda Version 
+This should only take a few minutes and create a final checkpoint in ```work_dir/gpt2-small-shakespeare```
 
-This is an example, go to PyTorch to find your specific version [here](https://pytorch.org/get-started/locally/) or if you need an older cuda variant you can search [here](https://pytorch.org/get-started/previous-versions/)
+### Inference Tiny Shakespeare
 
-```
-pip install torch==2.7.1 --index-url https://download.pytorch.org/whl/cu128
-```
-
-You can opt not to install ```torchvision``` or ```torchaudio```. I do have a few examples using the MNIST dataset from ```torchvision``` so you can install it if you want!
-
-### Install Everything Else Like Before
+We can also go ahead and inference this model with:
 
 ```
-pip install requests "datasets<4.0.0" wandb requests tqdm tiktoken safetensors
+python inference_gpt2.py work_dir/gpt2-small-shakespeare/ --device cuda
 ```
 
-### Verify Triton Install
-
-Some PyTorch versions ship with ```Triton```, but some dont. Just incase you can install it with:
+Optionally you can add the following options:
 
 ```
-pip install triton
+python inference_gpt2.py work_dir/gpt2-small-shakespeare/ --device cuda --temperature 0.8 --topk 15
 ```
-</details>
-
-</details>
-
-</details>
 
 
-### Code Inspiration!
-- Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
-- [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!'
-- [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/train.py) is what much of the GPT2 scripts are based on!
+Sample Output:
 
-### Why Do We Care about AutoGrad?
+```
+KING RICHARD III:
+Alas! how my children!
+Whom I descend is hardly and for words?
+How far breath, he might have lost it call'd
+Our late's morning: if all confess excellens,
+Or in a safe brave falsehood, he's gone, to signify
+You take induce conferemonities.
 
-Autograd gives us the flexibility to compose any arbritary function, and given that each operation is defined with its derivative, we can perform automatic differentiation through the system!
+Think Waewarwick was with find fellow youse.
 
-Typical computations are:
-- adding
-- subtracting
-- multiplying
-- dividing
-- matrix multiplication
-- exponentiating
-- log
-- averaging
+WARWICK:
+Why then, the king is dead; whom we will obey.
 
-With these limited computations, we can represent a large class of functions! Take Sigmoid again for example:
+Messenger:
+My Lord of Norfolk, he urged in his soldier,
+He troubled with all frost.
 
-$$ sigmoid(x) = \frac{1}{1 + \exp(-x)} $$
+HENRY BOLINGBROKE:
+Welcome, my lord.
+```
 
-But really, this is just a combination of exponentiation, sum and division! So as long as we know the derivative of the three sub-operations in sigmoid, we can use chain rule to get the overall derivative of the entire function! Lets write the composition of functions here:
+### Train OpenWebText (124M Parameters)
 
-$$a(x) = e^{-x}$$
+Training a tiny GPT model isn't too much of a problem. What about training a GPT2-Base model?
 
-$$b(x) = 1 + a(x)$$
+### Prepare OpenWebText Dataset
 
-$$\sigma(x) = \frac{1}{b(x)}$$
+```bash
+# HF_HOME="<CACHE_DIR>" optionally set if you want to change default HF Cache directory
+python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
+```
 
-If you take the chain rule derivative of $\frac{d \sigma(x)}{d x}$ you will end up with the same formula as normal for the derivative of the Sigmoid function. 
+### Train on OpenWebText
+
+```python
+bash train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --log_wandb
+```
+
+My experiment was on a 4xGH100 Node training for about 3 days, reaching a roughly 2.95 loss  in about 125K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
+
+
+## Train ResNet
+
+#### Coming Soon
+
+
+### How does AutoGrad work?
 
 ### Computational Graph
 
@@ -204,8 +591,6 @@ We then go all the way back up again and then go down the yellow path, again goi
 
 This should remind you very closely of Depth-First Search 
 
-![DFS](https://upload.wikimedia.org/wikipedia/commons/7/7f/Depth-First-Search.gif)
-
 ### Example 2: Barriers to Gradient Propagation
 <img src="src/computational_graph_2.png" alt="drawing" width="500"/>
 
@@ -214,6 +599,10 @@ Depth first search is not exactly correct though. Lets look at this example! Jus
 This is why we track our children of every node. Until a node has exhasted all its children (i.e. all the paths have come to it) we cannot continue onwards. The light-blue node in this case has 2 children. Doing the top path will exhaust one of them, but we must complete the second path as well to exhast the second child. Therefore we gate our Depth First Search so we dont continue to propagate past a node that hasn't been fully exhasted!
 
 So now, we use the orange path to give our first gradient injection into the light-blue node and then work our way back up and then continue down the yellow path. Once the yellow path ends on the light-blue node, we can then propagate the gradient back again via the purple path and then green path for the final nodes. 
+
+### Topological Sort 
+
+##### CREATE VISUALS
 
 
 ### Blending AutoGrad and Manual Grad
@@ -250,623 +639,45 @@ def relu(x, auto=False):
         return out
 ```
 
-
-## Features
-
-### MyTorch is a Fully Autograd Based System
-
-I have implemented the most important operations, although theres always more! But you can use it like this:
-
-```python
-from mytorch import Tensor
-import cupy as cp 
-
-a = Tensor([1], requires_grad=True)
-b = a + 2
-c = b**2
-
-print(c)
-# Output:
-[9.], grad_fn=<PowBackward>, device=cuda:0
-
-c.backward()
-print(a.grad)
-# Output:
-[6.]
-
-```
-
-### MyTorch Basic Usage
-
-Just as a very simply explanation of the code, the heart of the AutoGrad system is found in the ```Tensor``` class found in ```mytorch.tensor```. These tensors have all of the operations defined above along with their derivatives and ability to store the computational graph! The entire Tensor class is just a wrapper on top of standard cupy operations, we just manually track the gradients for backpropagation!
-
-```python
-import cupy as cp
-import mytorch
-
-tensor = mytorch.Tensor(cp.array([1,2,3]), requires_grad=True)
-```
-
-The use of this should be pretty similar to vanilla PyTorch to make it as familiar as possible! A note, this examples requires the installation of ```torchvision``` but its easy enough to write a dataloader on this dataset that doesn't require any torch!
-
-```python
-import argparse
-import cupy as cp
-import numpy as np
-from tqdm import tqdm
-import mytorch 
-import mytorch.nn as nn
-import mytorch.optim as optim
-from mytorch.utils.data import DataLoader
-
-# Use PyTorch MNIST Class for Simplicity ###
-from torchvision.datasets import MNIST
-
-def main(args):
-
-    ### Prep Model ###
-    class MyTorchMNIST(nn.Module):
-
-        def __init__(self):
-            super().__init__()
-
-            self.fc1 = nn.Linear(784, 512)
-            self.drop1 = nn.Dropout(0.1)
-            self.fc2 = nn.Linear(512, 256)
-            self.drop2 = nn.Dropout(0.1)
-            self.fc3 = nn.Linear(256, 128)
-            self.drop3 = nn.Dropout(0.1)
-            self.fc4 = nn.Linear(128, 10)
-
-            self.activation = nn.ReLU()
-
-        def forward(self, x):
-
-            x = self.drop1(self.activation(self.fc1(x)))
-            x = self.drop2(self.activation(self.fc2(x)))
-            x = self.drop3(self.activation(self.fc3(x)))
-            x = self.fc4(x)
-
-            return x
-        
-    model = MyTorchMNIST()
-    model = model.to("cuda")
-
-    ### Prep Dataset ###
-    train = MNIST("../../data", train=True, download=True)
-    test = MNIST("../../data", train=False, download=True)
-
-    def collate_fn(batch):
-
-        ### Prep and Scale Images ###
-        images = cp.stack([cp.array(i[0]).reshape(28*28)for i in batch]) / 255
-
-        ### One Hot Encode Label (MNIST only has 10 classes) ###
-        labels = [i[1] for i in batch]
-
-        images = mytorch.Tensor(images).astype(cp.float32)
-        labels = mytorch.Tensor(labels)
-
-        return images, labels
-
-    trainloader = DataLoader(train, batch_size=args.batch_size, collate_fn=collate_fn, num_workers=2)
-    testloader = DataLoader(test, batch_size=args.batch_size, collate_fn=collate_fn, num_workers=2)
-
-    ### Prep Optimizer ###
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-
-    ### Prep Loss Function ###
-    loss_fn = nn.CrossEntropyLoss()
-
-    ### Train Model for 10 Epochs ###
-    for epoch in range(args.epochs):
-
-        print(f"Training Epoch {epoch}")
-
-        train_loss, train_acc = [], []
-        eval_loss, eval_acc = [], []
-
-        model.train()
-        for images, labels in tqdm(trainloader):
-            
-            ### Set on correct device ###
-            images, labels = images.to("cuda"), labels.to("cuda")
-
-            ### Pass Through Model ###
-            pred = model(images)
-            
-            ### Compute Loss ###
-            loss = loss_fn(pred, labels)
-
-            ### Compute Accuracy ###
-            predicted = pred.argmax(dim=-1)
-            accuracy = (predicted == labels).sum() / len(predicted)
-
-            ### Log Results ###
-            train_loss.append(loss.item())
-            train_acc.append(accuracy.item())
-            
-            ### Update Model ###
-            loss.backward()
-            optimizer.step()
-            optimizer.zero_grad()
-
-
-        model.eval()
-        for images, labels in tqdm(testloader):
-            
-            ### Set on correct device ###
-            images, labels = images.to("cuda"), labels.to("cuda")
-
-            with mytorch.no_grad():
-                ### Pass Through Model ###
-                pred = model(images)
-                
-            ### Compute Loss ###
-            loss = loss_fn(pred, labels)
-
-            ### Compute Accuracy ###
-            predicted = pred.argmax(dim=-1)
-            accuracy = (predicted == labels).sum() / len(predicted)
-
-            eval_loss.append(loss.item())
-            eval_acc.append(accuracy.item())
-
-        print(f"Training Loss: {np.mean(train_loss)}")
-        print(f"Eval Loss: {np.mean(eval_loss)}")
-        print(f"Training Acc: {np.mean(train_acc)}")
-        print(f"Eval Acc: {np.mean(eval_acc)}")
-
-    
-```
-
-### Convolutions
-
-An important architecture for lots of architectures is the convolution! Although we can't reach max throughput on convolution ops like custom cuda kernels can, we can get close using the Im2Col/Col2Im algorithm! They work the same way as pytorch!
-
-```python
-class ConvNet(nn.Module):
-
-    def __init__(self):
-        super().__init__()
-
-        self.conv1 = nn.Conv2d(in_channels=3, 
-                               out_channels=32, 
-                               kernel_size=3,
-                               stride=2, 
-                               padding=1)
-
-        self.bn1 = nn.BatchNorm2d(32)
-        self.drop1 = nn.Dropout(0.1)
-
-        self.conv1 = nn.Conv2d(in_channels=3, 
-                               out_channels=32, 
-                               kernel_size=3,
-                               stride=2, 
-                               padding=1)
-                               
-        self.bn1 = nn.BatchNorm2d(32)
-        self.drop1 = nn.Dropout(0.1)
-
-        self.conv2 = nn.Conv2d(in_channels=3, 
-                               out_channels=32, 
-                               kernel_size=3,
-                               stride=2, 
-                               padding=1)
-                               
-        self.bn2 = nn.BatchNorm2d(32)
-        self.drop2 = nn.Dropout(0.1)
-        
-        ...
-
-    def forward(self, x):
-        
-        # Standard Forward Definition 
-        ...
-
-
-```
-
-### Transformers
-
-Well we have linear layers, we may as well build a transformer! And that works out too! For example here is the attention mechanism, but you can find mroe in ```models/gpt2.py```
-
-```python
-class Attention(nn.Module):
-
-    def __init__(self, embed_dim, num_heads, attn_dropout_p=0.1):
-        super().__init__()
-        ### Sanity Checks ###
-        assert embed_dim % num_heads == 0, "Double check embedding dim divisible by number of heads"
-
-        ### Attention Head Dim ###
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-
-        ### Attention Projections ###
-        self.q_proj = nn.Linear(embed_dim, embed_dim)
-        self.k_proj = nn.Linear(embed_dim, embed_dim)
-        self.v_proj = nn.Linear(embed_dim, embed_dim)
-        self.softmax = nn.Softmax()
-        self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p)
-
-        ### Post Attention Projection ###
-        self.out_proj = nn.Linear(embed_dim, embed_dim)
-        self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
-        
-
-    def forward(self, x, attention_mask=None):
-     
-        ### Store Shape ###
-        batch, seq_len, embed_dim = x.shape
-
-        ### Flatten Batch and Seq Len Dimension ###
-        x = x.reshape(batch*seq_len, embed_dim)
-   
-        ### Compute Attention with Flash Attention ###
-        q = self.q_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        k = self.k_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-        v = self.v_proj(x).reshape(batch, seq_len, self.num_heads, self.head_dim).transpose(1,2)
-       
-        ### Compute Attention (Attention Mask has shape Batch x Sequence len x Sequence len) ###
-        scores = (q @ k.transpose(-2, -1)) / self.head_dim**0.5
-    
-        ### Add attention mask if it exists ###
-        if attention_mask is not None:
-            scores += attention_mask
-     
-        attention = self.softmax(scores, dim=-1)
-        attention = self.attn_drop(attention)
-
-        output = attention @ v
-        output = output.transpose(1,2).reshape(batch*seq_len, embed_dim)
-        
-        ### Compute Output Projection (on flattened dimension) ###
-        output = self.out_proj(output)
-        output = self.proj_drop(output)
-
-        output = output.reshape(batch, seq_len, embed_dim)
-        
-        return output
-```
-
-### Distributed Training
-
-If you got multiple GPUs why not use them? Here is a wrapper like [Huggingface Accelerate](https://huggingface.co/docs/accelerate/en/index) to allow you to train on multiple GPUs (given you are on the same node!). This is possible due to CuPy and its support for NCCL!
-
-```python
-... 
-from miniddp.accelerate import Accelerator
-accelerator = Accelerator()
-
-class MyTorchMNIST(nn.Module):
-    def __init__(self):
-        super().__init__()
-        
-        self.fc1 = nn.Linear(784, 512)
-        self.drop1 = nn.Dropout(0.1)
-        self.fc2 = nn.Linear(512, 10)
-        self.activation = nn.ReLU()
-
-    def forward(self, x):
-        x = self.drop1(self.activation(self.fc1(x)))
-        x = self.drop2(self.activation(self.fc2(x)))
-        x = self.fc4(x)
-        return x
-
-model = MyTorchMNIST()
-accelerator.print(model) # Only prints on main rank
-
-train = MNIST("../../data", train=True, download=False)
-
-def collate_fn(batch):
-    images = np.concatenate([np.array(i[0]).astype(np.float32).reshape(1,784) for i in batch]) / 255
-    labels = np.array([i[1] for i in batch])
-    return images, labels
-
-trainloader = DataLoader(train, batch_size=16, collate_fn=collate_fn, num_workers=2)
-optimizer = optim.Adam(model.parameters(), lr=0.001)
-loss_fn = nn.CrossEntropyLoss()
-
-### Prepares everything for DDP ###
-model, optimizer, trainloader, testloader = accelerator.prepare(
-    model, optimizer, trainloader, testloader
-) 
-
-for epoch in range(NUM_EPOCHS):
-
-    model.train()
-    for images, labels in tqdm(trainloader, disable=not accelerator.is_main_process()):
-        images = mytorch.Tensor(images)
-        labels = mytorch.Tensor(labels)
-
-        pred = model(images)
-        loss = loss_fn(pred, labels)
-
-        # Backward w/ all_gather ops
-        accelerator.backward(loss)
-        optimizer.step()
-        optimizer.zero_grad()
-
-        train_loss.append(accelerator.gather_for_metrics(loss))
-```
-
-### Mixed Precision Training
-
-We can half our memory cost if we train in mixed precision. This has been supported with dynamic grad scaling in our Accelerator class, so you can enable it like so:
-
-```python
-accelerator = Accelerator(mixed_precision=True)
-```
-
 ### Fused Operations
 
-One of the most expensive parts of training on GPUs is moving data around. This means if we have multiple operations to complete a task (i.e. softmax has an exponentiation, a sum, and a division), each op will trigger a kernel. It is much better to just copy the data once, do all the work right then and there and then copy the data back! Therefore we can use Triton Kernels to interact directly with CUDA pointers from our Cupy tensors. Fused operations are currently implemented for the following ops:
+Many of our operations are just multiple ops happening back to back. In Softmax for example, on a specific vector of logits we do:
 
-```python
-import mytorch.nn as nn
-import mytorch.nn.functional as F
+1) Find max of vector
+2) Subtract max from vector
+3) exp every element in vector
+4) add together our exponentiated vector
+5) divide every element by this sum
 
-# Softmax
-softmax = nn.SoftMax(fused=True)
+Each of these operations will be an individual kernel launch on our GPU. The issue is that, GPUs may be fast, but moving data around on the GPU is typically the bottleneck for many of these operations. 
 
-# CrossEntropy 
-loss_fn = nn.CrossEntropy(fused=True)
+Fused operations follow a simple idea, why not copy all the data once, do all the work there, and then copy back? And that is exactly what we do! Traditionally this meant writing Cuda Kernels, but you can get high performance GPU kernels pretty easily with [Triton](https://triton-lang.org/main/index.html)
 
-# LayerNorm
-ln = nn.LayerNorm(embed_dim, fused=True)
+Triton is not too challenging to learn, it just needs some practice! I think my fused softmax at [```mytorch/nn/fused_ops/softmax.py```](mytorch/nn/fused_ops/softmax.py) is a great place to start, as you will see the differences immediately!
 
-# Flash Attention 
-attn = F.scaled_dot_product_attention(q, k, v, causal=True)
+### Code Inspiration!
+- Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
+- [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!'
+- [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/train.py) is what much of the GPT2 scripts are based on!
 
-```
+### Plans for this Repo
 
-Optionally you can trigger Tritons Autotune to have it automatically benchmark different block sizes by setting the environmental variable. 
+I am not even close to done! Here are some of the stuff I want to work on next to keep this going!
 
-```
-export TRITON_FLASH_AUTOTUNE_MODE="max" # "none", "medium", "max"
-```
-
-## Train GPT2
-
-We can now train a GPT2 Type model! Lets first prep the data
-
-### Prep Datasets
-
-If you want to train a character level model on the Shakespeare dataset you can run:
-
-```bash
-python prepare_data/prepare_shakespeare.py --path_to_save "data/shakespeare"
-```
-
-Similarly, if you want to prepare openwebtext you can run
-
-```bash
-# HF_HOME="<CACHE_DIR>" optionally set if you want to change default HF Cache directory
-python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
-```
-
-### Train Tiny GPT2 
-
-You can either use my default training script that you can find at ```train_gpt2.sh``` (which assumes you have the advanced install with Triton):
-
-```bash
-bash train_gpt2.sh shakespeare
-```
-
-And optionally if you want to test multiple GPUs you can do:
-
-```bash
-bash train_gpt2.sh shakespeare --distributed --num_gpus 2
-```
-
-Or if you want total control just update this script accordingly:
-
-```bash
-python -m mytorch.distributed.launch --num_gpus ${NUM_GPUS} --training_script train_gpt2.py \
-    --project_name gpt2-small-shakespeare \
-    --working_directory work_dir \
-    --context_length 256 \
-    --model_size small \
-    --dropout_p 0.2 \
-    --fused \ # Disable if you dont have Triton installed
-    --path_to_data data/shakespeare \
-    --train_iterations 2500 \
-    --eval_interval 1000 \
-    --eval_iterations 200 \
-    --batch_size 32 \
-    --gradient_accumulation_steps 1 \
-    --max_lr 1e-3 \
-    --min_lr 1e-4 \
-    --warmup_steps 500 \
-    --weight_decay 0.1 \
-    --max_grad_norm 1.0 \
-    --beta1 0.9 \
-    --beta2 0.95 \
-    --mixed_precision \ # Disable if you want to do float32 training
-    --log_iter 25
-```
-
-This should only take a few minutes to train! Of course we want to use this model, so you will see that a checkpoint has been created at ```work_dir/gpt2-small_shakesepare```, so the inference script will load the final_checkpoint from there automatically!
-
-```bash
-python inference_gpt2.py work_dir/gpt2-small-shakespeare
-```
-
-You can optionally pass in the following arguments:
-
-```bash
-python inference_gpt2.py work_dir/gpt2-small-shakespeare --device cuda --topk 15 --temperature 0.8 --max_tokens_gen 512
-```
-
-
-### Train GPT2 Base
-
-Similarly you can start a training run on GPT2-base like so:
-
-```bash
-bash train_gpt2.sh shakespeare --distributed --num_gpus 4
-```
-
-Or to have full control you can use:
-
-```bash
-python -m mytorch.distributed.launch --num_gpus ${NUM_GPUS} --training_script train_gpt2.py \
-    --project_name gpt2-base-owt \
-    --working_directory work_dir \
-    --checkpoint_iterations 10000 \
-    --always_save_checkpoint \
-    --context_length 1024 \
-    --model_size base \
-    --dropout_p 0.0 \
-    --fused \
-    --path_to_data data/openwebtext \
-    --train_iterations 600000 \
-    --eval_interval 1000 \
-    --eval_iterations 200 \
-    --batch_size 96 \
-    --gradient_accumulation_steps 6 \
-    --max_lr 6e-4 \
-    --min_lr 6e-5 \
-    --warmup_steps 2000 \
-    --weight_decay 0.1 \
-    --max_grad_norm 1.0 \
-    --beta1 0.9 \
-    --beta2 0.95 \
-    --mixed_precision \
-    --log_iter 25 \
-    --log_wandb
-```
-
-## Currently Implementeds Ops
-
-### Tensor Arithmetic
-| Operation        | Implemented |
-|------------------|-------------|
-| Add              | ✅          |
-| Subtraction      | ✅          |
-| Multiplication   | ✅          |
-| Division         | ✅          |
-| Power            | ✅          |
-| Matmul           | ✅          |
-
-### Reductions & Stats
-| Operation    | Implemented |
-|--------------|-------------|
-| Sum          | ✅          |
-| Mean         | ✅          |
-| Var          | ✅          |
-| Max          | ✅          |
-| Argmax       | ✅          |
-
-### Indexing & Reshaping
-| Operation    | Implemented |
-|--------------|-------------|
-| Indexing     | ✅          |
-| Equality     | ✅          |
-| Transpose    | ✅          |
-| Permute      | ✅          |
-| Reshape      | ✅          |
-| **Flatten**  | ✅          |
-| **Squeeze**  | ✅          |
-| **Unsqueeze**  | ✅        |
-| **Sort**      | ✅        |
-| **ArgSort**      | ✅        |
-| **Concatenate** | ✅       |
-| **Stack** | ✅       |
-| **Chunk**     | ✅         |
-
-### Pointwise Functions
-| Operation    | Implemented |
-|--------------|-------------|
-| Exp          | ✅          |
-| Log          | ✅          |
-| Abs          | ❌          |
-| Clamp          | ❌          |
-| Sqrt          | ❌          |
-| sin          | ❌          |
-| cos          | ❌          |
-| tan          | ❌          |
-| tanh          | ❌          |
-
-## Implemented Layers
-### Core Layers
-| Operation   | Impl | Auto Backward | Manual Backward |
-|-------------|------|---------------|-----------------|
-| Linear      | ✅   | ✅            | ✅              |
-| Embedding   | ✅   | ✅            | 🚫              |
-| Dropout     | ✅   | ✅            | ✅              |
-
-### Convolutions & Pooling
-| Operation         | Impl (All Manual Backward) | 
-|-------------------|------|
-| Conv2d            | ✅   |          
-| ConvTranspose2d   | ✅   |            
-| Conv1d            | ✅   |            
-| ConvTranspose1d   | ✅   |            
-| MaxPool2d         | ✅   |           
-| AvgPool2d         | ✅   |           
-| AdaptiveAvgPool2d | ✅   |
-| Upsample / Interp | ❌   |         
-
-### Normalization
-| Operation   | Impl | Auto Backward | Manual Backward |
-|-------------|------|---------------|-----------------|
-| LayerNorm   | ✅   | ✅            | ✅              |
-| BatchNorm   | ✅   | ❌            | ✅              |
-
-### Activations
-| Operation   | Impl | Auto Backward | Manual Backward |
-|-------------|------|---------------|-----------------|
-| Sigmoid     | ✅   | ✅            | ✅              |
-| ReLU        | ✅   | ✅            | ✅              |
-| GeLU        | ✅   | 🚫            | ✅              |
-| Softmax     | ✅   | ✅            | ✅              |
-| LeakyReLU   | ❌   | ❌            | ❌              |
-| Tanh        | ❌   | ❌            | ❌              |
-
-### Losses
-| Operation        | Impl | Auto Backward | Manual Backward |
-|------------------|------|---------------|-----------------|
-| CrossEntropyLoss | ✅   | ✅            | ✅              |
-| MSELoss          | ✅   | ✅            | ✅              |
-
-### Recurrent
-| Operation | Impl | Auto Backward | Manual Backward |
-|-----------|------|---------------|-----------------|
-| RNNCell   | ❌   | ❌            | ❌              |
-| LSTMCell  | ❌   | ❌            | ❌              |
-| GRUCell   | ❌   | ❌            | ❌              |
-
-### Tensor Factory
-
-| Operation         | Impl |
-|------------------|------|
-| zeros             | ✅    |
-| ones              | ✅    |
-| empty             | ✅    |
-| full              | ✅    |
-| arange            | ✅    |
-| linspace          | ✅    |
-| eye               | ✅    |
-| tril              | ✅    |
-| triu              | ❌    |
-| randn             | ✅    |
-| rand              | ✅    |
-| randint           | ✅    |
-| randn_like        | ✅    |
-| rand_like         | ✅    |
-| zeros_like        | ✅    |
-| ones_like         | ✅    |
-| empty_like        | ✅    |
-| full_like         | ✅    |
-
-## Things I Want to Add
-- [ ] Triton Kernels for Convolutions/TransposeConvolutions (1d/2d)
-- [ ] Add Dropout to Flash Attention
-- [ ] Add Grouped Query Attention to Flash Attention
-- [ ] Add Variable Attention Masks to Flash Attention
-- [ ] Add KV-Cache For inference type
-- [ ] Rotary Embeddings
-- [ ] Fused Linear Layers with Tiled MatMuls
+- [ ] Convolutions
+    - [ ] Fused Conv2d/TransposeConv2d
+    - [ ] Fused Conv1d/TransposeConv1d
+- [ ] Pooling
+  - [ ] Fused MaxPool/AvgPool
+- [ ] Fused Linear Layer w/ Block MatMul and Bias
+- [ ] Fused Embedding Layer
+- [ ] Flash Attention
+  - [ ] Add Dropout
+  - [ ] Add Cross Attention
+  - [ ] Add custom attention masks
+  - [ ] Add Sliding Window Attention
+  - [ ] Add Grouped Query Attention
+- [ ] KV Cache for Inference
+  - [ ] Fused Kernel for KV Caching
+- [ ] Reimplement and Reproduce Llama
+  - [ ] Rotary Embeddings
