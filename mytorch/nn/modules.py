@@ -494,12 +494,12 @@ class Conv2d(Module):
         self.bias = bias
 
         # Kaiming initialization (like PyTorch default for conv2d)
-        self.weight = zeros(shape=(out_channels, in_channels, kernel_size, kernel_size), requires_grad=True)
+        self.weight = zeros((out_channels, in_channels, kernel_size, kernel_size), requires_grad=True)
         init.kaiming_uniform_(self.weight)
 
         if bias:
             self.use_bias = True
-            self.bias = zeros(shape=(out_channels,), requires_grad=True)
+            self.bias = zeros((out_channels,), requires_grad=True)
         else:
             self.use_bias = False
             self.bias = None
