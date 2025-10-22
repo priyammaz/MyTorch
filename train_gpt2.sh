@@ -7,6 +7,7 @@ CUPYX_DISTRIBUTED_HOST="127.0.0.1"
 CUPYX_DISTRIBUTED_PORT="13333"
 FUSED=false
 MIXED_PRECISION=false
+DLPACK_DISABLE=false
 LOG_WANDB=false
 
 while [[ $# -gt 0 ]]; do
@@ -35,12 +36,15 @@ while [[ $# -gt 0 ]]; do
         --mixed_precision)
             MIXED_PRECISION=true
             ;;
+        --disable_dlpack)
+            DLPACK_DISABLE=true
+            ;;
         --log_wandb)
             LOG_WANDB=true
             ;;
         *)
             echo "Error: Unknown argument: $1"
-            echo "Usage: $0 [owt|shakespeare] [--num_gpus N] [--host HOST] [--port PORT] [--triton_autotune] [--fused] [--mixed_precision] [--log_wandb]"
+            echo "Usage: $0 [owt|shakespeare] [--num_gpus N] [--host HOST] [--port PORT] [--triton_autotune] [--fused] [--mixed_precision] [--disable_dlpack] [--log_wandb]"
             exit 1
             ;;
     esac
@@ -54,6 +58,9 @@ fi
 
 if [[ "$TRITON_AUTOTUNE" == true ]]; then
     export TRITON_FLASH_AUTOTUNE_MODE="max"
+fi
+if [[ "$DLPACK_DISABLE" == true ]]; then
+    export DLPACK_DISABLE="true"
 fi
 
 if [[ "$NUM_GPUS" -gt 1 ]]; then
