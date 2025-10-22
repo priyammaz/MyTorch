@@ -3,10 +3,12 @@ Inspired by Unsloth: https://github.com/unslothai/unsloth/blob/main/unsloth/kern
 
 Also, CrossEntropy is typically unsafe at float16, so these modules expect float32 inputs always!
 """
+import torch
 import cupy as cp
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
+from .flags import DLPACK_DISABLE
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
@@ -157,27 +159,57 @@ def cross_entropy_backward(
     # Store to correct location
     tl.store(grad_ptr + col_offsets, y, mask=mask)
 
-def fused_cross_entropy_forward(logits, labels):
+def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
     N, C = logits.shape
-    loss = cp.zeros(N, dtype=cp.float32)
-    logsumexp = cp.zeros(N, dtype=cp.float32)
-
     BLOCK_SIZE = triton.next_power_of_2(C)
 
-    row_stride = logits.strides[0] // logits.itemsize
+    if not DLPACK_DISABLE and use_dlpack:
 
-    grid = (N,)
-    cross_entropy_forward[grid](
-            logits.data.ptr, 
+        logits = torch.utils.dlpack.from_dlpack(logits)
+        labels = torch.utils.dlpack.from_dlpack(labels)
+    
+        N, C = logits.shape
+        loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
+        logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
+
+        BLOCK_SIZE = triton.next_power_of_2(C)
+        row_stride = logits.stride(0)
+
+        grid = (N,)
+        cross_entropy_forward[grid](
+            logits, 
             row_stride, 
-            loss.data.ptr, 
-            logsumexp.data.ptr, 
-            labels.data.ptr, 
+            loss, 
+            logsumexp, 
+            labels, 
             C, 
             BLOCK_SIZE
-    )       
+        )
+        
+        # Convert back to CuPy
+        loss = cp.from_dlpack(loss)
+        logsumexp = cp.from_dlpack(logsumexp)
+        return loss, logsumexp
     
-    return loss, logsumexp
+    else:
+
+        loss = cp.zeros(N, dtype=cp.float32)
+        logsumexp = cp.zeros(N, dtype=cp.float32)
+
+        row_stride = logits.strides[0] // logits.itemsize
+
+        grid = (N,)
+        cross_entropy_forward[grid](
+                logits.data.ptr, 
+                row_stride, 
+                loss.data.ptr, 
+                logsumexp.data.ptr, 
+                labels.data.ptr, 
+                C, 
+                BLOCK_SIZE
+        )       
+        
+        return loss, logsumexp
 
 def fused_cross_entropy_backward(
         logits, labels, logsumexp, BLOCK_SIZE=128
@@ -221,34 +253,34 @@ def fused_cross_entropy_backward(
 #     is_torch = isinstance(logits, torch.Tensor)
 #     is_cupy = not is_torch and hasattr(logits, '__cuda_array_interface__')
     
-#     # Convert CuPy to PyTorch for better Triton performance
-#     if is_cupy:
-#         logits = from_dlpack(logits)
-#         labels = from_dlpack(labels)
+    # # Convert CuPy to PyTorch for better Triton performance
+    # if is_cupy:
+    #     logits = from_dlpack(logits)
+    #     labels = from_dlpack(labels)
     
-#     N, C = logits.shape
-#     loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
-#     logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
+    # N, C = logits.shape
+    # loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
+    # logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
 
-#     BLOCK_SIZE = triton.next_power_of_2(C)
-#     row_stride = logits.stride(0)
+    # BLOCK_SIZE = triton.next_power_of_2(C)
+    # row_stride = logits.stride(0)
 
-#     grid = (N,)
-#     cross_entropy_forward[grid](
-#         logits, 
-#         row_stride, 
-#         loss, 
-#         logsumexp, 
-#         labels, 
-#         C, 
-#         BLOCK_SIZE
-#     )
+    # grid = (N,)
+    # cross_entropy_forward[grid](
+    #     logits, 
+    #     row_stride, 
+    #     loss, 
+    #     logsumexp, 
+    #     labels, 
+    #     C, 
+    #     BLOCK_SIZE
+    # )
     
-#     # Convert back to CuPy if needed
-#     if is_cupy:
-#         import cupy as cp
-#         loss = cp.from_dlpack(loss)
-#         logsumexp = cp.from_dlpack(logsumexp)
+    # # Convert back to CuPy if needed
+    # if is_cupy:
+    #     import cupy as cp
+    #     loss = cp.from_dlpack(loss)
+    #     logsumexp = cp.from_dlpack(logsumexp)
     
 #     return loss, logsumexp
 

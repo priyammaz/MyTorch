@@ -2,9 +2,11 @@
 Inspired by https://github.com/lucidrains/triton-transformer/blob/main/triton_transformer/softmax.py
 """
 import cupy as cp
+import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
+from .flags import DLPACK_DISABLE
 
 def naive_softmax(x):
    
@@ -291,7 +293,7 @@ def softmax_kernel_forward(
     row_minus_max = row - tl.max(row, axis=0)
     numerator = tl.exp(row_minus_max)
     denominator = tl.sum(numerator, axis=0)
-    softmax_output = numerator / denominator
+    softmax_output = (numerator / denominator).to(output_ptr.dtype.element_ty)
 
     ### Store output in our output matrix. Again we compute the pointer to the output (which in this case is the) ###
     ### same logic as the input so pretty easy !! ###
@@ -361,56 +363,105 @@ def softmax_kernel_backward(
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, softmax_grad_out, mask=mask)
 
-
-def fused_softmax_forward(x):
+def fused_softmax_forward(x, use_dlpack=True):
 
     n_rows, n_cols = x.shape
-    y = cp.empty_like(x)
-
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    # Compute strides in elements
-    row_stride = x.strides[0] // x.itemsize
+    if not DLPACK_DISABLE and use_dlpack:
 
-    # Map dtype to Triton flag
-    dtype_flag = 0 if x.dtype == cp.float32 else 1  # 0=float32, 1=float16
+        x = torch.utils.dlpack.from_dlpack(x)
+        y = torch.empty_like(x)
 
-    grid = (n_rows,)
-    softmax_kernel_forward[grid](
-        y.data.ptr,       # output_ptr
-        x.data.ptr,       # input_ptr
-        row_stride,       # input_row_stride
-        row_stride,       # output_row_stride
-        dtype_flag,       # dtype_flag (constexpr)
-        n_cols,           # n_cols (constexpr)
-        BLOCK_SIZE        # BLOCK_SIZE (constexpr)
-    )
-    return y
+        dtype_flag = 0 if x.dtype == torch.float32 else 1  # 0=float32, 1=float16
+        row_stride = x.stride(0)
 
-def fused_softmax_backward(grad, s):
+        grid = (n_rows,)
+        softmax_kernel_forward[grid](
+            y,       # output_ptr
+            x,       # input_ptr
+            row_stride,       # input_row_stride
+            row_stride,       # output_row_stride
+            dtype_flag,       # dtype_flag (constexpr)
+            n_cols,           # n_cols (constexpr)
+            BLOCK_SIZE        # BLOCK_SIZE (constexpr)
+        )
+        
+        return cp.from_dlpack(y)
+
+
+    else:
+
+        y = cp.empty_like(x)
+
+        # Compute strides in elements
+        row_stride = x.strides[0] // x.itemsize
+
+        # Map dtype to Triton flag
+        dtype_flag = 0 if x.dtype == cp.float32 else 1  # 0=float32, 1=float16
+
+        grid = (n_rows,)
+        softmax_kernel_forward[grid](
+            y.data.ptr,       # output_ptr
+            x.data.ptr,       # input_ptr
+            row_stride,       # input_row_stride
+            row_stride,       # output_row_stride
+            dtype_flag,       # dtype_flag (constexpr)
+            n_cols,           # n_cols (constexpr)
+            BLOCK_SIZE        # BLOCK_SIZE (constexpr)
+        )
+
+        return y
+
+def fused_softmax_backward(grad, s, use_dlpack=True):
 
     n_rows, n_cols = grad.shape
-    grad_input = cp.empty_like(grad)
-
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    row_stride = grad.strides[0] // grad.itemsize
+    if not DLPACK_DISABLE and use_dlpack:
+        
+        grad = torch.utils.dlpack.from_dlpack(grad)
+        s = torch.utils.dlpack.from_dlpack(s)
 
-    dtype_flag = 0 if grad.dtype == cp.float32 else 1
+        grad_input = torch.empty_like(grad)
+        row_stride = grad.stride(0)
+        dtype_flag = 0 if grad.dtype == torch.float32 else 1
 
-    grid = (n_rows,)
-    softmax_kernel_backward[grid](
-        grad_input.data.ptr,  # output_ptr
-        row_stride,           # output_row_stride
-        s.data.ptr,           # s_ptr
-        row_stride,           # s_row_stride
-        grad.data.ptr,        # grad_ptr
-        row_stride,           # grad_row_stride
-        dtype_flag,           # dtype_flag (constexpr)
-        n_cols,               # n_cols (constexpr)
-        BLOCK_SIZE            # BLOCK_SIZE (constexpr)
-    )
-    return grad_input
+        grid = (n_rows,)
+        softmax_kernel_backward[grid](
+            grad_input,           # output_ptr
+            row_stride,           # output_row_stride
+            s,                    # s_ptr
+            row_stride,           # s_row_stride
+            grad,                 # grad_ptr
+            row_stride,           # grad_row_stride
+            dtype_flag,           # dtype_flag (constexpr)
+            n_cols,               # n_cols (constexpr)
+            BLOCK_SIZE            # BLOCK_SIZE (constexpr)
+        )
+
+        return cp.from_dlpack(grad_input)
+
+    else:
+        grad_input = cp.empty_like(grad)
+
+        row_stride = grad.strides[0] // grad.itemsize
+
+        dtype_flag = 0 if grad.dtype == cp.float32 else 1
+
+        grid = (n_rows,)
+        softmax_kernel_backward[grid](
+            grad_input.data.ptr,  # output_ptr
+            row_stride,           # output_row_stride
+            s.data.ptr,           # s_ptr
+            row_stride,           # s_row_stride
+            grad.data.ptr,        # grad_ptr
+            row_stride,           # grad_row_stride
+            dtype_flag,           # dtype_flag (constexpr)
+            n_cols,               # n_cols (constexpr)
+            BLOCK_SIZE            # BLOCK_SIZE (constexpr)
+        )
+        return grad_input
 
 if __name__ == "__main__":
 

@@ -15,9 +15,11 @@ This adapts the existing code with Cupy!
 
 """
 import os
+import torch
 import cupy as cp
 import triton
 import triton.language as tl
+from .flags import DLPACK_DISABLE
 
 def get_fwd_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
@@ -1216,6 +1218,272 @@ def fused_sdpa_backward(dO,
 
     return dQ, dK, dV
 
+def fused_sdpa_forward(Q, K, V, 
+                       causal, 
+                       softmax_scale=None, 
+                       use_dlpack=True):
+    
+    HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
+    HEAD_DIM_V = V.shape[-1]
+    BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
+    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
+    assert Q.dtype == K.dtype and K.dtype == V.dtype, "Expect all Q,K,V Tensors to have the same data type"
+
+    if softmax_scale is None:
+        softmax_scale = 1 / HEAD_DIM**0.5
+
+    if not DLPACK_DISABLE and use_dlpack:
+        
+        ### USE DLPACK to Convert our Cupy Arrays to Torch Tensors ###
+        Q = torch.utils.dlpack.from_dlpack(Q)
+        K = torch.utils.dlpack.from_dlpack(K)
+        V = torch.utils.dlpack.from_dlpack(V)
+    
+        ### Make sure there is contiguous memory layout ####
+        if not Q.is_contiguous():
+            Q = Q.contiguous()
+        if not K.is_contiguous():
+            K = K.contiguous()
+        if not V.is_contiguous():
+            V = V.contiguous()
+
+        # Create output tensors
+        O = torch.empty_like(Q)
+        M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
+        grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+
+        _attn_fwd[grid](
+            Q=Q,
+            K=K,
+            V=V,
+            softmax_scale=softmax_scale,
+            M=M,
+            O=O,
+            stride_Q_batch=Q.stride(0),
+            stride_Q_head=Q.stride(1),
+            stride_Q_seq=Q.stride(2),
+            stride_Q_dim=Q.stride(3),
+            stride_K_seq=K.stride(2),
+            stride_K_dim=K.stride(3),
+            stride_V_seq=V.stride(2),
+            stride_V_dim=V.stride(3),
+            stride_O_seq=O.stride(2),
+            stride_O_dim=O.stride(3),
+            NUM_HEADS=NUM_HEADS,
+            SEQ_LEN=SEQ_LEN,
+            HEAD_DIM=HEAD_DIM_Q,
+            ATTN_MODE=1 if causal else 0,
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+        )
+
+        ### Convert back to cupy ###
+        Q = cp.from_dlpack(Q)
+        K = cp.from_dlpack(K)
+        V = cp.from_dlpack(V)
+        O = cp.from_dlpack(O)
+        M = cp.from_dlpack(M)
+
+    else:
+            
+        ### Make sure there is contiguous memory layout ####
+        if not Q.flags.c_contiguous:
+            Q = cp.ascontiguousarray(Q)
+        if not K.flags.c_contiguous:
+            K = cp.ascontiguousarray(K)
+        if not V.flags.c_contiguous:
+            V = cp.ascontiguousarray(V)
+
+        O = cp.empty_like(Q)
+        grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+
+        # M is the logsumexp for the backward pass, one for each query
+        # Make sure to create it on the right device as we are not using empty_like
+        with cp.cuda.Device(Q.device.id):
+            M = cp.empty(
+                (BATCH_SIZE, NUM_HEADS, SEQ_LEN), dtype=cp.float32
+            )
+
+        _attn_fwd[grid](
+            Q=Q.data.ptr,
+            K=K.data.ptr,
+            V=V.data.ptr,
+            softmax_scale=softmax_scale,
+            M=M.data.ptr,
+            O=O.data.ptr,
+            stride_Q_batch=Q.strides[0] // Q.itemsize,
+            stride_Q_head=Q.strides[1] // Q.itemsize,
+            stride_Q_seq=Q.strides[2] // Q.itemsize,
+            stride_Q_dim=Q.strides[3] // Q.itemsize,
+            stride_K_seq=K.strides[2] // K.itemsize,
+            stride_K_dim=K.strides[3] // K.itemsize,
+            stride_V_seq=V.strides[2] // V.itemsize,
+            stride_V_dim=V.strides[3] // V.itemsize,
+            stride_O_seq=O.strides[2] // O.itemsize,
+            stride_O_dim=O.strides[3] // O.itemsize,
+            NUM_HEADS=NUM_HEADS,
+            SEQ_LEN=SEQ_LEN,
+            HEAD_DIM=HEAD_DIM_Q,
+            ATTN_MODE=1 if causal else 0,
+            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
+        )
+
+    return Q, K, V, O, M
+
+def fused_sdpa_backward(dO, 
+                        Q, K, V, 
+                        O, M, 
+                        causal,
+                        softmax_scale=None,
+                        use_dlpack=True):
+
+    HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
+    HEAD_DIM_V = V.shape[-1]
+    BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
+    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
+    assert Q.dtype == K.dtype and K.dtype == V.dtype and V.dtype == O.dtype, "Expect all Q,K,V,O Tensors to have the same data type"
+
+    ### Default softmax scale if not provided ###    
+    if softmax_scale is None:
+        softmax_scale = 1 / HEAD_DIM**0.5
+        
+    if not DLPACK_DISABLE and use_dlpack:
+
+        dO = torch.utils.dlpack.from_dlpack(dO)
+        Q = torch.utils.dlpack.from_dlpack(Q)
+        K = torch.utils.dlpack.from_dlpack(K)
+        V = torch.utils.dlpack.from_dlpack(V)
+        O = torch.utils.dlpack.from_dlpack(O)
+        M = torch.utils.dlpack.from_dlpack(M)
+
+        ### Ensure our grads are contiguous ###
+        if not dO.is_contiguous():
+            dO = dO.contiguous()
+
+        ### Ensure grads have the same dtype
+        if not dO.dtype == Q.dtype:
+            dO = dO.to(Q.dtype)
+
+        ### Create Empty Grads to populate ###
+        dQ = torch.zeros_like(Q, dtype=Q.dtype)
+        dK = torch.zeros_like(K, dtype=K.dtype)
+        dV = torch.zeros_like(V, dtype=V.dtype)
+        D = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
+    
+        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
+
+        # Compute all the elements Di
+        attn_backward_preprocess[preprocess_grid](
+            O_ptr=O, 
+            dO_ptr=dO,
+            D_ptr=D,
+            stride_O_heads=O.stride(1), 
+            stride_O_len=O.stride(2), 
+            stride_O_embed=O.stride(3),
+            stride_dO_heads=dO.stride(1), 
+            stride_dO_len=dO.stride(2), 
+            stride_dO_embed=dO.stride(3),
+            stride_D_head=D.stride(1),
+            SEQ_LEN=SEQ_LEN,
+            EMBED_DIM=HEAD_DIM,
+            DTYPE_FLAG=0 if dO.dtype == torch.float32 else 1
+        )
+
+        grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
+        _attn_bwd[grid](
+            Q_ptr=Q, 
+            K_ptr=K, 
+            V_ptr=V, 
+            dO_ptr=dO, 
+            dQ_ptr=dQ, 
+            dK_ptr=dK, 
+            dV_ptr=dV, 
+            M_ptr=M, 
+            D_ptr=D, 
+            softmax_scale=softmax_scale, 
+            stride_batch=Q.stride(0),
+            stride_head=Q.stride(1),
+            stride_len=Q.stride(2),
+            stride_embed=Q.stride(3), 
+            NUM_HEADS=NUM_HEADS, 
+            SEQ_LEN=SEQ_LEN, 
+            HEAD_DIM=HEAD_DIM, 
+            CAUSAL=1 if causal else 0, 
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+        )
+
+        # Convert back to CuPy if needed
+        dQ = cp.from_dlpack(dQ)
+        dK = cp.from_dlpack(dK)
+        dV = cp.from_dlpack(dV)
+
+    else:
+        ### Ensure our grads are contiguous ###
+        if not dO.flags.c_contiguous:
+            dO = cp.ascontiguousarray(dO)
+
+        ### Ensure grads have the same dtype
+        if not dO.dtype == Q.dtype:
+            dO = dO.astype(Q.dtype)
+
+        ### Create Empty Grads to populate ###
+        dQ = cp.zeros_like(Q, dtype=Q.dtype)
+        dK = cp.zeros_like(K, dtype=K.dtype)
+        dV = cp.zeros_like(V, dtype=V.dtype)
+
+        ### Default softmax scale if not provided ###    
+        if softmax_scale is None:
+            softmax_scale = 1 / HEAD_DIM**0.5
+
+        # preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
+        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
+
+        ### This will contain our sum(O * dO, axis=-1) intermediate computation ###
+        ### Do we need a kernel for this? probably not, but thats fine! ###
+        D = cp.empty_like(M, dtype=cp.float32)  # Shape: (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
+
+        # Compute all the elements Di
+        attn_backward_preprocess[preprocess_grid](
+            O_ptr=O.data.ptr, 
+            dO_ptr=dO.data.ptr,
+            D_ptr=D.data.ptr,
+            stride_O_heads=O.strides[1] // O.itemsize, 
+            stride_O_len=O.strides[2] // O.itemsize, 
+            stride_O_embed=O.strides[3] // O.itemsize,
+            stride_dO_heads=dO.strides[1] // dO.itemsize, 
+            stride_dO_len=dO.strides[2] // dO.itemsize, 
+            stride_dO_embed=dO.strides[3] // dO.itemsize,
+            stride_D_head=D.strides[1] // D.itemsize, # (B x H x L)
+            SEQ_LEN=SEQ_LEN,
+            EMBED_DIM=HEAD_DIM,
+            DTYPE_FLAG=0 if dO.dtype == cp.float32 else 1
+        )
+
+
+        grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
+        _attn_bwd[grid](
+            Q_ptr=Q.data.ptr, 
+            K_ptr=K.data.ptr, 
+            V_ptr=V.data.ptr, 
+            dO_ptr=dO.data.ptr, 
+            dQ_ptr=dQ.data.ptr, 
+            dK_ptr=dK.data.ptr, 
+            dV_ptr=dV.data.ptr, 
+            M_ptr=M.data.ptr, 
+            D_ptr=D.data.ptr, 
+            softmax_scale=softmax_scale, 
+            stride_batch=Q.strides[0] // Q.itemsize,
+            stride_head=Q.strides[1] // Q.itemsize,
+            stride_len=Q.strides[2] // Q.itemsize,
+            stride_embed=Q.strides[3] // Q.itemsize, 
+            NUM_HEADS=NUM_HEADS, 
+            SEQ_LEN=SEQ_LEN, 
+            HEAD_DIM=HEAD_DIM, 
+            CAUSAL=1 if causal else 0, 
+            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
+        )
+
+    return dQ, dK, dV
+
 # ### TESTING DLPACK IMPLEMENTATION ###
 # import cupy as cp
 # import torch
@@ -1231,9 +1499,9 @@ def fused_sdpa_backward(dO,
 #     # Convert CuPy to PyTorch for better Triton performance
 #     if is_cupy:
 #         Q_orig, K_orig, V_orig = Q, K, V
-#         Q = from_dlpack(Q)
-#         K = from_dlpack(K)
-#         V = from_dlpack(V)
+        # Q = from_dlpack(Q)
+        # K = from_dlpack(K)
+        # V = from_dlpack(V)
     
 #     HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
 #     HEAD_DIM_V = V.shape[-1]
@@ -1241,54 +1509,54 @@ def fused_sdpa_backward(dO,
 #     assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
 #     assert Q.dtype == K.dtype and K.dtype == V.dtype, "Expect all Q,K,V Tensors to have the same data type"
 
-#     ### Make sure there is contiguous memory layout ####
-#     if not Q.is_contiguous():
-#         Q = Q.contiguous()
-#     if not K.is_contiguous():
-#         K = K.contiguous()
-#     if not V.is_contiguous():
-#         V = V.contiguous()
+    # ### Make sure there is contiguous memory layout ####
+    # if not Q.is_contiguous():
+    #     Q = Q.contiguous()
+    # if not K.is_contiguous():
+    #     K = K.contiguous()
+    # if not V.is_contiguous():
+    #     V = V.contiguous()
     
-#     if softmax_scale is None:
-#         softmax_scale = 1 / HEAD_DIM**0.5
+    # if softmax_scale is None:
+    #     softmax_scale = 1 / HEAD_DIM**0.5
 
-#     # Create output tensors
-#     O = torch.empty_like(Q)
-#     M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
-#     grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+    # # Create output tensors
+    # O = torch.empty_like(Q)
+    # M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
+    # grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
 
-#     _attn_fwd[grid](
-#         Q=Q,
-#         K=K,
-#         V=V,
-#         softmax_scale=softmax_scale,
-#         M=M,
-#         O=O,
-#         stride_Q_batch=Q.stride(0),
-#         stride_Q_head=Q.stride(1),
-#         stride_Q_seq=Q.stride(2),
-#         stride_Q_dim=Q.stride(3),
-#         stride_K_seq=K.stride(2),
-#         stride_K_dim=K.stride(3),
-#         stride_V_seq=V.stride(2),
-#         stride_V_dim=V.stride(3),
-#         stride_O_seq=O.stride(2),
-#         stride_O_dim=O.stride(3),
-#         NUM_HEADS=NUM_HEADS,
-#         SEQ_LEN=SEQ_LEN,
-#         HEAD_DIM=HEAD_DIM_Q,
-#         ATTN_MODE=1 if causal else 0,
-#         DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
-#     )
+    # _attn_fwd[grid](
+    #     Q=Q,
+    #     K=K,
+    #     V=V,
+    #     softmax_scale=softmax_scale,
+    #     M=M,
+    #     O=O,
+    #     stride_Q_batch=Q.stride(0),
+    #     stride_Q_head=Q.stride(1),
+    #     stride_Q_seq=Q.stride(2),
+    #     stride_Q_dim=Q.stride(3),
+    #     stride_K_seq=K.stride(2),
+    #     stride_K_dim=K.stride(3),
+    #     stride_V_seq=V.stride(2),
+    #     stride_V_dim=V.stride(3),
+    #     stride_O_seq=O.stride(2),
+    #     stride_O_dim=O.stride(3),
+    #     NUM_HEADS=NUM_HEADS,
+    #     SEQ_LEN=SEQ_LEN,
+    #     HEAD_DIM=HEAD_DIM_Q,
+    #     ATTN_MODE=1 if causal else 0,
+    #     DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+    # )
 
-#     # Convert back to CuPy if needed
-#     if is_cupy:
+    # # Convert back to CuPy if needed
+    # if is_cupy:
         
-#         Q = cp.from_dlpack(Q)
-#         K = cp.from_dlpack(K)
-#         V = cp.from_dlpack(V)
-#         O = cp.from_dlpack(O)
-#         M = cp.from_dlpack(M)
+    #     Q = cp.from_dlpack(Q)
+    #     K = cp.from_dlpack(K)
+    #     V = cp.from_dlpack(V)
+    #     O = cp.from_dlpack(O)
+    #     M = cp.from_dlpack(M)
 
 #     return Q, K, V, O, M
 
