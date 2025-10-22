@@ -184,7 +184,7 @@ class Array:
     @property
     def T(self):
         return Array(self._array.T, device=self._device)
-
+    
     def astype(self, dtype):
         if self.dtype == dtype:
             return self
@@ -193,7 +193,7 @@ class Array:
         else:
             with cp.cuda.Device(self._dev_id):
                 self._array = self._array.astype(dtype)
-        # self._dtype = str(self._array.dtype)
+
         return self
     
     def to(self, device):
@@ -641,6 +641,7 @@ class Array:
         device = device or other.device
         dtype = dtype or str(other.dtype)
         return cls.rand(other.shape, device=device, dtype=dtype)
+    
     
 # Attach binary, unary, and inplace operations
 for dunder, ufunc in Array._binary_ufuncs.items():
