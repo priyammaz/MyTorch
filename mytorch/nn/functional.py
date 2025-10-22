@@ -1745,7 +1745,7 @@ def relu(input, auto=False):
         return input * mask
     else:
   
-        out_data = np.maximum(input.data, 0, out=np.empty_like(input.data))
+        input.data[input.data < 0] = 0
 
         def _relu_backward(input_grad):
             if input.requires_grad:
@@ -1758,7 +1758,7 @@ def relu(input, auto=False):
 
         requires_grad = input.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
-            out_data,
+            input.data,
             requires_grad=requires_grad,
             grad_fn=_relu_backward if requires_grad else None,
             grad_fn_name="<ReLUBackward>" if requires_grad else None,
