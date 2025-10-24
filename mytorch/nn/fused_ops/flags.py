@@ -10,3 +10,6 @@ import os
 DLPACK_DISABLE = False if os.environ.get("DLPACK_DISABLE", "false") == "false" else True
 if DLPACK_DISABLE:
     print("DLPACK Conversion Has Been Disabled on Fused Operations!")
+
+### FLAG FOR USING TRITON AUTOTUNE OR DEFAULT ###
+AUTOTUNE_MODE = os.getenv("TRITON_AUTOTUNE_MODE", "none").lower()
