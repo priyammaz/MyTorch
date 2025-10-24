@@ -212,7 +212,7 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
         return loss, logsumexp
 
 def fused_cross_entropy_backward(
-        logits, labels, logsumexp, BLOCK_SIZE=128
+        logits, labels, logsumexp, BLOCK_SIZE=128, use_dlpack=True
 ):
     
     """
@@ -227,325 +227,40 @@ def fused_cross_entropy_backward(
     returns a single 1
     """
     N, C = logits.shape
-    row_stride = logits.strides[0] // logits.itemsize
-    
-    grad = cp.zeros_like(logits, dtype=cp.float32)
 
-    grid = (N, triton.cdiv(C, BLOCK_SIZE))
-    cross_entropy_backward[grid](
-        logits.data.ptr,
-        row_stride,
-        grad.data.ptr, 
-        logsumexp.data.ptr, 
-        labels.data.ptr, 
-        C, 
-        BLOCK_SIZE
-    )
-
-    return grad
-
-# ### TESTING DLPACK ###
-# import cupy as cp
-# import torch
-# from torch.utils.dlpack import from_dlpack
-# def fused_cross_entropy_forward(logits, labels):
-#     # Detect tensor type
-#     is_torch = isinstance(logits, torch.Tensor)
-#     is_cupy = not is_torch and hasattr(logits, '__cuda_array_interface__')
-    
-    # # Convert CuPy to PyTorch for better Triton performance
-    # if is_cupy:
-    #     logits = from_dlpack(logits)
-    #     labels = from_dlpack(labels)
-    
-    # N, C = logits.shape
-    # loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
-    # logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
-
-    # BLOCK_SIZE = triton.next_power_of_2(C)
-    # row_stride = logits.stride(0)
-
-    # grid = (N,)
-    # cross_entropy_forward[grid](
-    #     logits, 
-    #     row_stride, 
-    #     loss, 
-    #     logsumexp, 
-    #     labels, 
-    #     C, 
-    #     BLOCK_SIZE
-    # )
-    
-    # # Convert back to CuPy if needed
-    # if is_cupy:
-    #     import cupy as cp
-    #     loss = cp.from_dlpack(loss)
-    #     logsumexp = cp.from_dlpack(logsumexp)
-    
-#     return loss, logsumexp
-
-# def fused_cross_entropy_backward(
-#         logits, labels, logsumexp, BLOCK_SIZE=128
-# ):
-#     """
-#     Block size should definitely be tuned, but i just pick something
-#     reasonable here for now! We will chunk our NUM_CLASSES len vector
-#     into chunks of BLOCK_SIZE
-
-#     Also, this is the last thing in our model. There is no more
-#     ops after Cross Entropy. So our dloss is just a bunch of ones!
-#     We can create that in here manually as our "upstream" grad. We 
-#     already do this in our .backward() in our tensor, but that only
-#     returns a single 1
-#     """
-    
-#     # Detect tensor type
-#     is_torch = isinstance(logits, torch.Tensor)
-#     is_cupy = not is_torch and hasattr(logits, '__cuda_array_interface__')
-    
-#     # Convert CuPy to PyTorch for better Triton performance
-#     if is_cupy:
+    if not DLPACK_DISABLE and use_dlpack:
+        logits = torch.utils.dlpack.from_dlpack(logits)
+        labels = torch.utils.dlpack.from_dlpack(labels)
+        logsumexp = torch.utils.dlpack.from_dlpack(logsumexp)
         
-#         logits = from_dlpack(logits)
-#         labels = from_dlpack(labels)
-#         logsumexp = from_dlpack(logsumexp)
-    
-#     N, C = logits.shape
-#     row_stride = logits.stride(0)
-    
-#     grad = torch.zeros_like(logits, dtype=torch.float32)
+        row_stride = logits.stride(0)
+        grad = torch.zeros_like(logits, dtype=torch.float32)
 
-#     grid = (N, triton.cdiv(C, BLOCK_SIZE))
-#     cross_entropy_backward[grid](
-#         logits,
-#         row_stride,
-#         grad, 
-#         logsumexp, 
-#         labels, 
-#         C, 
-#         BLOCK_SIZE
-#     )
-
-#     # Convert back to CuPy if needed
-#     if is_cupy:
-#         import cupy as cp
-#         grad = cp.from_dlpack(grad)
-
-#     return grad
-
-if __name__ == "__main__":
-
-    import torch
-    import numpy as np
-    import time
-    import matplotlib.pyplot as plt
-
-    def run_torch_triton_forward(logits, labels):
-        N, NUM_CLASSES = logits.shape
-        logits_ptr = logits.data_ptr()
-        labels_ptr = labels.data_ptr()
-        loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
-        logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
-        
-        ### Each block will process a full row ###
-        BLOCK_SIZE = triton.next_power_of_2(NUM_CLASSES)
-
-        grid = (N,)
-        cross_entropy_forward[grid](
-            logits_ptr,
-            NUM_CLASSES,
-            loss.data_ptr(),
-            logsumexp.data_ptr(),
-            labels_ptr,
-            NUM_CLASSES,
-            BLOCK_SIZE
-        )
-        return loss, logsumexp
-
-    def run_torch_triton_backward(original_logits, 
-                                  grad, 
-                                  labels, 
-                                  dloss, 
-                                  logsumexp, 
-                                  BLOCK_SIZE=128):
-        """
-        I hardcode the blocksize to somethign reasonable here, but it should
-        be tuned! 
-        """
-
-        N, NUM_CLASSES = original_logits.shape
-        orig_logits_ptr = original_logits.data_ptr()
-        labels_ptr = labels.data_ptr()
-        
-        grid = (N, (NUM_CLASSES + BLOCK_SIZE - 1) // BLOCK_SIZE)
+        grid = (N, triton.cdiv(C, BLOCK_SIZE))
         cross_entropy_backward[grid](
-            orig_logits_ptr,       # For loading x (original)
-            NUM_CLASSES,           # Row stride in elements
-            grad.data_ptr(),       # For storing y (grad output)
-            dloss.data_ptr(),
-            logsumexp.data_ptr(),
-            labels_ptr,
-            NUM_CLASSES,
+            logits,
+            row_stride,
+            grad, 
+            logsumexp, 
+            labels, 
+            C, 
             BLOCK_SIZE
         )
-        return grad  # Already modified in-place
 
+    else:
 
-    def benchmark_cross_entropy_forward(N, C, n_trials=100):
-        print(f"=== Forward N={N}, C={C} ===")
-        
-        # --------------------------
-        # PyTorch setup
-        # --------------------------
-        logits_torch = torch.randn(N, C, device="cuda", dtype=torch.float32)
-        labels_torch = torch.randint(0, C, (N,), device="cuda", dtype=torch.long)
-        
-        # FLOPs estimate (softmax + logsumexp + subtract label)
-        flops = 5 * N * C
-        
-        # PyTorch forward
-        torch.cuda.synchronize()
-        t0 = time.time()
-        for _ in range(n_trials):
-            loss_torch = torch.nn.functional.cross_entropy(logits_torch, labels_torch, reduction='none')
-        torch.cuda.synchronize()
-        t_pt = (time.time() - t0) / n_trials
-        flops_pt = flops / t_pt / 1e9  # GFLOPS
+        row_stride = logits.strides[0] // logits.itemsize
+        grad = cp.zeros_like(logits, dtype=cp.float32)
 
-        # --------------------------
-        # CuPy + Triton setup
-        # --------------------------
-        logits_cp = cp.array(logits_torch.detach().cpu().numpy(), dtype=cp.float32)
-        labels_cp = cp.array(labels_torch.detach().cpu().numpy(), dtype=cp.int64)
+        grid = (N, triton.cdiv(C, BLOCK_SIZE))
+        cross_entropy_backward[grid](
+            logits.data.ptr,
+            row_stride,
+            grad.data.ptr, 
+            logsumexp.data.ptr, 
+            labels.data.ptr, 
+            C, 
+            BLOCK_SIZE
+        )
 
-        # Warmup Triton
-        _ = fused_cross_entropy_forward(logits_cp, labels_cp)
-        cp.cuda.runtime.deviceSynchronize()
-
-        # Triton forward
-        t0 = time.time()
-        for _ in range(n_trials):
-            loss_cp, _ = fused_cross_entropy_backward(logits_cp, labels_cp)
-        cp.cuda.runtime.deviceSynchronize()
-        t_triton = (time.time() - t0) / n_trials
-        flops_triton = flops / t_triton / 1e9
-
-        # --------------------------
-        # Compare correctness
-        # --------------------------
-        max_diff = cp.max(cp.abs(loss_cp - cp.array(loss_torch.detach().cpu().numpy()))).item()
-        print(f"PyTorch: {t_pt*1000:.2f} ms, {flops_pt:.2f} GFLOPS")
-        print(f"Triton:  {t_triton*1000:.2f} ms, {flops_triton:.2f} GFLOPS, max diff {max_diff:.3e}")
-        print("-"*50)
-        
-        return t_pt, flops_pt, t_triton, flops_triton, max_diff
-
-
-    def benchmark_cross_entropy_backward(N, C, n_trials=100):
-        print(f"=== Backward N={N}, C={C} ===")
-
-        # --------------------------
-        # PyTorch setup
-        # --------------------------
-        logits_torch = torch.randn(N, C, device="cuda", dtype=torch.float32, requires_grad=True)
-        labels_torch = torch.randint(0, C, (N,), device="cuda", dtype=torch.long)
-        dloss = torch.ones(N, device="cuda", dtype=torch.float32)
-
-        # Single forward pass for correctness comparison
-        loss_torch = torch.nn.functional.cross_entropy(logits_torch, labels_torch, reduction='none')
-        loss_torch_sum = loss_torch.sum()
-        logits_torch.grad = None
-        loss_torch_sum.backward()
-        grad_pt = logits_torch.grad.detach().clone()
-
-        # --------------------------
-        # CuPy + Triton setup
-        # --------------------------
-        logits_cp = cp.array(logits_torch.detach().cpu().numpy(), dtype=cp.float32)
-        labels_cp = cp.array(labels_torch.detach().cpu().numpy(), dtype=cp.int64)
-        dloss_cp = cp.ones(N, dtype=cp.float32)
-        grad_cp = cp.zeros((N, C), dtype=cp.float32)
-
-        # Compute logsumexp once using forward kernel
-        _, logsumexp_cp = fused_cross_entropy_forward(logits_cp, labels_cp)
-
-        # Warmup Triton
-        _ = fused_cross_entropy_backward(logits_cp, grad_cp, labels_cp, dloss_cp, logsumexp_cp)
-        cp.cuda.runtime.deviceSynchronize()
-
-        # Timing loop
-        t0 = time.time()
-        for _ in range(n_trials):
-            grad_cp = fused_cross_entropy_backward(logits_cp, grad_cp, labels_cp, dloss_cp, logsumexp_cp)
-        cp.cuda.runtime.deviceSynchronize()
-        t_triton = (time.time() - t0) / n_trials
-
-        # FLOPs estimate
-        flops = 5 * N * C
-        flops_pt = flops / (t_triton * n_trials) / 1e9  # GFLOPS (optional)
-        flops_triton = flops / t_triton / 1e9
-
-        # Compare correctness
-        grad_triton_torch = torch.from_numpy(cp.asnumpy(grad_cp)).to("cuda")
-        max_diff = (grad_triton_torch - grad_pt).abs().max().item()
-
-        print(f"Triton Backward: {t_triton*1000:.2f} ms, {flops_triton:.2f} GFLOPS, max diff {max_diff:.3e}")
-        print("-"*50)
-
-        return t_triton, flops_triton, max_diff
-
-    # Lists to hold results
-    sizes = [(4096, 128), (4096, 256), (4096, 512), (4096, 1024), 
-            (4096, 2048), (4096, 4096), (4096, 8192)]
-
-    forward_times, forward_flops, forward_diffs = [], [], []
-    backward_times, backward_flops, backward_diffs = [], [], []
-
-    # Run forward benchmarks
-    print("BENCHMARKING FORWARD")
-    for N, C in sizes:
-        t_pt, fl_pt, t_tr, fl_tr, max_diff = benchmark_cross_entropy_forward(N, C, n_trials=10)
-        forward_times.append((t_pt*1000, t_tr*1000))  # ms
-        forward_flops.append((fl_pt, fl_tr))         # GFLOPS
-        forward_diffs.append(max_diff)
-
-    # Run backward benchmarks
-    print("BENCHMARKING BACKWARD")
-    for N, C in sizes:
-        t_tr, fl_tr, max_diff = benchmark_cross_entropy_backward(N, C, n_trials=10)
-        backward_times.append((0, t_tr*1000))  # PyTorch timing not measured for consistency, set 0
-        backward_flops.append((0, fl_tr))      # PyTorch GFLOPS not measured
-        backward_diffs.append(max_diff)
-
-    # Convert to NumPy arrays for plotting
-    C_values = [C for _, C in sizes]
-    forward_times = np.array(forward_times)
-    forward_flops = np.array(forward_flops)
-    backward_times = np.array(backward_times)
-    backward_flops = np.array(backward_flops)
-
-    plt.figure(figsize=(12,5))
-
-    # Forward time
-    plt.subplot(1,2,1)
-    plt.plot(C_values, forward_times[:,0], "-o", label="PyTorch Forward", linewidth=3)
-    plt.plot(C_values, forward_times[:,1], "-o", label="Triton Forward", linewidth=3)
-    plt.xlabel("Number of Classes (C)")
-    plt.ylabel("Time (ms)")
-    plt.title("Forward Cross-Entropy Runtime")
-    plt.legend()
-    plt.grid(True)
-
-    # Forward GFLOPS
-    plt.subplot(1,2,2)
-    plt.plot(C_values, forward_flops[:,0], "-o", label="PyTorch Forward", linewidth=3)
-    plt.plot(C_values, forward_flops[:,1], "-o", label="Triton Forward", linewidth=3)
-    plt.xlabel("Number of Classes (C)")
-    plt.ylabel("Throughput (GFLOPS)")
-    plt.title("Forward Cross-Entropy GFLOPS")
-    plt.legend()
-    plt.grid(True)
-
-    plt.tight_layout()
-    plt.savefig("benchmark/cross_entropy.png")
-    plt.show()
+        return grad

@@ -742,18 +742,18 @@ def grouped_matmul_kernel(
     BLOCK_SIZE_N: tl.constexpr, 
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    dtype_flag: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
 ):
     
     ### Grouping logic as described above! ###
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers to the Correct DTYPE ###
-    if dtype_flag == 0:  # float32
+    if DTYPE_FLAG == 0:  # float32
         A_ptr = tl.cast(A_ptr, tl.pointer_type(tl.float32))
         B_ptr = tl.cast(B_ptr, tl.pointer_type(tl.float32))
         C_ptr = tl.cast(C_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
+    elif DTYPE_FLAG == 1:  # float16
         A_ptr = tl.cast(A_ptr, tl.pointer_type(tl.float16))
         B_ptr = tl.cast(B_ptr, tl.pointer_type(tl.float16))
         C_ptr = tl.cast(C_ptr, tl.pointer_type(tl.float16))
@@ -838,7 +838,7 @@ def torch_fused_grouped_matmul(a, b):
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-        dtype_flag=0 if a.dtype == torch.float32 else 1
+        DTYPE_FLAG=0 if a.dtype == torch.float32 else 1
     )
     return c
 
@@ -868,7 +868,7 @@ def fused_grouped_matmul(a, b, use_dlpack=True):
             a.stride(0), a.stride(1),
             b.stride(0), b.stride(1),
             c.stride(0), c.stride(1),
-            dtype_flag=0 if a.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if a.dtype == torch.float32 else 1
         )
 
         return cp.from_dlpack(c)
@@ -895,60 +895,7 @@ def fused_grouped_matmul(a, b, use_dlpack=True):
             b.strides[1]//b.itemsize,
             c.strides[0]//c.itemsize, 
             c.strides[1]//c.itemsize,
-            dtype_flag=0 if a.dtype == cp.float32 else 1
+            DTYPE_FLAG=0 if a.dtype == cp.float32 else 1
         )
         
         return c
-    
-
-
-configs = [
-    triton.testing.Benchmark(
-        x_names = ["M", "N", "K"], 
-        x_vals = [128 * i for i in range(2, 33)],
-        line_arg = "provider", 
-        line_vals = ["torch", "cupy", "triton_grouped", "triton_cupy", "triton_cupy_dlpack"],
-        line_names = ["PyTorch", "Cupy", "Triton Grouped", "Triton Cupy", "Triton Cupy DLPack"],
-        styles = [("green", "-"), ("grey", "-"), ("blue", "-"), ("red", "-"), ("orange", "-")],
-        ylabel = "TFLOPS", 
-        plot_name = "Matmul Performance",
-        args={},
-    )
-]
-@triton.testing.perf_report(configs)
-def benchmark(M, N, K, provider):
- 
-    
-    quantiles = [0.5, 0.05, 0.95]
-    if provider == 'torch':
-        a = torch.randn((M, K//2), device="cuda", dtype=torch.float16)
-        b = torch.randn((K//2, N), device="cuda", dtype=torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch.matmul(a, b), quantiles=quantiles)
-    if provider == 'cupy':
-        a = cp.random.normal(size=(M, K//2)).astype(cp.float16)
-        b = cp.random.normal(size=((K//2, N))).astype(cp.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: cp.matmul(a, b), quantiles=quantiles)
-    if provider == 'triton_grouped':
-        a = torch.randn((M, K//2), device="cuda", dtype=torch.float16)
-        b = torch.randn((K//2, N), device="cuda", dtype=torch.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: torch_fused_grouped_matmul(a, b), quantiles=quantiles)
-    if provider == 'triton_cupy':
-        a = cp.random.normal(size=(M, K//2)).astype(cp.float16)
-        b = cp.random.normal(size=((K//2, N))).astype(cp.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: fused_grouped_matmul(a, b), quantiles=quantiles)
-    if provider == 'triton_cupy_dlpack':
-        a = cp.random.normal(size=(M, K//2)).astype(cp.float16)
-        b = cp.random.normal(size=((K//2, N))).astype(cp.float16)
-        ms, min_ms, max_ms = triton.testing.do_bench(lambda: dlpack_fused_grouped_matmul(a, b), quantiles=quantiles)
-    perf = lambda ms: 2 * M * N * K * 1e-12 / (ms * 1e-3)
-    return perf(ms), perf(max_ms), perf(min_ms)
-
-if __name__ == "__main__":
-
-    # test_kernel(grouped_matmul)
-    benchmark.run(show_plots=True)
-
-
-# a = cp.random.normal(size=(256,256)).astype(cp.float16)
-# b = cp.random.normal(size=(256,256)).astype(cp.float16)
-# dlpack_fused_grouped_matmul(a,b)
