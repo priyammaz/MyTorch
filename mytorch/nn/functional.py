@@ -2242,7 +2242,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
                         targets_data,
                         logsumexp_cp
                     ) 
-
+           
                     grad_cp *= (grad_output / valid_counts) 
 
                     # Reshape back to original logits shape and dtype

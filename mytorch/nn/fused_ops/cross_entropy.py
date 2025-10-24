@@ -247,10 +247,12 @@ def fused_cross_entropy_backward(
             BLOCK_SIZE
         )
 
+        return grad
+
     else:
 
         row_stride = logits.strides[0] // logits.itemsize
-        grad = cp.zeros_like(logits, dtype=cp.float32)
+        grad = cp.zeros_like(logits , dtype=cp.float32)
 
         grid = (N, triton.cdiv(C, BLOCK_SIZE))
         cross_entropy_backward[grid](
