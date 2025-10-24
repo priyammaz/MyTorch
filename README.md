@@ -11,19 +11,26 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 - **Distributed training** using Cupys NCCL Backend for multi-GPU setups
 - **Mixed Precision Training** support in fp16 with dynamic gradient scaling for faster and memory efficient training
 - **Education Focus**: Try to be as readable as possible to be hackable and transparent!
+- **LLM Focused**: We will have some implementations of Convolutions, but they are notoriously challenging to reach CUDNN levels even with fused kernels, so these will be less of a focus for this repo!
+
+### References
+
+There were a ton of really helpful resources that I used to make MyTorch! It wouldn't be as helpful 
+to include all of them here, so I have placed links at the top of every file with the resources you should definitely explore!
 
 ### Installation
 
-Installation is very easy! [STILL TESTING NOT ON PYPI YET!!!]
-
+Installation is very easy!
 ```
-pip install mytorch-core
+git clone https://github.com/priyammaz/MyTorch.git
+cd MyTorch
+pip install -e .
 ```
 
 If you want fused GPU operations for maximum performance, you can install the optional Triton support. Triton relies on a minimal PyTorch dependency to manage devices and drivers, but you won’t need PyTorch for typical use:
 
 ```
-pip install mytorch-core[triton]
+pip install -e .[triton]
 ```
 
 ## Usage
@@ -209,35 +216,17 @@ Creating tensors is also crucial, the following are available from the tensor fa
 
 No Deep Learning Framework would be complete without a set of modules! These are a collection of the most important modules we would expect to have (and those we would like to add in the future!) Treat this as a roadmap of stuff that is to come!
 
-| **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** |
+| **Core Layers** | **Impl** | **Fused** | **Normalization** | **Impl** | **Fused** | **Activations** | **Impl** | **Fused** | 
 |---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
-| **Core Layers** | | | **Convolutions** | | | **Pooling** | | |
-| Linear | ✅ | ❌ | Conv1d | ✅ | ❌ | MaxPool2d | ✅ | ❌ |
-| Embedding | ✅ | ❌ | Conv2d | ✅ | ❌ | AvgPool2d | ✅ | ❌ |
-| Dropout | ✅ | ❌ | ConvTranspose1d | ✅ | ❌ | MaxPool1d | ❌ | ❌ |
-| | | | ConvTranspose2d | ✅ | ❌ | AvgPool1d | ❌ | ❌ |
-| | | | | | | AdaptiveAvgPool2d | ✅ | ❌ |
-| | | | | | | AdaptiveMaxPool2d | ❌ | ❌ |
-| | | | | | | Upsample | ❌ | ❌ |
+| Linear | ✅ | ❌ | LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ |
+| Embedding | ✅ | ❌| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ |
+| Dropout | ✅ | ❌ | BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ❌ | 
+|  | | | GroupNorm | ❌ | ❌ | Softmax | ✅ | ✅ |
+| | | | InstanceNorm | ❌ | ❌ | LeakyReLU | ❌ | ❌ |
+| | | | RMSNorm | ❌ | ❌ | Tanh | ❌ | ❌ |
 
-| **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** |
-|---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
-| **Normalization** | | | **Activations** | | | **Recurrent** | | |
-| LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ | RNN | ❌ | ❌ |
-| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ | LSTM | ❌ | ❌ |
-| BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ❌ | GRU | ❌ | ❌ |
-| GroupNorm | ❌ | ❌ | Softmax | ✅ | ✅ | RNNCell | ❌ | ❌ |
-| InstanceNorm | ❌ | ❌ | LeakyReLU | ❌ | ❌ | LSTMCell | ❌ | ❌ |
-| RMSNorm | ❌ | ❌ | Tanh | ❌ | ❌ | GRUCell | ❌ | ❌ |
-| | | | ELU | ❌ | ❌ | | | |
-| | | | SiLU/Swish | ❌ | ❌ | | | |
-| | | | Mish | ❌ | ❌ | | | |
-| | | | Softplus | ❌ | ❌ | | | |
-| | | | LogSoftmax | ❌ | ❌ | | | |
-
-| **Operation** | **Impl** | **Fused** | **Operation** | **Impl** | **Fused** |
+| **Losses** | **Impl** | **Fused** | **Attention** | **Impl** | **Fused** |
 |---------------|----------|-----------|---------------|----------|-----------|
-| **Losses** | | | **Attention** | | |
 | CrossEntropyLoss | ✅ | ✅ | ScaledDotProduct | ✅ | ✅ |
 | MSELoss | ✅ | ❌ | SlidingWindowAttention | ❌ | ❌ |
 | BCELoss | ❌ | ❌ | | | |
@@ -248,7 +237,24 @@ No Deep Learning Framework would be complete without a set of modules! These are
 | KLDivLoss | ❌ | ❌ | | | |
 | HuberLoss | ❌ | ❌ | | | |
 | CosineEmbeddingLoss | ❌ | ❌ | | | |
-| TripletMarginLoss | ❌ | ❌ | | | |
+
+### Convolutions/Pooling
+
+The focus for MyTorch is for LLM training, but Convolutions are also important! Unfortunately, it is very challenging to get CUDNN level performance (even with triton kernels) for convolutions. So these will be more of a learning exercise than for actual use!
+
+| **Operation**         | **Impl** | **Fused** |
+|-----------------------|----------|-----------|
+| **Core Layers**       |          |           |
+| Conv1d                | ✅       | ✅        |
+| Conv2d                | ✅       | ✅        |
+| ConvTranspose1d       | ✅       | ❌        |
+| ConvTranspose2d       | ✅       | ❌        |
+| MaxPool2d             | ✅       | ❌        |
+| AvgPool2d             | ✅       | ❌        |
+| MaxPool1d             | ❌       | ❌        |
+| AvgPool1d             | ❌       | ❌        |
+| AdaptiveAvgPool2d     | ✅       | ❌        |
+| Upsample              | ❌       | ❌        |
 
 
 ### How to Use
@@ -564,13 +570,9 @@ python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
 bash train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --log_wandb
 ```
 
-My experiment was on a 4xGH100 Node training for about 3 days, reaching a roughly 2.95 loss  in about 125K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
+My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 125K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
 
-
-## Train ResNet
-
-#### Coming Soon
-
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/gpt2_owt_curve.png?raw=true" alt="drawing" width="600"/>
 
 ### How does AutoGrad work?
 
@@ -579,7 +581,7 @@ My experiment was on a 4xGH100 Node training for about 3 days, reaching a roughl
 The most important part of the AutoGrad system is building the computational graph to know the order of backpropagation. 
 
 #### Example 1: Gradient Propagation 
-<img src="src/computational_graph_1.png" alt="drawing" width="500"/>
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/computational_graph_1.png?raw=true" alt="drawing" width="500"/>
 
 Like in every neural network, we are propagating gradients from the end of the network back to the beginning.
 
@@ -592,18 +594,13 @@ We then go all the way back up again and then go down the yellow path, again goi
 This should remind you very closely of Depth-First Search 
 
 ### Example 2: Barriers to Gradient Propagation
-<img src="src/computational_graph_2.png" alt="drawing" width="500"/>
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/computational_graph_2.png?raw=true" alt="drawing" width="500"/>
 
 Depth first search is not exactly correct though. Lets look at this example! Just like before we start at the end and work our way back. We will first propagate our gradient down the blue path just like before. Then we will once we get to the end of the blue path, we can move up a node and then update the light-blue node using the orange path. Now if we kept Depth First search going, we would continue propagating our gradients from the light-blue node **BUT THIS IS WRONG**. The light blue node has a dependencies from two separate branches. 
 
 This is why we track our children of every node. Until a node has exhasted all its children (i.e. all the paths have come to it) we cannot continue onwards. The light-blue node in this case has 2 children. Doing the top path will exhaust one of them, but we must complete the second path as well to exhast the second child. Therefore we gate our Depth First Search so we dont continue to propagate past a node that hasn't been fully exhasted!
 
 So now, we use the orange path to give our first gradient injection into the light-blue node and then work our way back up and then continue down the yellow path. Once the yellow path ends on the light-blue node, we can then propagate the gradient back again via the purple path and then green path for the final nodes. 
-
-### Topological Sort 
-
-##### CREATE VISUALS
-
 
 ### Blending AutoGrad and Manual Grad
 
@@ -662,14 +659,9 @@ Triton is not too challenging to learn, it just needs some practice! I think my 
 
 ### Plans for this Repo
 
-I am not even close to done! Here are some of the stuff I want to work on next to keep this going!
+I am not even close to done! Here are some of the stuff I want to work on next to keep this going (on top of finishing all the unfinished ops from above)!
 
-- [ ] Convolutions
-    - [ ] Fused Conv2d/TransposeConv2d
-    - [ ] Fused Conv1d/TransposeConv1d
-- [ ] Pooling
-  - [ ] Fused MaxPool/AvgPool
-- [ ] Fused Linear Layer w/ Block MatMul and Bias
+- [ ] Fused Linear Layer w/ Grouped MatMul and Bias
 - [ ] Fused Embedding Layer
 - [ ] Flash Attention
   - [ ] Add Dropout
@@ -681,4 +673,7 @@ I am not even close to done! Here are some of the stuff I want to work on next t
   - [ ] Fused Kernel for KV Caching
 - [ ] Reimplement and Reproduce Llama
   - [ ] Rotary Embeddings
-- [ ] Benchmark Scripts to scope gains from Fused Ops
+- [ ] Mixture of Experts
+- [x] Benchmark Scripts to scope gains from Fused Ops
+- [ ] Use Fused Conv2d/Conv1d for AvgPool Op
+- [ ] Once I have a stable version get this in PyPi
