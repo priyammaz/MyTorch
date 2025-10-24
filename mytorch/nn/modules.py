@@ -483,7 +483,7 @@ class Conv1d(Module):
         return F.conv1d(x, self.weight, self.bias, self.stride, self.padding)
 
 class Conv2d(Module):
-    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, bias=True):
+    def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, dilation=1, bias=True, fused=False):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -492,6 +492,8 @@ class Conv2d(Module):
         self.stride = stride
         self.padding = padding
         self.bias = bias
+        self.dilation = dilation
+        self.fused = fused
 
         # Kaiming initialization (like PyTorch default for conv2d)
         self.weight = zeros((out_channels, in_channels, kernel_size, kernel_size), requires_grad=True)
@@ -529,7 +531,7 @@ class Conv2d(Module):
         )
 
     def forward(self, x: Tensor):
-        return F.conv2d(x, self.weight, self.bias, self.stride, self.padding)
+        return F.conv2d(x, self.weight, self.bias, self.stride, self.padding, self.dilation, self.fused)
 
 class ConvTranspose1d(Module):
     def __init__(self, in_channels, out_channels, kernel_size, stride=1, padding=0, output_padding=0, bias=True):
