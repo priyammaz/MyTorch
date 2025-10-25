@@ -33,6 +33,7 @@ dependencies = [
     "cupy-cuda12x",
     "pyyaml",
     "questionary",
+    "pytest"
 ]
 
 [project.optional-dependencies]
