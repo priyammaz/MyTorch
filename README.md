@@ -661,6 +661,7 @@ Triton is not too challenging to learn, it just needs some practice! I think my 
 
 I am not even close to done! Here are some of the stuff I want to work on next to keep this going (on top of finishing all the unfinished ops from above)!
 
+- [ ] Make a Tiny GPT2 Example for Colab
 - [ ] Fused Linear Layer w/ Grouped MatMul and Bias
 - [ ] Fused Embedding Layer
 - [ ] Flash Attention
