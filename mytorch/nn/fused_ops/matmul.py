@@ -6,6 +6,10 @@ And really helpful explanation from Evintunador
 https://github.com/evintunador/triton_docs_tutorials/blob/main/06_matmul/matmul.py
 
 C = A@B -> [M x K] @ [K x N] = [M x N]
+
+We wont be using this Matmul directly anywhere as Cupy already is using the highly optimized
+CUDNN in the backend. This is more of an attempt to understand grouping as we will use it in
+our linear layers (with a fused bias) and convolution layers
 """
 
 import os
