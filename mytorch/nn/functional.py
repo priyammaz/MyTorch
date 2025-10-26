@@ -23,6 +23,9 @@ except:
 
 import warnings
 
+##############
+### LAYERS ###
+##############
 def linear(input, weight, bias=None, auto=False):
 
     """
@@ -1485,6 +1488,12 @@ def averagepool2d(input, kernel_size, stride=None, padding=0):
 
     return output
 
+def maxpool1d():
+    pass
+
+def avgpool1d():
+    pass
+
 def embedding(indices, weight):
     """
     Standard indexing op to get embeddings for the indexes we want
@@ -1835,6 +1844,18 @@ def batchnorm(input, weight, bias,
     
     return output
 
+def groupnorm():
+    pass
+
+def isntancenorm():
+    pass
+
+def rmsnorm():
+    pass
+
+###################
+### ACTIVATIONS ###
+###################
 def sigmoid(x, auto=False):
 
     if auto:
@@ -2092,6 +2113,15 @@ def softmax(x, dim=-1, auto=False, fused=False):
 
         return out
 
+def leaky_relu():
+    pass
+
+def tanh():
+    pass
+
+##############
+### LOSSES ###
+##############
 def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
 
     """
@@ -2300,6 +2330,33 @@ def mse_loss(pred, labels, auto=False):
         
         return out
 
+def bce_with_logits_loss():
+    pass
+
+def bce_loss():
+    pass
+
+def l1_loss():
+    pass
+
+def smooth_l1_loss():
+    pass
+
+def nll_loss():
+    pass
+
+def kldiv_loss():
+    pass
+
+def huber_loss():
+    pass
+
+def cosine_sim_loss():
+    pass
+
+#################
+### ATTENTION ###
+#################
 def scaled_dot_product_attention(Q, K, V, causal=False, softmax_scale=None):
     
     if not FUSED_AVAIL:
@@ -2370,3 +2427,6 @@ def scaled_dot_product_attention(Q, K, V, causal=False, softmax_scale=None):
         out._add_parents(Q, K, V)
 
     return out
+
+def sliding_window_attention():
+    pass
