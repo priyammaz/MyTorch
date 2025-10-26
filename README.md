@@ -240,21 +240,20 @@ No Deep Learning Framework would be complete without a set of modules! These are
 
 ### Convolutions/Pooling
 
-The focus for MyTorch is for LLM training, but Convolutions are also important! Unfortunately, it is very challenging to get CUDNN level performance (even with triton kernels) for convolutions. So these will be more of a learning exercise than for actual use!
+The focus for MyTorch is for LLM training, but Convolutions are also important! Unfortunately, it is very challenging to get CUDNN level performance (even with triton kernels) for convolutions. So these will be more of a learning exercise than for actual use! We could leverage the [Cudnn Frontend](https://github.com/NVIDIA/cudnn-frontend) but I want the dependencies to be as minimal as possible, and the goal here is to learn!
 
 | **Operation**         | **Impl** | **Fused** |
 |-----------------------|----------|-----------|
 | **Core Layers**       |          |           |
 | Conv1d                | ✅       | ✅        |
 | Conv2d                | ✅       | ✅        |
-| ConvTranspose1d       | ✅       | ❌        |
-| ConvTranspose2d       | ✅       | ❌        |
-| MaxPool2d             | ✅       | ❌        |
-| AvgPool2d             | ✅       | ❌        |
-| MaxPool1d             | ❌       | ❌        |
-| AvgPool1d             | ❌       | ❌        |
-| AdaptiveAvgPool2d     | ✅       | ❌        |
-| Upsample              | ❌       | ❌        |
+| ConvTranspose1d       | ✅       | 🚫        |
+| ConvTranspose2d       | ✅       | 🚫        |
+| MaxPool2d             | ✅       | 🚫        |
+| AvgPool2d             | ✅       | 🚫        |
+| MaxPool1d             | ❌       | 🚫        |
+| AvgPool1d             | ❌       | 🚫        |
+| AdaptiveAvgPool2d     | ✅       | 🚫        |
 
 
 ### How to Use
@@ -570,7 +569,7 @@ python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
 bash train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --log_wandb
 ```
 
-My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 125K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
+My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 250K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
 
 <img src="https://github.com/priyammaz/MyTorch/blob/main/src/gpt2_owt_curve.png?raw=true" alt="drawing" width="600"/>
 
@@ -604,30 +603,30 @@ So now, we use the orange path to give our first gradient injection into the lig
 
 ### Blending AutoGrad and Manual Grad
 
-Technically we can do everything with Autograd. If you want, many of the layers have both a manual and auto mode so you can test it. But, that isn't always efficient. For example, we can do automatic differentiation of the Softmax function and it will work fine. But we know the derivative of softmax, so for many of the known ops I have added in the manual backward pass as its just more memory efficient and it keeps us from having to store more intemediate states. 
+Technically we can do everything with Autograd. If you want, many of the layers have both a manual and auto mode so you can test it. But, that isn't always efficient. For example, we can do automatic differentiation of the Sigmoid function and it will work fine. But we know the derivative of sigmoid, so for many of the known composite of ops I have added in the manual backward pass as its just more memory efficient and it keeps us from having to store more intemediate states. 
 
 ```python
-def relu(x, auto=False):
-    if auto: # Use Autograd
-        mask = Tensor(cp.where(x.data < 0, 0, 1).astype(cp.float32))
-        return x * mask
+def sigmoid(x, auto=False):
 
-    else: # Use manually defined backward pass
-        out_data = cp.maximum(x.data, 0, out=cp.empty_like(x.data))
+    if auto:
+        return 1 / (1 + (-x).exp())
+    else:
+        x_cp = x.data
+        out_data = 1 / (1 + np.exp(-x_cp))
 
-        def _relu_backward(input_grad):
-            if x.requires_grad:
-                grad_input = input_grad * (x.data > 0)
-                if x.grad is None:
-                    x.grad = cp.zeros_like(x.data, dtype=cp.float32)
+        def _sigmoid_backward(grad_output):
+            grad_input = grad_output * out.data * (1 - out.data)
+            if x.grad is None:
+                x.grad = grad_input
+            else:
                 x.grad += grad_input
-
+        
         requires_grad = x.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
-            out_data,
+            out_data, 
             requires_grad=requires_grad,
-            grad_fn=_relu_backward if requires_grad else None,
-            grad_fn_name="<ReLUBackward>" if requires_grad else None
+            grad_fn=_sigmoid_backward if requires_grad else None, 
+            grad_fn_name="<SigmoidBackward>" if requires_grad else None
         )
 
         if requires_grad:
