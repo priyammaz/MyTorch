@@ -71,10 +71,10 @@ class Attention(nn.Module):
         self.fused = fused
 
         ### Attention Projections ###
-        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto)
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto, fused=self.fused)
 
         ### Post Attention Projection ###
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto, fused=self.fused)
         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
 
         if not self.fused:
@@ -137,15 +137,16 @@ class FeedForward(nn.Module):
                  mlp_ratio=4, 
                  mlp_dropout_p=0.1,
                  use_bias=True,
-                 auto=False):
+                 auto=False,
+                 fused=False):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
 
-        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto)
+        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=fused)
         self.activation = nn.GELU()
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
 
-        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto)
+        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=fused)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
     def forward(self, x):
@@ -181,7 +182,7 @@ class TransformerBlock(nn.Module):
                                    fused=fused)
         
         self.layernorm1 = nn.LayerNorm(embed_dim, bias=use_bias, auto=auto, fused=fused)
-        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto)
+        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto, fused=fused)
         self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
 
     def forward(self, x):

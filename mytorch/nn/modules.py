@@ -359,13 +359,20 @@ class Linear(Module):
     """
     Optimized Linear layer with manual backward.
     """
-    def __init__(self, in_features, out_features, bias=True, auto=False):
+    def __init__(self, in_features, out_features, bias=True, auto=False, fused=False):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
+        self.fused = fused
         self.bias = bias
         self.auto = auto
 
+        if self.auto and fused:
+            raise Exception("Modules with full autograd cannot be fused, turn off fused")
+
+        if fused and not FUSED_AVAIL:
+            raise Exception("Triton Installation Necessary for Fused Ops")
+        
         self.weight = zeros((out_features, in_features), requires_grad=True)
         k = math.sqrt(1 / in_features)
         init.uniform_(self.weight, -k, k)
@@ -388,7 +395,7 @@ class Linear(Module):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias}"
     
     def forward(self, x: Tensor):
-        output = F.linear(x, weight=self.weight, bias=self.bias, auto=self.auto)
+        output = F.linear(x, weight=self.weight, bias=self.bias, auto=self.auto, fused=self.fused)
         return output
     
 class Embedding(Module):
