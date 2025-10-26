@@ -126,64 +126,11 @@ class AdamW(Optimizer):
         for p in self.params:
             p.grad = None
 
-class FusedAdamW(Optimizer):
-    def __init__(self, params, lr=1e-3, beta1=0.9, beta2=0.999, eps=1e-8, weight_decay=0.01):
-        # Collect flattened tensors
-        self.params = [p for p in params if p.requires_grad]
-        sizes = [np.prod(p.shape) for p in self.params]
+class RMSProp():
+    pass
 
-        # Flatten parameter, momentum, and variance buffers
-        self.flat_param = mytorch.concatenate([p.reshape(-1) for p in self.params])
-        self.m = mytorch.zeros_like(self.flat_param).data
-        self.v = mytorch.zeros_like(self.flat_param).data
-        self.flat_param = self.flat_param.data
+class Adagrad():
+    pass
 
-        # Pointers to restore views after updates
-        self.views = []
-        offset = 0
-        for s in sizes:
-            self.views.append(slice(offset, offset + s))
-            offset += s
-
-        self.lr = lr
-        self.beta1 = beta1
-        self.beta2 = beta2
-        self.eps = eps
-        self.weight_decay = weight_decay
-
-        self.t = 0
-        self.beta1_pow = 1.0
-        self.beta2_pow = 1.0
-
-    def step(self):
-        self.t += 1
-        self.beta1_pow *= self.beta1
-        self.beta2_pow *= self.beta2
-
-        lr_t = self.lr * (1 - self.beta2_pow) ** 0.5 / (1 - self.beta1_pow)
-
-        # Flatten gradients into a single contiguous tensor
-        flat_grad = cp.concatenate([p.grad.reshape(-1) for p in self.params])
-
-        # Compute all updates in parallel
-        self.m *= self.beta1
-        self.m += (1 - self.beta1) * flat_grad
-
-        self.v *= self.beta2
-        self.v += (1 - self.beta2) * (flat_grad ** 2)
-
-        denom = self.v ** 0.5 + self.eps
-        step = self.m / denom
-        self.flat_param += step*lr_t
-
-        # Decoupled weight decay
-        if self.weight_decay != 0.0:
-            self.flat_params -= self.lr * self.weight_decay * self.flat_params
-
-        # Write updated flat buffer back to param tensors (no data copy, just views)
-        for p, view in zip(self.params, self.views):
-            p.data.copy_(self.flat_param[view].view_as(p))
-
-    def zero_grad(self):
-        for p in self.params:
-            p.grad = None
+class Adadelta():
+    pass
