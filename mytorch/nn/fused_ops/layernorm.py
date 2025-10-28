@@ -491,7 +491,7 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
         # Compute strides in elements for each array
         x_row_stride = x.stride(0)
         y_row_stride = y.stride(0)
-        x_hat_row_stride = x_hat.stride(0)
+        x_hat_row_stride = x_hat.stride(0) if x_hat is not None else None
         
         # Map dtype to Triton flag
         dtype_flag = 0 if x.dtype == torch.float32 else 1  # 0=float32, 1=float16
