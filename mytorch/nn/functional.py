@@ -34,7 +34,7 @@ def linear(input, weight, bias=None, auto=False, fused=False):
     y = x@W.T + b
 
     x: (B, I)
-    W: (I,O)
+    W: (O,I)
     b: (O,)
     """
 
@@ -42,6 +42,11 @@ def linear(input, weight, bias=None, auto=False, fused=False):
     reshaped = False
     *dims, in_features = input.shape
     out_features = weight.shape[0]
+
+    if in_features != weight.shape[1]:
+        raise RuntimeError(
+            f"size mismatch, got input: {input.shape} and weight: {weight.shape}"
+        )
 
     ### If our data is (*, I) where * is any number of extra dimensions ###
     ### We need to flatten it! ###

@@ -704,10 +704,6 @@ class Tensor:
 
     def __matmul__(self, val):
 
-        ### Preallocate Memory for MatMul ###
-        non_matmul_shapes = self.shape[:-2]
-        output_shape = (*non_matmul_shapes, self.data.shape[-2], val.data.shape[-1])
-
         ### Compute MatMul ###
         output_data = np.matmul(self.data, val.data)
 
