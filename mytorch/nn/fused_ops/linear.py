@@ -42,18 +42,12 @@ def fused_linear_forward_kernel(
     BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr, DTYPE_FLAG: tl.constexpr
 ):
-    if DTYPE_FLAG == 0:
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        weight_ptr = tl.cast(weight_ptr, tl.pointer_type(tl.float32))
-        out_ptr = tl.cast(out_ptr, tl.pointer_type(tl.float32))
-        if bias_ptr is not None:
-            bias_ptr = tl.cast(bias_ptr, tl.pointer_type(tl.float32))
-    elif DTYPE_FLAG == 1:
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        weight_ptr = tl.cast(weight_ptr, tl.pointer_type(tl.float16))
-        out_ptr = tl.cast(out_ptr, tl.pointer_type(tl.float16))
-        if bias_ptr is not None:
-            bias_ptr = tl.cast(bias_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
+    weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
+    out_ptr = tl.cast(out_ptr, tl.pointer_type(pointer_type))
+    if bias_ptr is not None:
+        bias_ptr = tl.cast(bias_ptr, tl.pointer_type(pointer_type))
 
     pid = tl.program_id(axis=0)
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)

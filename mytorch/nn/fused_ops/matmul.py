@@ -753,14 +753,10 @@ def grouped_matmul_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers to the Correct DTYPE ###
-    if DTYPE_FLAG == 0:  # float32
-        A_ptr = tl.cast(A_ptr, tl.pointer_type(tl.float32))
-        B_ptr = tl.cast(B_ptr, tl.pointer_type(tl.float32))
-        C_ptr = tl.cast(C_ptr, tl.pointer_type(tl.float32))
-    elif DTYPE_FLAG == 1:  # float16
-        A_ptr = tl.cast(A_ptr, tl.pointer_type(tl.float16))
-        B_ptr = tl.cast(B_ptr, tl.pointer_type(tl.float16))
-        C_ptr = tl.cast(C_ptr, tl.pointer_type(tl.float16))
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    A_ptr = tl.cast(A_ptr, tl.pointer_type(pointer_dtype))
+    B_ptr = tl.cast(B_ptr, tl.pointer_type(pointer_dtype))
+    C_ptr = tl.cast(C_ptr, tl.pointer_type(pointer_dtype))
 
     num_pid_m = tl.cdiv(M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(N, BLOCK_SIZE_N)

@@ -286,18 +286,12 @@ def _implicit_gemm_conv2d_fwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast Pointers to Correct Dtype ###
-    if DTYPE_FLAG == 0:  # float32
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        weight_ptr = tl.cast(weight_ptr, tl.pointer_type(tl.float32))
-        if bias_ptr is not None:
-            bias_ptr = tl.cast(bias_ptr, tl.pointer_type(tl.float32))
-    elif DTYPE_FLAG == 1:  # float16
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        weight_ptr = tl.cast(weight_ptr, tl.pointer_type(tl.float16))
-        if bias_ptr is not None:
-            bias_ptr = tl.cast(bias_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_type))
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
+    weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
+    if bias_ptr is not None:
+        bias_ptr = tl.cast(bias_ptr, tl.pointer_type(pointer_type))
 
     ### Compute our Groups ###
     num_pid_m = tl.cdiv(GEMM_M, BLOCK_SIZE_M)
@@ -601,14 +595,10 @@ def _implicit_gemm_conv2d_input_bwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers ###
-    if DTYPE_FLAG == 0:  # float32
-        dinput_ptr = tl.cast(dinput_ptr, tl.pointer_type(tl.float32))
-        doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(tl.float32))
-        weight_ptr = tl.cast(weight_ptr, tl.pointer_type(tl.float32))
-    elif DTYPE_FLAG == 1:  # float16
-        dinput_ptr = tl.cast(dinput_ptr, tl.pointer_type(tl.float16))
-        doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(tl.float16))
-        weight_ptr = tl.cast(weight_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    dinput_ptr = tl.cast(dinput_ptr, tl.pointer_type(pointer_type))
+    doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
+    weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
 
     ### Comput Block ###
     num_pid_m = tl.cdiv(GEMM_M, BLOCK_SIZE_M)
@@ -790,14 +780,10 @@ def _implicit_gemm_conv2d_weight_bwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers ###
-    if DTYPE_FLAG == 0:  # float32
-        dweight_ptr = tl.cast(dweight_ptr, tl.pointer_type(tl.float32))
-        doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(tl.float32))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-    elif DTYPE_FLAG == 1:  # float16
-        dweight_ptr = tl.cast(dweight_ptr, tl.pointer_type(tl.float16))
-        doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(tl.float16))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    dweight_ptr = tl.cast(dweight_ptr, tl.pointer_type(pointer_type))
+    doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
 
     num_pid_m = tl.cdiv(GEMM_M, BLOCK_SIZE_M)
     num_pid_n = tl.cdiv(GEMM_N, BLOCK_SIZE_N)
@@ -904,12 +890,9 @@ def _implicit_gemm_conv2d_bias_bwd_kernel(
     k = tl.program_id(0)
     
     ### Cast our Pointers ###
-    if DTYPE_FLAG == 0:  # float32
-        dbias = tl.cast(dbias, tl.pointer_type(tl.float32))
-        doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(tl.float32))
-    elif DTYPE_FLAG == 1:  # float16
-        dbias = tl.cast(dbias, tl.pointer_type(tl.float16))
-        doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    dbias = tl.cast(dbias, tl.pointer_type(pointer_type))
+    doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
 
     ### Each channel has H_out*W_out elements in it (thats why our BLOCK_SIZE is H_out*W_out) ###
     offs_pq = tl.arange(0, BLOCK_SIZE) 

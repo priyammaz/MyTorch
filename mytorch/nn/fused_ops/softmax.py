@@ -32,7 +32,7 @@ def softmax_kernel_forward(
     input_ptr, 
     input_row_stride, 
     output_row_stride, 
-    dtype_flag: tl.constexpr, # Flag for if our data is float32 or float16
+    DTYPE_FLAG: tl.constexpr, # Flag for if our data is float32 or float16
     n_cols: tl.constexpr,  
     BLOCK_SIZE: tl.constexpr):
 
@@ -250,13 +250,9 @@ def softmax_kernel_forward(
     ### SO THIS IS A QUICK TOGGLE TO CAST THE DTYPE ###
     ### CODE REFERENCE: https://github.com/triton-lang/triton/issues/2943
 
-    if dtype_flag == 0:  # float32
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
-
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
+    output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
 
     ### We have the row index in our threadblock, but we actually need to grab that row of data ###
     ### from memory. So lets index it! Our input_ptr points to the starting point of our data ###
@@ -307,7 +303,7 @@ def softmax_kernel_backward(
     output_ptr, output_row_stride, 
     s_ptr, s_row_stride,
     grad_ptr, grad_row_stride,
-    dtype_flag: tl.constexpr,
+    DTYPE_FLAG: tl.constexpr,
     n_cols: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr):
 
@@ -328,14 +324,10 @@ def softmax_kernel_backward(
 
     row_idx = tl.program_id(0)
 
-    if dtype_flag == 0:  # float32
-        s_ptr = tl.cast(s_ptr, tl.pointer_type(tl.float32))
-        grad_ptr = tl.cast(grad_ptr, tl.pointer_type(tl.float32))
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        s_ptr = tl.cast(s_ptr, tl.pointer_type(tl.float16))
-        grad_ptr = tl.cast(grad_ptr, tl.pointer_type(tl.float16))
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    s_ptr = tl.cast(s_ptr, tl.pointer_type(pointer_dtype))
+    grad_ptr = tl.cast(grad_ptr, tl.pointer_type(pointer_dtype))
+    output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
     
     ### Get Rows ###
     s_row_start_ptr = s_ptr + row_idx * s_row_stride

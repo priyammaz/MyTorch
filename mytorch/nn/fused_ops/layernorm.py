@@ -50,7 +50,7 @@ def layernorm_kernel_forward_training(
     input_row_stride, 
     output_row_stride, 
     x_hat_row_stride, 
-    dtype_flag: tl.constexpr, # Flag for if our data is float32 or float16
+    DTYPE_FLAG: tl.constexpr, # Flag for if our data is float32 or float16
     eps: tl.constexpr,
     n_cols: tl.constexpr, # Dimensionality of our embeddings
     BLOCK_SIZE: tl.constexpr, # closest power of 2 to our dim of embeddings 
@@ -75,7 +75,7 @@ def layernorm_kernel_forward_training(
     row_idx = tl.program_id(0)
 
     ### Map ptrs to correct dtype ###
-    pointer_dtype = tl.float32 if dtype_flag == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
     gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(pointer_dtype))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
@@ -149,7 +149,7 @@ def layernorm_gamma_kernel_backward(
     norm_stride, 
     dy_stride, 
     d_gamma_row_stride, 
-    dtype_flag: tl.constexpr,
+    DTYPE_FLAG: tl.constexpr,
     n_rows: tl.constexpr, 
     n_cols: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,     ### Number of columns in our tile
@@ -251,7 +251,7 @@ def layernorm_gamma_kernel_backward(
     row_idx = tl.program_id(1)
 
     ### DTYPE MAP ###
-    pointer_type = tl.float32 if dtype_flag == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     dgamma_ptr = tl.cast(dgamma_ptr, tl.pointer_type(pointer_type))
     norm_ptr = tl.cast(norm_ptr, tl.pointer_type(pointer_type))
     dy_ptr = tl.cast(dy_ptr, tl.pointer_type(pointer_type))
@@ -401,7 +401,7 @@ def layernorm_kernel_backward(
     dx_row_stride,
     dx_hat_row_stride,
     x_hat_row_stride,
-    dtype_flag: tl.constexpr, 
+    DTYPE_FLAG: tl.constexpr, 
     n_cols: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr
 ):
@@ -427,7 +427,7 @@ def layernorm_kernel_backward(
     row_idx = tl.program_id(0)
 
     ### Map Pointers To Correct Dtype ###
-    pointer_type = tl.float32 if dtype_flag == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     dx_ptr = tl.cast(dx_ptr, tl.pointer_type(pointer_type))
     dx_hat_ptr = tl.cast(dx_hat_ptr, tl.pointer_type(pointer_type))
     x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(pointer_type))
