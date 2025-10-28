@@ -96,15 +96,9 @@ def linear(input, weight, bias=None, auto=False, fused=False):
         
         else:
 
-            ### Do MatMul Op ###
-            output_shape = (np.prod(dims), out_features) if reshaped else (input_xp.shape[0], out_features)
-
-            ### Preallocation Needs to Occur on the Correct Device ###
-            output = input.xp.empty(output_shape, dtype=input_xp.dtype)
-            np.matmul(input_xp, weight_xp, out=output)
-
+            output = np.matmul(input_xp, weight_xp)
             if bias is not None:
-                np.add(output, bias_xp.reshape(1,-1), out=output)
+                output += bias_xp.reshape(1,-1)
 
         ### Return output to original shape (*, O) ###
         if reshaped:
@@ -274,10 +268,9 @@ def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, fused=Fals
         weights_flat = weight.data.reshape(C_out, -1).T
 
         ### Forward ###
-        output = input.xp.empty((cols_flat.shape[0], weights_flat.shape[1]))
-        np.matmul(cols_flat, weights_flat, out=output)
+        output = np.matmul(cols_flat, weights_flat)
         if bias is not None:
-            np.add(output, bias.data, out=output)
+            output += bias.data
 
         #### Reshape back to (B x C_out x H_out x W_out) ###
         output = output.reshape(B, H_out*W_out, C_out).transpose(0,2,1).reshape(B, C_out, H_out, W_out)
@@ -771,10 +764,9 @@ def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, fused=Fals
         weights_flat = weight.data.reshape(C_out, -1).T
 
         ### Forward ###
-        output = input.xp.empty((cols_flat.shape[0], weights_flat.shape[1]))
-        np.matmul(cols_flat, weights_flat, out=output)
+        output = np.matmul(cols_flat, weights_flat)
         if bias is not None:
-            np.add(output, bias.data, out=output)
+            output += bias.data
 
         #### Reshape back to (B x C_out x H_out x W_out) ###
         output = output.reshape(B, L_out, C_out).transpose(0, 2, 1)
@@ -957,8 +949,7 @@ def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_paddi
     weights_flat = weight_cp.reshape(C_in, C_out*K*K)
     
     ### Forward MatMul ###
-    cols_flat = xp.empty((B*H_in*W_in, C_out*K*K))
-    xp.matmul(input_flat, weights_flat, out=cols_flat)
+    cols_flat = xp.matmul(input_flat, weights_flat)
 
     ### Reshape Cols back to (B, H_in*W_in, C_out*K*K) ###
     cols = cols_flat.reshape(B, H_in*W_in, C_out*K*K)
@@ -1035,8 +1026,7 @@ def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_paddi
 
         if weight.requires_grad:
             ### grad_weights_flat = input_flat.T @ grad_cols_flat -> (C_in, C_out*K*K) ###
-            grad_weights_flat = xp.empty((C_in, C_out * K * K), dtype=weight.dtype)
-            xp.matmul(input_flat.T, grad_cols_flat, out=grad_weights_flat)
+            grad_weights_flat = xp.matmul(input_flat.T, grad_cols_flat)
 
             ### Reshape to (C_in, C_out, K, K) ###
             grad_W = grad_weights_flat.reshape(C_in, C_out, K, K)
@@ -1056,8 +1046,7 @@ def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_paddi
 
         if input.requires_grad:
             ### grad_input_flat = grad_cols_flat @ weights_flat.T -> (B*H_in*W_in, C_in) ###
-            grad_input_flat = xp.empty((B * H_in * W_in, C_in))
-            xp.matmul(grad_cols_flat, weights_flat.T, out=grad_input_flat)
+            grad_input_flat = xp.matmul(grad_cols_flat, weights_flat.T)
 
             ### Reshape back, accounting for the transpose ###
             grad_input_reshaped = grad_input_flat.reshape(B, H_in, W_in, C_in)
@@ -1108,8 +1097,7 @@ def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_paddi
     weights_flat = weight_cp.reshape(C_in, C_out*K)                  # (C_in, C_out*K)
 
     # Forward matmul
-    cols_flat = xp.empty((B*L_in, C_out*K))
-    xp.matmul(input_flat, weights_flat, out=cols_flat)
+    cols_flat = xp.matmul(input_flat, weights_flat)
 
     # Reshape to (B, L_in, C_out*K)
     cols = cols_flat.reshape(B, L_in, C_out*K)
@@ -1155,8 +1143,7 @@ def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_paddi
         grad_cols_flat = grad_cols.reshape(B*L_in, C_out*K)
 
         if weight.requires_grad:
-            grad_weights_flat = xp.empty((C_in, C_out*K), dtype=weight.dtype)
-            xp.matmul(input_flat.T, grad_cols_flat, out=grad_weights_flat)
+            grad_weights_flat = xp.matmul(input_flat.T, grad_cols_flat)
             grad_W = grad_weights_flat.reshape(C_in, C_out, K)
             if weight.grad is None:
                 weight.grad = grad_W
@@ -1171,8 +1158,7 @@ def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_paddi
                 bias.grad += grad_b
 
         if input.requires_grad:
-            grad_input_flat = xp.empty((B*L_in, C_in))
-            xp.matmul(grad_cols_flat, weights_flat.T, out=grad_input_flat)
+            grad_input_flat = xp.matmul(grad_cols_flat, weights_flat.T)
             grad_input = grad_input_flat.reshape(B, L_in, C_in).transpose(0, 2, 1)
             if input.grad is None:
                 input.grad = grad_input
@@ -1565,11 +1551,27 @@ def dropout(input, dropout_p, training=True, auto=False):
 def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=False):
 
     """
+    Layernorm over the last dimension of a Tensor!!
+
     Standard LayerNorm op with input of the shape (*, E)
-    
+
     gamma -> (E,)
     beta -> (E,)
 
+    This means if you want to apply layernorm to some arbritrary dimension, or multiple
+    you need to reshape it and move that dimension last. 
+
+    For example:
+
+    If your data is [B x L x E] you are already good to go! The B,L dims are handled internally
+
+    If your data is [B x C x H x W] and you want to layernorm on the C dimension, you need to
+    reshape to [B x H x W x C] making channels last!
+
+    If your data is [B x C x H x W] and you want to layernorm on the C,H,W dimension, you need to
+    reshape to [B x C*H*W] 
+
+    The nn.LayerNorm already handles this!
     """
     
     reshaped = False
@@ -1622,10 +1624,9 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Fa
             ### Store copy of x_hat for the input backward ###
             x_hat = (input_cp - mean) * inv_std
             
-            output = np.empty_like(x_hat)
-            np.multiply(x_hat, gamma_cp.reshape(1,-1), out=output)
+            output = np.multiply(x_hat, gamma_cp.reshape(1,-1))
             if bias is not None:
-                np.add(output, beta_cp.reshape(1,-1), out=output)
+                output += beta_cp.reshape(1,-1)
 
             ### Reshape Back if Needed ###
             output = output.reshape(*dims, embed_dim)
