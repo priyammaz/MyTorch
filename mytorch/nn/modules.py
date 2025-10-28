@@ -810,7 +810,6 @@ class LayerNorm(Module):
     def _extra_repr(self):
         return f"{self.normalized_shape}"
 
-
 class BatchNorm2d(Module):
     def __init__(self, num_features, eps=1e-5, momentum=0.1):
         super().__init__()
