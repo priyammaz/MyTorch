@@ -222,7 +222,8 @@ class GPT2(nn.Module):
         self.lm_head = nn.Linear(config.embed_dim, 
                                  config.vocab_size, 
                                  bias=config.use_bias,
-                                 auto=config.use_full_auto)
+                                 auto=config.use_full_auto,
+                                 fused=config.use_fused_ops)
 
         ### Initialize Weights ###
         self.apply(_init_weights)
