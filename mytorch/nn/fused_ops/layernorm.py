@@ -292,7 +292,6 @@ def layernorm_kernel_forward_training_no_bias(
     inv_var_ptrs = inv_var_ptr + row_idx
     tl.store(inv_var_ptrs, inv_var)
 
-
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_forward_inference_no_bias(
@@ -359,7 +358,6 @@ def layernorm_kernel_forward_inference_no_bias(
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
-
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"]*args["ROW_BLOCK_SIZE"])})
 @triton.jit
@@ -775,14 +773,11 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
             if beta is not None:
                 layernorm_kernel_forward_inference[grid](
                     y,                   # output_ptr
-                    inv_var,             # inv_var_ptr
-                    x_hat,               # x_hat_ptr
                     x,                   # input_ptr
                     gamma,               # gamma_ptr
                     beta,                # beta_ptr
                     x_row_stride,        # input_row_stride
                     y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
                     dtype_flag,          # dtype_flag (constexpr)
                     eps,                 # eps (constexpr)
                     n_cols,              # n_cols (constexpr)
@@ -791,23 +786,19 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
             else:
                 layernorm_kernel_forward_inference_no_bias[grid](
                     y,                   # output_ptr
-                    inv_var,             # inv_var_ptr
-                    x_hat,               # x_hat_ptr
                     x,                   # input_ptr
                     gamma,               # gamma_ptr
                     x_row_stride,        # input_row_stride
                     y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
                     dtype_flag,          # dtype_flag (constexpr)
                     eps,                 # eps (constexpr)
                     n_cols,              # n_cols (constexpr)
                     BLOCK_SIZE           # BLOCK_SIZE (constexpr)
                 )
-            
+
             # Convert back to CuPy if needed
             y = cp.from_dlpack(y)
             return y
-
     else:
         # Allocate outputs
         y = cp.empty_like(x)
@@ -867,14 +858,11 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
             if beta is not None:
                 layernorm_kernel_forward_inference[grid](
                     y.data.ptr,          # output_ptr
-                    inv_var.data.ptr,    # inv_var_ptr
-                    x_hat.data.ptr,      # x_hat_ptr
                     x.data.ptr,          # input_ptr
                     gamma.data.ptr,      # gamma_ptr
                     beta.data.ptr,       # beta_ptr
                     x_row_stride,        # input_row_stride
                     y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
                     dtype_flag,          # dtype_flag (constexpr)
                     eps,                 # eps (constexpr)
                     n_cols,              # n_cols (constexpr)
@@ -884,13 +872,10 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
             else:
                 layernorm_kernel_forward_inference_no_bias[grid](
                     y.data.ptr,          # output_ptr
-                    inv_var.data.ptr,    # inv_var_ptr
-                    x_hat.data.ptr,      # x_hat_ptr
                     x.data.ptr,          # input_ptr
                     gamma.data.ptr,      # gamma_ptr
                     x_row_stride,        # input_row_stride
                     y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
                     dtype_flag,          # dtype_flag (constexpr)
                     eps,                 # eps (constexpr)
                     n_cols,              # n_cols (constexpr)
