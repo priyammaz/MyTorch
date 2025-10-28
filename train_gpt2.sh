@@ -57,7 +57,7 @@ if [[ -z "$TARGET" ]]; then
 fi
 
 if [[ "$TRITON_AUTOTUNE" == true ]]; then
-    export TRITON_FLASH_AUTOTUNE_MODE="max"
+    export TRITON_AUTOTUNE_MODE="max"
 fi
 if [[ "$DLPACK_DISABLE" == true ]]; then
     export DLPACK_DISABLE="true"
@@ -95,8 +95,8 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size 64 \
-            --gradient_accumulation_steps 4 \
+            --batch_size 120 \
+            --gradient_accumulation_steps 8  \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
