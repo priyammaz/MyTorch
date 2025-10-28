@@ -115,7 +115,13 @@ def linear(input, weight, bias=None, auto=False, fused=False):
 
             ### Standard Weight Update formula ###
             if weight.requires_grad:
-                grad_W = np.matmul(input_xp.T, grad_output)
+                
+                ### these are just matmuls, we can use cupy/numpy matmul or our own fused matmul ###
+                if fused:
+                    grad_W = FO.fused_grouped_matmul(input_xp.T, grad_output)
+                else:
+                    grad_W = np.matmul(input_xp.T, grad_output)
+
                 if weight.grad is None:
                     weight.grad = grad_W.T
                 else:
@@ -131,8 +137,10 @@ def linear(input, weight, bias=None, auto=False, fused=False):
             
             ### Grad to Input ###
             if input.requires_grad:
-
-                grad_input = np.matmul(grad_output, weight_xp.T)
+                if fused:
+                    grad_input = FO.fused_grouped_matmul(grad_output, weight_xp.T)
+                else:
+                    grad_input = np.matmul(grad_output, weight_xp.T)
 
                 ### Reshape grad_input back to input feature shape (* x I) ###
                 grad_input = grad_input.reshape(*dims, in_features)
