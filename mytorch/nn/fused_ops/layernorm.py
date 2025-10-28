@@ -42,18 +42,18 @@ def layernorm_naive(x, weight, bias=None, eps=1e-5):
 @triton.jit
 def layernorm_kernel_forward_training(
     output_ptr, 
-    inv_var_ptr, # Need for Backward Pass (N,)
-    x_hat_ptr, # Need for Backward Pass (N x E)
+    inv_var_ptr, # Need for Backward Pass (N,) # can be None during inference
+    x_hat_ptr, # Need for Backward Pass (N x E) # can be none during inference
     input_ptr, 
     gamma_ptr,  # 1D vector shared across all samples (E, )
-    beta_ptr,   # 1D vector shared across all samples (E, )
+    beta_ptr,   # 1D vector shared across all samples (E, ) can be None if no bias
     input_row_stride, 
     output_row_stride, 
     x_hat_row_stride, 
     dtype_flag: tl.constexpr, # Flag for if our data is float32 or float16
     eps: tl.constexpr,
     n_cols: tl.constexpr, # Dimensionality of our embeddings
-    BLOCK_SIZE: tl.constexpr # closest power of 2 to our dim of embeddings 
+    BLOCK_SIZE: tl.constexpr, # closest power of 2 to our dim of embeddings 
 ):
 
     """
@@ -75,20 +75,16 @@ def layernorm_kernel_forward_training(
     row_idx = tl.program_id(0)
 
     ### Map ptrs to correct dtype ###
-    if dtype_flag == 0:  # float32
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float32))
-        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(tl.float32))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float32))
-        beta_ptr = tl.cast(beta_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float16))
-        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(tl.float16))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float16))
-        beta_ptr = tl.cast(beta_ptr, tl.pointer_type(tl.float16))
+    pointer_dtype = tl.float32 if dtype_flag == 0 else tl.float16
+    output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
+    gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(pointer_dtype))
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
+    if x_hat_ptr is not None:
+        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(pointer_dtype))
+    if inv_var_ptr is not None:
+        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(pointer_dtype))
+    if beta_ptr is not None:
+        beta_ptr = tl.cast(beta_ptr, tl.pointer_type(pointer_dtype))
 
     ### Get the start idx of data we want to norm (remember in memory its one long flat vector) ###
     row_start_ptr = input_ptr + row_idx * input_row_stride
@@ -102,167 +98,14 @@ def layernorm_kernel_forward_training(
     ### Get All Indexes ###
     input_ptrs = row_start_ptr + col_offsets
     gamma_ptrs = gamma_ptr + col_offsets
-    beta_ptrs = beta_ptr + col_offsets
+    if beta_ptr is not None:
+        beta_ptrs = beta_ptr + col_offsets
 
-    ### Load Row and Gamma and Beta ###
+    ### Load Row and Gamma ###
     row = tl.load(input_ptrs, mask=mask, other=0.) # Invalid row values can just be 0
     gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
-    betas = tl.load(beta_ptrs, mask=mask, other=0.) # We add betas so 0 has no effect 
-
-    ### Compute row mean and var w/ reduction ops ###
-    row_mean = tl.sum(row, axis=0) / n_cols
-
-    ### Subtract mean from row where mask is valid, otherwise just 0 ###
-    row_mean_centered = tl.where(mask, row-row_mean, 0.)
-    
-    ### Compute variance (E((x-mu)**2))
-    row_var = tl.sum(row_mean_centered * row_mean_centered, axis=0) / n_cols
-    inv_var = 1. / tl.sqrt(row_var + eps)
-    normed = row_mean_centered * inv_var
-
-    ### Compute final output ###
-    output = normed * gammas + betas
-
-    ### Write outputs ###
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, output, mask=mask)
-
-    # store x_hat (the normalized input row)
-    x_hat_row_start_ptr = x_hat_ptr + row_idx * x_hat_row_stride
-    x_hat_ptrs = x_hat_row_start_ptr + col_offsets
-    tl.store(x_hat_ptrs, normed, mask=mask)
-
-    # store inv_var (scalar for this row)
-    inv_var_ptrs = inv_var_ptr + row_idx
-    tl.store(inv_var_ptrs, inv_var)
-
-@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
-@triton.jit
-def layernorm_kernel_forward_inference(
-    output_ptr, 
-    input_ptr, 
-    gamma_ptr,  # 1D vector shared across all samples (E, )
-    beta_ptr,   # 1D vector shared across all samples (E, )
-    input_row_stride, 
-    output_row_stride, 
-    dtype_flag: tl.constexpr, # Flag for if our data is float32 or float16
-    eps: tl.constexpr,
-    n_cols: tl.constexpr, # Dimensionality of our embeddings
-    BLOCK_SIZE: tl.constexpr # closest power of 2 to our dim of embeddings 
-):
-
-    """
-    Identical to training, just dont need to store extra things like inv_var and x_hat
-    """
-
-    ### Which row are we normalizing? ###
-    row_idx = tl.program_id(0)
-
-    ### Map ptrs to correct dtype ###
-    if dtype_flag == 0:  # float32
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float32))
-        beta_ptr = tl.cast(beta_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float16))
-        beta_ptr = tl.cast(beta_ptr, tl.pointer_type(tl.float16))
-
-    ### Get the start idx of data we want to norm (remember in memory its one long flat vector) ###
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    
-    ### Get offsets for the full block ###
-    col_offsets = tl.arange(0,BLOCK_SIZE)
-
-    ### Mask for invalid regions of block ###
-    mask = col_offsets < n_cols
-    
-    ### Get All Indexes ###
-    input_ptrs = row_start_ptr + col_offsets
-    gamma_ptrs = gamma_ptr + col_offsets
-    beta_ptrs = beta_ptr + col_offsets
-
-    ### Load Row and Gamma and Beta ###
-    row = tl.load(input_ptrs, mask=mask, other=0.) # Invalid row values can just be 0
-    gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
-    betas = tl.load(beta_ptrs, mask=mask, other=0.) # We add betas so 0 has no effect 
-
-    ### Compute row mean and var w/ reduction ops ###
-    row_mean = tl.sum(row, axis=0) / n_cols
-
-    ### Subtract mean from row where mask is valid, otherwise just 0 ###
-    row_mean_centered = tl.where(mask, row-row_mean, 0.)
-    
-    ### Compute variance (E((x-mu)**2))
-    row_var = tl.sum(row_mean_centered * row_mean_centered, axis=0) / n_cols
-    inv_var = 1. / tl.sqrt(row_var + eps)
-    normed = row_mean_centered * inv_var
-
-    ### Compute final output ###
-    output = normed * gammas + betas
-
-    ### Write outputs ###
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, output, mask=mask)
-
-@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
-@triton.jit
-def layernorm_kernel_forward_training_no_bias(
-    output_ptr, 
-    inv_var_ptr, # Need for Backward Pass (N,)
-    x_hat_ptr, # Need for Backward Pass (N x E)
-    input_ptr, 
-    gamma_ptr,  # 1D vector shared across all samples (E, )
-    input_row_stride, 
-    output_row_stride, 
-    x_hat_row_stride, 
-    dtype_flag: tl.constexpr, # Flag for if our data is float32 or float16
-    eps: tl.constexpr,
-    n_cols: tl.constexpr, # Dimensionality of our embeddings
-    BLOCK_SIZE: tl.constexpr # closest power of 2 to our dim of embeddings 
-):
-
-    """
-    Same as layernorm_kernel_forward_training, just without a bias
-    """
-
-    ### Which row are we normalizing? ###
-    row_idx = tl.program_id(0)
-
-    ### Map ptrs to correct dtype ###
-    if dtype_flag == 0:  # float32
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float32))
-        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(tl.float32))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float16))
-        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(tl.float16))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float16))
-
-    ### Get the start idx of data we want to norm (remember in memory its one long flat vector) ###
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    
-    ### Get offsets for the full block ###
-    col_offsets = tl.arange(0,BLOCK_SIZE)
-
-    ### Mask for invalid regions of block ###
-    mask = col_offsets < n_cols
-    
-    ### Get All Indexes ###
-    input_ptrs = row_start_ptr + col_offsets
-    gamma_ptrs = gamma_ptr + col_offsets
-
-    ### Load Row and Gamma and Beta ###
-    row = tl.load(input_ptrs, mask=mask, other=0.) # Invalid row values can just be 0
-    gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
+    if beta_ptr is not None:
+        betas = tl.load(beta_ptrs, mask=mask, other=0.)
 
     ### Compute row mean and var w/ reduction ops ###
     row_mean = tl.sum(row, axis=0) / n_cols
@@ -277,87 +120,25 @@ def layernorm_kernel_forward_training_no_bias(
 
     ### Compute final output ###
     output = normed * gammas
+    if beta_ptr is not None:
+        output += betas
 
     ### Write outputs ###
     output_row_start_ptr = output_ptr + row_idx * output_row_stride
     output_ptrs = output_row_start_ptr + col_offsets
     tl.store(output_ptrs, output, mask=mask)
 
-    # store x_hat (the normalized input row)
-    x_hat_row_start_ptr = x_hat_ptr + row_idx * x_hat_row_stride
-    x_hat_ptrs = x_hat_row_start_ptr + col_offsets
-    tl.store(x_hat_ptrs, normed, mask=mask)
+    ### No need to waste time writing outputs if we dont need it! ###
+    if x_hat_ptr is not None and inv_var_ptr is not None:
 
-    # store inv_var (scalar for this row)
-    inv_var_ptrs = inv_var_ptr + row_idx
-    tl.store(inv_var_ptrs, inv_var)
+        # store x_hat (the normalized input row)
+        x_hat_row_start_ptr = x_hat_ptr + row_idx * x_hat_row_stride
+        x_hat_ptrs = x_hat_row_start_ptr + col_offsets
+        tl.store(x_hat_ptrs, normed, mask=mask)
 
-@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
-@triton.jit
-def layernorm_kernel_forward_inference_no_bias(
-    output_ptr, 
-    input_ptr, 
-    gamma_ptr,  # 1D vector shared across all samples (E, )
-    input_row_stride, 
-    output_row_stride, 
-    dtype_flag: tl.constexpr, # Flag for if our data is float32 or float16
-    eps: tl.constexpr,
-    n_cols: tl.constexpr, # Dimensionality of our embeddings
-    BLOCK_SIZE: tl.constexpr # closest power of 2 to our dim of embeddings 
-):
-
-    """
-    Identical to training no_bias, just dont need to store extra things like inv_var and x_hat
-    """
-
-    ### Which row are we normalizing? ###
-    row_idx = tl.program_id(0)
-
-    ### Map ptrs to correct dtype ###
-    if dtype_flag == 0:  # float32
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float16))
-        input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float16))
-        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(tl.float16))
-
-    ### Get the start idx of data we want to norm (remember in memory its one long flat vector) ###
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    
-    ### Get offsets for the full block ###
-    col_offsets = tl.arange(0,BLOCK_SIZE)
-
-    ### Mask for invalid regions of block ###
-    mask = col_offsets < n_cols
-    
-    ### Get All Indexes ###
-    input_ptrs = row_start_ptr + col_offsets
-    gamma_ptrs = gamma_ptr + col_offsets
-
-    ### Load Row and Gamma and Beta ###
-    row = tl.load(input_ptrs, mask=mask, other=0.) # Invalid row values can just be 0
-    gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
-
-    ### Compute row mean and var w/ reduction ops ###
-    row_mean = tl.sum(row, axis=0) / n_cols
-
-    ### Subtract mean from row where mask is valid, otherwise just 0 ###
-    row_mean_centered = tl.where(mask, row-row_mean, 0.)
-    
-    ### Compute variance (E((x-mu)**2))
-    row_var = tl.sum(row_mean_centered * row_mean_centered, axis=0) / n_cols
-    inv_var = 1. / tl.sqrt(row_var + eps)
-    normed = row_mean_centered * inv_var
-
-    ### Compute final output ###
-    output = normed * gammas
-
-    ### Write outputs ###
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, output, mask=mask)
+        # store inv_var (scalar for this row)
+        inv_var_ptrs = inv_var_ptr + row_idx
+        tl.store(inv_var_ptrs, inv_var)
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"]*args["ROW_BLOCK_SIZE"])})
 @triton.jit
@@ -470,14 +251,10 @@ def layernorm_gamma_kernel_backward(
     row_idx = tl.program_id(1)
 
     ### DTYPE MAP ###
-    if dtype_flag == 0:  # float32
-        dgamma_ptr = tl.cast(dgamma_ptr, tl.pointer_type(tl.float32))
-        norm_ptr = tl.cast(norm_ptr, tl.pointer_type(tl.float32))
-        dy_ptr = tl.cast(dy_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        dgamma_ptr = tl.cast(dgamma_ptr, tl.pointer_type(tl.float16))
-        norm_ptr = tl.cast(norm_ptr, tl.pointer_type(tl.float16))
-        dy_ptr = tl.cast(dy_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if dtype_flag == 0 else tl.float16
+    dgamma_ptr = tl.cast(dgamma_ptr, tl.pointer_type(pointer_type))
+    norm_ptr = tl.cast(norm_ptr, tl.pointer_type(pointer_type))
+    dy_ptr = tl.cast(dy_ptr, tl.pointer_type(pointer_type))
 
     ### Lets just pretend we are at the top left. This means index (0,0) for row/col idx ###
     ### Lets first get our offsets (our tile size in each dimension) ###
@@ -650,16 +427,11 @@ def layernorm_kernel_backward(
     row_idx = tl.program_id(0)
 
     ### Map Pointers To Correct Dtype ###
-    if dtype_flag == 0:  # float32
-        dx_ptr = tl.cast(dx_ptr, tl.pointer_type(tl.float32))
-        dx_hat_ptr = tl.cast(dx_hat_ptr, tl.pointer_type(tl.float32))
-        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(tl.float32))
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float32))
-    elif dtype_flag == 1:  # float16
-        dx_ptr = tl.cast(dx_ptr, tl.pointer_type(tl.float16))
-        dx_hat_ptr = tl.cast(dx_hat_ptr, tl.pointer_type(tl.float16))
-        x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(tl.float16))
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float16))
+    pointer_type = tl.float32 if dtype_flag == 0 else tl.float16
+    dx_ptr = tl.cast(dx_ptr, tl.pointer_type(pointer_type))
+    dx_hat_ptr = tl.cast(dx_hat_ptr, tl.pointer_type(pointer_type))
+    x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(pointer_type))
+    inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(pointer_type))
     
     ### Get correct row of upstream grad and normalized data x_hat ###
     dx_hat_row_start_ptr = dx_hat_ptr + row_idx * dx_hat_row_stride
@@ -713,8 +485,8 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
 
         # Allocate outputs
         y = torch.empty_like(x)
-        x_hat = torch.empty_like(x)
-        inv_var = torch.empty(n_rows, dtype=x.dtype, device=x.device)
+        x_hat = torch.empty_like(x) if training else None
+        inv_var = torch.empty(n_rows, dtype=x.dtype, device=x.device) if training else None
         
         # Compute strides in elements for each array
         x_row_stride = x.stride(0)
@@ -726,89 +498,42 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
         
         ### Set Grid ###
         grid = (n_rows,)
-        
-        ### When in training mode
+
+
+        layernorm_kernel_forward_training[grid](
+            y,                   # output_ptr
+            inv_var,             # inv_var_ptr
+            x_hat,               # x_hat_ptr
+            x,                   # input_ptr
+            gamma,               # gamma_ptr
+            beta,                # beta_ptr
+            x_row_stride,        # input_row_stride
+            y_row_stride,        # output_row_stride
+            x_hat_row_stride,    # x_hat_row_stride
+            dtype_flag,          # dtype_flag (constexpr)
+            eps,                 # eps (constexpr)
+            n_cols,              # n_cols (constexpr)
+            BLOCK_SIZE,          # BLOCK_SIZE (constexpr),
+        )
+         
+        # Convert back to CuPy if needed
+        y = cp.from_dlpack(y)
         if training:
-            ### if we have a beta 
-            if beta is not None:
-                layernorm_kernel_forward_training[grid](
-                    y,                   # output_ptr
-                    inv_var,             # inv_var_ptr
-                    x_hat,               # x_hat_ptr
-                    x,                   # input_ptr
-                    gamma,               # gamma_ptr
-                    beta,                # beta_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-            else:
-                layernorm_kernel_forward_training_no_bias[grid](
-                    y,                   # output_ptr
-                    inv_var,             # inv_var_ptr
-                    x_hat,               # x_hat_ptr
-                    x,                   # input_ptr
-                    gamma,               # gamma_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-            
-            # Convert back to CuPy if needed
-            y = cp.from_dlpack(y)
             x_hat = cp.from_dlpack(x_hat)
             inv_var = cp.from_dlpack(inv_var)
-            
             return y, x_hat, inv_var
+        return y
         
-        else:
-            if beta is not None:
-                layernorm_kernel_forward_inference[grid](
-                    y,                   # output_ptr
-                    x,                   # input_ptr
-                    gamma,               # gamma_ptr
-                    beta,                # beta_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-            else:
-                layernorm_kernel_forward_inference_no_bias[grid](
-                    y,                   # output_ptr
-                    x,                   # input_ptr
-                    gamma,               # gamma_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-
-            # Convert back to CuPy if needed
-            y = cp.from_dlpack(y)
-            return y
     else:
         # Allocate outputs
         y = cp.empty_like(x)
-        x_hat = cp.empty_like(x)
-        inv_var = cp.empty((n_rows,), dtype=x.dtype)
+        x_hat = cp.empty_like(x) if training else None
+        inv_var = cp.empty((n_rows,), dtype=x.dtype) if training else None
 
         # Compute strides in elements for each array
         x_row_stride = x.strides[0] // x.itemsize
         y_row_stride = y.strides[0] // y.itemsize
-        x_hat_row_stride = x_hat.strides[0] // x_hat.itemsize
+        x_hat_row_stride = x_hat.strides[0] // x_hat.itemsize if inv_var is not None else None
 
         # Map dtype to Triton flag
         dtype_flag = 0 if x.dtype == cp.float32 else 1  # 0=float32, 1=float16
@@ -816,74 +541,26 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
         ### Set Grid ###
         grid = (n_rows,)
 
-        ### When in training mode
+        layernorm_kernel_forward_training[grid](
+            y.data.ptr,                                           # output_ptr
+            inv_var.data.ptr if inv_var is not None else None,    # inv_var_ptr
+            x_hat.data.ptr if x_hat is not None else None,        # x_hat_ptr
+            x.data.ptr,                                           # input_ptr
+            gamma.data.ptr,                                       # gamma_ptr
+            beta.data.ptr if beta is not None else None,          # beta_ptr
+            x_row_stride,                                         # input_row_stride
+            y_row_stride,                                         # output_row_stride
+            x_hat_row_stride,                                     # x_hat_row_stride
+            dtype_flag,                                           # dtype_flag (constexpr)
+            eps,                                                  # eps (constexpr)
+            n_cols,                                               # n_cols (constexpr)
+            BLOCK_SIZE,                                           # BLOCK_SIZE (constexpr)
+        )
+
         if training:
-            ### if we have a beta 
-            if beta is not None:
-                layernorm_kernel_forward_training[grid](
-                    y.data.ptr,          # output_ptr
-                    inv_var.data.ptr,    # inv_var_ptr
-                    x_hat.data.ptr,      # x_hat_ptr
-                    x.data.ptr,          # input_ptr
-                    gamma.data.ptr,      # gamma_ptr
-                    beta.data.ptr,       # beta_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-
-            else:
-                layernorm_kernel_forward_training_no_bias[grid](
-                    y.data.ptr,          # output_ptr
-                    inv_var.data.ptr,    # inv_var_ptr
-                    x_hat.data.ptr,      # x_hat_ptr
-                    x.data.ptr,          # input_ptr
-                    gamma.data.ptr,      # gamma_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    x_hat_row_stride,    # x_hat_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-
             return y, x_hat, inv_var
+        return y
         
-        else:
-            if beta is not None:
-                layernorm_kernel_forward_inference[grid](
-                    y.data.ptr,          # output_ptr
-                    x.data.ptr,          # input_ptr
-                    gamma.data.ptr,      # gamma_ptr
-                    beta.data.ptr,       # beta_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-
-            else:
-                layernorm_kernel_forward_inference_no_bias[grid](
-                    y.data.ptr,          # output_ptr
-                    x.data.ptr,          # input_ptr
-                    gamma.data.ptr,      # gamma_ptr
-                    x_row_stride,        # input_row_stride
-                    y_row_stride,        # output_row_stride
-                    dtype_flag,          # dtype_flag (constexpr)
-                    eps,                 # eps (constexpr)
-                    n_cols,              # n_cols (constexpr)
-                    BLOCK_SIZE           # BLOCK_SIZE (constexpr)
-                )
-
-            return y
-
 def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True, use_dlpack=True):
 
     """
