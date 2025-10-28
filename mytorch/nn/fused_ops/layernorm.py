@@ -137,7 +137,6 @@ def layernorm_kernel_forward_training(
     inv_var_ptrs = inv_var_ptr + row_idx
     tl.store(inv_var_ptrs, inv_var)
 
-
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_forward_inference(
