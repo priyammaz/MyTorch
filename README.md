@@ -218,7 +218,7 @@ No Deep Learning Framework would be complete without a set of modules! These are
 
 | **Core Layers** | **Impl** | **Fused** | **Normalization** | **Impl** | **Fused** | **Activations** | **Impl** | **Fused** | 
 |---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
-| Linear | ✅ | ❌ | LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ |
+| Linear | ✅ | ✅ | LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ |
 | Embedding | ✅ | ❌| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ |
 | Dropout | ✅ | ❌ | BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ❌ | 
 |  | | | GroupNorm | ❌ | ❌ | Softmax | ✅ | ✅ |
