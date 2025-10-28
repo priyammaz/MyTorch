@@ -124,7 +124,6 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
     if b is not None and not b.flags.c_contiguous:
         b = cp.ascontiguousarray(b)
 
-    # ---- DLPACK path ---- #
     if not DLPACK_DISABLE and use_dlpack:
         a_torch = torch.utils.dlpack.from_dlpack(a)
         w_torch = torch.utils.dlpack.from_dlpack(w)
@@ -151,7 +150,6 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
         # Return CuPy tensor via DLPack
         return cp.from_dlpack(y_torch)
 
-    # ---- CuPy-only path ---- #
     else:
         with cp.cuda.Device(a.device.id):
             y = cp.empty((B, O), dtype=a.dtype)
