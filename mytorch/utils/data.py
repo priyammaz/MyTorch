@@ -1,3 +1,5 @@
+from ..tensor import arange
+from ..ops import stack
 import numpy as np
 import threading
 import queue
@@ -23,7 +25,7 @@ class DataLoader:
     - __len__ gives number of batches per epoch
     """
 
-    def __init__(self, dataset, batch_size=32, shuffle=True, 
+    def __init__(self, dataset, batch_size=4, shuffle=True, 
                  num_workers=0, prefetch_factor=2, collate_fn=None,
                  timeout=1):
 
@@ -47,7 +49,7 @@ class DataLoader:
         self.collate_fn = collate_fn if collate_fn is not None else self.default_collate
         self.timeout = timeout
 
-        self.indices = np.arange(len(dataset))
+        self.indices = arange(len(dataset))
         
         if self.num_workers > 0:
             self.queue = queue.Queue(maxsize=prefetch_factor * num_workers)
@@ -68,7 +70,7 @@ class DataLoader:
         if isinstance(batch[0], (tuple, list)):
             return tuple(self.default_collate([b[i] for b in batch]) for i in range(len(batch[0])))
         else:
-            return np.stack(batch)
+            return stack(batch)
     
     def _get_next_batch_indices(self):
 
