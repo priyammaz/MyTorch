@@ -19,7 +19,7 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 
 ### References
 
-There were a ton of really helpful resources that I used to make MyTorch! There are too many include all of them here, so I have placed links at the top of every file with the resources you should definitely explore! But the main inspirations were:
+There were a ton of really helpful resources that I used to make MyTorch! There are too many to include all of them here, so I have placed links at the top of every file with the resources you should definitely explore! But the main inspirations were:
 
 - Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
 - [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!'
