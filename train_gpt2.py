@@ -4,6 +4,7 @@ import numpy as np
 import mytorch
 import mytorch.nn as nn
 import mytorch.optim as optim
+from mytorch.utils.data import Dataset, DataLoader
 from models.gpt2 import GPT2, GPT2Config
 from mytorch import Accelerator
 from tqdm import tqdm
@@ -31,6 +32,7 @@ def parse_args():
 
     ### Training Config ###
     parser.add_argument("--path_to_data", type=str, required=True)
+    parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--train_iterations", type=int, default=150000)
     parser.add_argument("--eval_interval", type=int, default=2000)
     parser.add_argument("--eval_iterations", type=int, default=200)
@@ -93,18 +95,35 @@ else:
     vocab_size = tokenizer_meta["vocab_size"]
 
 ### DataLoader ###
-def get_batch(train=True):
+class TokenLoader(Dataset):
+    def __init__(self, path_to_bin, context_length):
 
-    if train:
-        data = np.memmap(os.path.join(args.path_to_data, 'train.bin'), dtype=np.uint16, mode='r')
-    else:
-        data = np.memmap(os.path.join(args.path_to_data, 'val.bin'), dtype=np.uint16, mode='r')
-
-    start_idx = np.random.randint(low=0, high=len(data) - args.context_length - 1, size=(args.batch_size//args.gradient_accumulation_steps))
-    x = np.stack([data[i:i+args.context_length] for i in start_idx])
-    y = np.stack([data[i+1:i+args.context_length+1] for i in start_idx])
+        self.path_to_bin = path_to_bin
+        self.context_length = context_length
+        self.arr = np.memmap(path_to_bin, dtype=np.uint16, mode='r')
+        self.num_tokens = self.arr.shape[0]
     
-    return mytorch.Tensor(x), mytorch.Tensor(y)
+    def __len__(self):
+        """
+        We dont really have the number of "samples" in our data as we just
+        grab random sets of consecutive tokens of size context_length. Lets just
+        give a good guess!
+        """
+        return self.num_tokens // self.context_length
+
+    def __getitem__(self, idx):
+
+        start_idx = np.random.randint(low=0, high=self.num_tokens - self.context_length - 1)
+        x = self.arr[start_idx:start_idx+self.context_length]
+        y = self.arr[start_idx+1:start_idx+self.context_length+1]
+        return mytorch.Tensor(x), mytorch.Tensor(y)
+
+trainset = TokenLoader(os.path.join(args.path_to_data, 'train.bin'), context_length=args.context_length)
+testset = TokenLoader(os.path.join(args.path_to_data, 'val.bin'), context_length=args.context_length)    
+
+micro_batchsize = args.batch_size//args.gradient_accumulation_steps
+trainloader = DataLoader(trainset, batch_size=micro_batchsize, num_workers=args.num_workers)
+testloader = DataLoader(testset, batch_size=micro_batchsize, num_workers=args.num_workers)
 
 ### Create Checkpoint Directory ###
 path_to_experiment = os.path.join(args.working_directory, args.project_name)
@@ -183,7 +202,9 @@ scheduler = mytorch.lr_scheduler.CosineLRScheduler(
 )
 
 ### Prepare Everything ###
-model, optimizer = accelerator.prepare(model, optimizer)
+model, optimizer, trainloader, testloader = accelerator.prepare(
+    model, optimizer, trainloader, testloader
+)
 
 ### Resume from Checkpoint ###
 if args.resume_from_checkpoint is not None:
@@ -219,90 +240,96 @@ pbar = tqdm(range(args.train_iterations),
             disable=not accelerator.is_main_process(),
             initial=completed_steps)
 
-for iter in range((args.train_iterations - completed_steps) * args.gradient_accumulation_steps):
+train = True
+while train:
 
-    # Sample a batch
-    inputs, targets = get_batch(train=True)
-    inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
-
-    # Forward pass
-    logits = model(inputs)
-    loss = loss_fn(logits, targets)
-
-    # Backward
-    accelerator.backward(loss)
-    
-    # Clip gradients (and get the grads to check on training health)
-    grad_norm = accelerator.clip_grad_norm_(args.max_grad_norm)
-
-    # Step optimizer
-    optimizer.step()
-    optimizer.zero_grad()
-
-    ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
-    if accelerator.sync_grad:
+    for inputs, targets in trainloader:
         
-        ### One full accumulation complete ###
-        completed_steps += 1
-        pbar.update(1)
+        # Move to correct device 
+        inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
 
-        ### Update Scheduler ###
-        scheduler.step()
+        # Forward pass
+        logits = model(inputs)
+        loss = loss_fn(logits, targets)
 
-        ### Gather metrics across GPUs
-        if completed_steps % args.log_iter == 0:
+        # Backward
+        accelerator.backward(loss)
+        
+        # Clip gradients (and get the grads to check on training health)
+        grad_norm = accelerator.clip_grad_norm_(args.max_grad_norm)
 
-            ### Gather (no-op if we are on single GPU) ###
-            loss = accelerator.gather_for_metrics(loss)
+        # Step optimizer
+        optimizer.step()
+        optimizer.zero_grad()
 
-            ### Grab our stored grad_norm for checking on model health ###
-            log_statement = f"Iter {completed_steps}, Loss: {loss:.4f}, LR: {scheduler.get_last_lr():.2e}"
-            if accelerator.grad_norm is not None:
-                log_statement += f" Grad Norm: {accelerator.grad_norm:.3f}"
-
-            ### Print to Console ###
-            accelerator.print(log_statement)
-
-            ### Log with Wandb if enabled ###
-            if args.log_wandb:  
-                logging_dict = {"loss": loss_val, "lr": scheduler.get_last_lr()}
-                if accelerator.grad_norm is not None:
-                    logging_dict["grad_norm"] = accelerator.grad_norm 
-                accelerator.log(logging_dict, step=completed_steps)
-
-        if completed_steps % args.checkpoint_iterations == 0 and args.always_save_checkpoint:
-            accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
-
-        if completed_steps % args.eval_interval == 0:
+        ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
+        if accelerator.sync_grad:
             
-            accelerator.print("Evaluating!")
-            model.eval()
+            ### One full accumulation complete ###
+            completed_steps += 1
+            pbar.update(1)
 
-            val_losses = []
+            ### Update Scheduler ###
+            scheduler.step()
 
-            for _ in range(args.eval_iterations):
+            ### Gather metrics across GPUs
+            if completed_steps % args.log_iter == 0:
 
-                inputs, targets = get_batch(train=False)
-                inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
+                ### Gather (no-op if we are on single GPU) ###
+                loss = accelerator.gather_for_metrics(loss)
 
-                # Forward pass
-                with mytorch.no_grad():
-                    logits = model(inputs)
+                ### Grab our stored grad_norm for checking on model health ###
+                log_statement = f"Iter {completed_steps}, Loss: {loss:.4f}, LR: {scheduler.get_last_lr():.2e}"
+                if accelerator.grad_norm is not None:
+                    log_statement += f" Grad Norm: {accelerator.grad_norm:.3f}"
 
-                ### Compute/Gather Loss ###
-                loss = loss_fn(logits, targets)
-                loss_val = accelerator.gather_for_metrics(loss)
-                val_losses.append(loss_val)
+                ### Print to Console ###
+                accelerator.print(log_statement)
 
-            ### Log Loss ###
-            val_losses = np.mean(val_losses)
-            accelerator.print("Validation Loss:", val_losses)
-            if args.log_wandb:
-                logging_dict = {"val_loss": val_losses}
-                accelerator.log(logging_dict, step=completed_steps)
+                ### Log with Wandb if enabled ###
+                if args.log_wandb:  
+                    logging_dict = {"loss": loss_val, "lr": scheduler.get_last_lr()}
+                    if accelerator.grad_norm is not None:
+                        logging_dict["grad_norm"] = accelerator.grad_norm 
+                    accelerator.log(logging_dict, step=completed_steps)
 
-            ### Set back into Training Mode ###
-            model.train()
+            if completed_steps % args.checkpoint_iterations == 0 and args.always_save_checkpoint:
+                accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
+
+            if completed_steps % args.eval_interval == 0:
+                
+                accelerator.print("Evaluating!")
+                model.eval()
+
+                val_losses = []
+
+                for val_iter, (inputs, targets) in enumerate(testloader):
+                    if val_iter >= args.eval_iterations:
+                        break  # stop after desired number of eval iterations
+
+                    inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
+
+                    with mytorch.no_grad():
+                        logits = model(inputs)
+
+                    loss = loss_fn(logits, targets)
+                    loss_val = accelerator.gather_for_metrics(loss)
+                    val_losses.append(loss_val)
+
+                ### Log Loss ###
+                val_losses = np.mean(val_losses)
+                accelerator.print("Validation Loss:", val_losses)
+                if args.log_wandb:
+                    logging_dict = {"val_loss": val_losses}
+                    accelerator.log(logging_dict, step=completed_steps)
+
+                ### Set back into Training Mode ###
+                model.train()
+
+        if completed_steps >= args.train_iterations:
+            accelerator.print("Completed Training!!!")
+            train = False
+            break
 
 ### Save final checkpoint once done ! ###
 accelerator.save_state(os.path.join(path_to_experiment, f"final_checkpoint"))
