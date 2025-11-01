@@ -2007,9 +2007,18 @@ def full(*shape, fill_value, device="cpu", dtype=float32, requires_grad=False):
     return _tensor_from_array(lambda: ap.Array.full(shape, fill_value, device=device, dtype=dtype),
                               device=device, dtype=dtype, requires_grad=requires_grad)
 # Sequences 
-def arange(start, end, step=1, device="cpu", dtype="int32", requires_grad=False):
-    return _tensor_from_array(lambda: ap.Array.arange(start, end, step, device=device, dtype=dtype),
-                              device=device, dtype=dtype, requires_grad=requires_grad)
+def arange(start=None, end=None, step=1, *, device="cpu", dtype="int32", requires_grad=False):
+    if end is None:
+        if start is None:
+            raise TypeError("arange() missing required argument 'end'")
+        start, end = 0, start
+
+    return _tensor_from_array(
+        lambda: ap.Array.arange(start, end, step, device=device, dtype=dtype),
+        device=device,
+        dtype=dtype,
+        requires_grad=requires_grad
+    )
 
 def linspace(start, end, num=50, device="cpu", dtype=float32, requires_grad=False):
     return _tensor_from_array(lambda: ap.Array.linspace(start, end, num, device, dtype), 
