@@ -517,6 +517,40 @@ bash train_gpt2.sh shakespeare  --mixed_precision --fused --num_gpus 2 --log_wan
 
 This should only take a few minutes and create a final checkpoint in ```work_dir/gpt2-small-shakespeare```
 
+<details>
+<summary>Using MyTorch Launcher</summary>
+
+You will see ```train_gpt2.sh``` uses ```mytorch.distributed.launch```. But if you setup
+the ```mytorchrun config``` then you can equivalently use the following launch code:
+
+```bash
+mytorchrun launch train_gpt2.py \
+    --project_name gpt2-small-shakespeare \
+    --working_directory work_dir \
+    --context_length 256 \
+    --model_size small \
+    --dropout_p 0.0 \
+    --path_to_data data/shakespeare \
+    --train_iterations 2500 \
+    --eval_interval 1000 \
+    --eval_iterations 200 \
+    --batch_size 32 \
+    --gradient_accumulation_steps 1 \
+    --max_lr 1e-3 \
+    --min_lr 1e-4 \
+    --warmup_steps 500 \
+    --weight_decay 0.1 \
+    --max_grad_norm 1.0 \
+    --beta1 0.9 \
+    --beta2 0.95 \
+    --log_iter 25 \
+    --fused \
+    --mixed_precision \
+    --log_wandb
+```
+
+</details>
+
 ### Inference Tiny Shakespeare
 
 We can also go ahead and inference this model with:
