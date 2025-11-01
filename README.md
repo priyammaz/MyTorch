@@ -13,10 +13,18 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 - **Education Focus**: Try to be as readable as possible to be hackable and transparent!
 - **LLM Focused**: We will have some implementations of Convolutions, but they are notoriously challenging to reach CUDNN levels even with fused kernels, so these will be less of a focus for this repo!
 
+### Try it in Colab!
+
+[![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1wOz7Q2QDVo0bvF-WtLTAEyg2WOBf14gu?usp=sharing) 
+
 ### References
 
-There were a ton of really helpful resources that I used to make MyTorch! It wouldn't be as helpful 
-to include all of them here, so I have placed links at the top of every file with the resources you should definitely explore!
+There were a ton of really helpful resources that I used to make MyTorch! There are too many include all of them here, so I have placed links at the top of every file with the resources you should definitely explore! But the main inspirations were:
+
+- Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
+- [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!'
+- [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/train.py) is what much of the GPT2 scripts are based on!
+
 
 ### Installation
 
@@ -24,13 +32,13 @@ Installation is very easy!
 ```
 git clone https://github.com/priyammaz/MyTorch.git
 cd MyTorch
-pip install -e .
+pip install .
 ```
 
 If you want fused GPU operations for maximum performance, you can install the optional Triton support. Triton relies on a minimal PyTorch dependency to manage devices and drivers, but you won’t need PyTorch for typical use:
 
 ```
-pip install -e .[triton]
+pip install .[triton]
 ```
 
 ## Usage
@@ -280,11 +288,7 @@ print(linear.bias)
 
 ### Fused Operations
 
-Optionally we will work on providing fused ```Triton``` kernels to accelerate training! To utilize this, please install with:
-
-```
-pip install mytorch-core[triton]
-```
+Optionally we will work on providing fused ```Triton``` kernels to accelerate training!
 
 Fused operations will be accessible by adding in:
 
@@ -650,11 +654,6 @@ Each of these operations will be an individual kernel launch on our GPU. The iss
 Fused operations follow a simple idea, why not copy all the data once, do all the work there, and then copy back? And that is exactly what we do! Traditionally this meant writing Cuda Kernels, but you can get high performance GPU kernels pretty easily with [Triton](https://triton-lang.org/main/index.html)
 
 Triton is not too challenging to learn, it just needs some practice! I think my fused softmax at [```mytorch/nn/fused_ops/softmax.py```](mytorch/nn/fused_ops/softmax.py) is a great place to start, as you will see the differences immediately!
-
-### Code Inspiration!
-- Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
-- [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!'
-- [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/train.py) is what much of the GPT2 scripts are based on!
 
 ### Plans for this Repo
 
