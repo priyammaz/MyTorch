@@ -26,7 +26,7 @@ import warnings
 ##############
 ### LAYERS ###
 ##############
-def linear(input, weight, bias=None, auto=False, fused=False):
+def linear(input, weight, bias=None, auto=False, fused=False, fused_bwd=False):
 
     """
     Standard linear layer operation w/ support for multidim ops:
@@ -70,6 +70,13 @@ def linear(input, weight, bias=None, auto=False, fused=False):
 
     else: # Manual forward and backward
         
+        if (fused and not FUSED_AVAIL) or (fused_bwd and not FUSED_AVAIL):
+            if not FLAG_ONCE:
+                warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
+                FLAG_ONCE = True
+            fused = False
+            fused_bwd = False
+
         ### FORWARD PASS ###
         input_xp = input.data
         weight_xp = weight.data.T
@@ -122,7 +129,7 @@ def linear(input, weight, bias=None, auto=False, fused=False):
             if weight.requires_grad:
                 
                 ### these are just matmuls, we can use cupy/numpy matmul or our own fused matmul ###
-                if fused:
+                if fused_bwd:
                     grad_W = FO.fused_grouped_matmul(input_xp.T, grad_output)
                 else:
                     grad_W = np.matmul(input_xp.T, grad_output)
@@ -142,7 +149,7 @@ def linear(input, weight, bias=None, auto=False, fused=False):
             
             ### Grad to Input ###
             if input.requires_grad:
-                if fused:
+                if fused_bwd:
                     grad_input = FO.fused_grouped_matmul(grad_output, weight_xp.T)
                 else:
                     grad_input = np.matmul(grad_output, weight_xp.T)
