@@ -16,7 +16,9 @@ DEFAULT_CONFIG_ENV = {
     "distributed": False, 
     "num_gpus": 1, 
     "master_addr": "127.0.0.1", 
-    "master_port": "13333"
+    "master_port": "13333",
+    "use_fused": "False",
+    "triton_autotune": "none"
 }
 
 terminal_width = shutil.get_terminal_size().columns
@@ -246,6 +248,10 @@ def launch():
         print(f"Error: {e}")
         sys.exit(1)
     
+    # Set Environment Variables 
+    os.environ["TRITON_AUTOTUNE_MODE"] = str(config.get("triton_autotune", "none"))
+    os.environ["USE_FUSED_OPS"] = str(config.get("use_fused", "False"))
+
     # Build final args: CLI overrides config
     final_args = []
 
@@ -294,8 +300,30 @@ def interactive_config():
         style=custom_style_fancy
     ).ask()
 
+    fused_ops = questionary.select(
+        "Do you want to use Fused Operations (Requires Triton Install)",
+        choices=[
+            "Yes",
+            "No"
+        ],
+        style=custom_style_fancy
+    ).ask()
+
+    triton_autotune = "No"
+    if fused_ops == "Yes":
+        triton_autotune = questionary.select(
+            "Do You Want to Use Triton Autotuning?",
+            choices=[
+                "Yes",
+                "No"
+            ],
+            style=custom_style_fancy
+    ).ask()
+
     config["mixed_precision"] = mixed_precision
     config["num_gpus"] = DEFAULT_CONFIG_ENV["num_gpus"]
+    config["use_fused"] = "True" if fused_ops == "Yes" else "False"
+    config["triton_autotune"] = "max" if triton_autotune == "Yes" else "none"
 
     if machine_type == "Multi-GPU Training":
 

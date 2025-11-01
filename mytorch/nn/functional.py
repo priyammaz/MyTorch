@@ -11,6 +11,7 @@ Although we use np, they get piped through our Array ops
 so they remain cpu/gpu agnostic 
 
 """
+import os
 import numpy as np
 from ..tensor import Tensor
 try:
@@ -22,6 +23,10 @@ except:
     FLAG_ONCE = False
 
 import warnings
+
+### Check ENV Flag for Fused Ops ###
+### So this forces Fused Ops Always ###
+ALWAYS_USE_FUSED = True if os.environ.get("USE_FUSED_OPS", "False") == "True" else False
 
 ##############
 ### LAYERS ###
@@ -37,6 +42,9 @@ def linear(input, weight, bias=None, auto=False, fused=False, fused_bwd=False):
     W: (O,I)
     b: (O,)
     """
+
+    ### Set Fused Ops Based on Environment Variable ###
+    fused = fused or ALWAYS_USE_FUSED
 
     ### Normally data is in the shape of (N x I)
     reshaped = False
@@ -235,6 +243,9 @@ def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, fused=Fals
 
     """
     
+    ### Set Fused Ops Based on Environment Variable ###
+    fused = fused or ALWAYS_USE_FUSED
+
     if fused and not FUSED_AVAIL:
         if not FLAG_ONCE:
             warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
@@ -741,6 +752,9 @@ def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, fused=Fals
     Almost identical to conv2d, just reduced a dimension
     """
     
+    ### Set Fused Ops Based on Environment Variable ###
+    fused = fused or ALWAYS_USE_FUSED
+
     if fused and not FUSED_AVAIL:
         if not FLAG_ONCE:
             warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
@@ -1594,6 +1608,9 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Fa
     The nn.LayerNorm already handles this!
     """
     
+    ### Set Fused Ops Based on Environment Variable ###
+    fused = fused or ALWAYS_USE_FUSED
+
     reshaped = False
     *dims, embed_dim = input.shape
 
@@ -1803,7 +1820,7 @@ def batchnorm(input, weight, bias,
     running_mean: (C,)
     running_var: (C,)
     """
-
+    
     ### Get Backend ###
     xp = input.xp 
 
@@ -2015,6 +2032,9 @@ def gelu(x):
 
 def softmax(x, dim=-1, auto=False, fused=False):
 
+    ### Set Fused Ops Based on Environment Variable ###
+    fused = fused or ALWAYS_USE_FUSED
+
     if auto:
 
         max_x = x.max(dim=dim, keepdims=True)
@@ -2174,6 +2194,9 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
 
     For precision, we will compute the loss at fp32 and then cast back to fp16 if needed!
     """
+
+    ### Set Fused Ops Based on Environment Variable ###
+    fused = fused or ALWAYS_USE_FUSED
 
     ### Flatten Logits to be (*, num_classes) ###
     *other_dims, num_classes = logits.shape
