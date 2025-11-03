@@ -2174,11 +2174,67 @@ def softmax(x, dim=-1, auto=False, fused=False):
 
         return out
 
-def leaky_relu():
-    pass
+def leaky_relu(input, negative_slope=0.1, auto=False):
 
-def tanh():
-    pass
+    if auto:
+        mask_pos = Tensor(np.where(input.data > 0, 1, 0).astype(input.dtype))
+        mask_neg = 1 - mask_pos
+        return input * mask_pos + input * mask_neg * negative_slope
+    
+    else:
+        input.data = np.where(input.data > 0, input.data, negative_slope * input.data)
+
+        def _leaky_relu_backward(input_grad):
+            if input.requires_grad:
+                grad_input = input_grad * np.where(input.data > 0, 1, negative_slope)
+
+                if input.grad is None:
+                    input.grad = grad_input
+                else:
+                    input.grad += grad_input
+
+        requires_grad = input.requires_grad and Tensor.build_graph_enabled()
+        out = Tensor(
+            input.data,
+            requires_grad=requires_grad,
+            grad_fn=_leaky_relu_backward if requires_grad else None,
+            grad_fn_name="<LeakyReLUBackward>" if requires_grad else None,
+            device=input.device,
+            dtype=input.dtype,
+        )
+
+        if requires_grad:
+            out._add_parents(input)
+
+        return out
+    
+def tanh(input):
+    
+    out_data = np.tanh(input.data)
+
+    def _tanh_backward(input_grad):
+        if input.requires_grad:
+            # derivative of tanh(x) = 1 - tanh(x)^2
+            grad_input = input_grad * (1 - out_data ** 2)
+            if input.grad is None:
+                input.grad = grad_input
+            else:
+                input.grad += grad_input
+
+    requires_grad = input.requires_grad and Tensor.build_graph_enabled()
+    out = Tensor(
+        out_data,
+        requires_grad=requires_grad,
+        grad_fn=_tanh_backward if requires_grad else None,
+        grad_fn_name="<TanhBackward>" if requires_grad else None,
+        device=input.device,
+        dtype=input.dtype,
+    )
+
+    if requires_grad:
+        out._add_parents(input)
+
+    return out
 
 ##############
 ### LOSSES ###
@@ -2326,7 +2382,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
             loss_value = loss_value.astype(logits.dtype)
 
             def _cross_entropy_backward(grad_output):
-      
+              
                 ### The loss is the last thing in our model ###
                 ### so our upstream grad is just a bunch of ones so nothing ###
                 ### to really use here! ###
@@ -2335,17 +2391,14 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
                         logits_data,
                         targets_data,
                         logsumexp_cp
-                    ) 
+                    ).reshape(*logits.shape).astype(logits.dtype)
            
                     grad_cp *= (grad_output / valid_counts) 
 
-                    # Reshape back to original logits shape and dtype
-                    grad_input = grad_cp.reshape(*logits.shape).astype(logits.dtype)
-
                     if logits.grad is None:
-                        logits.grad = grad_input
+                        logits.grad = grad_cp
                     else:
-                        logits.grad += grad_input
+                        logits.grad += grad_cp
 
         requires_grad = logits.requires_grad
         requires_grad = requires_grad and Tensor.build_graph_enabled()

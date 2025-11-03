@@ -8,7 +8,7 @@ import cupy as cp
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
-from .flags import DLPACK_DISABLE
+from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
@@ -94,7 +94,23 @@ def cross_entropy_forward(
     tl.store(logsumexp_ptr, logsumexp)
     tl.store(loss_ptr, loss)
 
-@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
+def get_backward_autotune_mode():
+    if AUTOTUNE_MODE == "max":
+        return [
+                triton.Config({"BLOCK_SIZE": 64}, num_warps=2, num_stages=2),
+                triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=2),
+                triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=4),
+                triton.Config({"BLOCK_SIZE": 256}, num_warps=8, num_stages=2),
+                triton.Config({"BLOCK_SIZE": 256}, num_warps=8, num_stages=4),
+                triton.Config({"BLOCK_SIZE": 512}, num_warps=8, num_stages=3),
+            ]
+    else:
+        return [triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=2)]
+
+@triton.autotune(
+    configs=get_backward_autotune_mode(),
+    key=["NUM_CLASSES"],  # Cache tuning result per NUM_CLASSES
+)
 @triton.jit
 def cross_entropy_backward(
     logits_ptr,            # Original logits for loading (N x NUM_CLASSES)
@@ -212,13 +228,11 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
         return loss, logsumexp
 
 def fused_cross_entropy_backward(
-        logits, labels, logsumexp, BLOCK_SIZE=128, use_dlpack=True
+        logits, labels, logsumexp, use_dlpack=True
 ):
     
     """
-    Block size should definitely be tuned, but i just pick something
-    reasonable here for now! We will chunk our NUM_CLASSES len vector
-    into chunks of BLOCK_SIZE
+    We will chunk our NUM_CLASSES len vector into chunks of BLOCK_SIZE
 
     Also, this is the last thing in our model. There is no more
     ops after Cross Entropy. So our dloss is just a bunch of ones!
@@ -236,7 +250,8 @@ def fused_cross_entropy_backward(
         row_stride = logits.stride(0)
         grad = torch.zeros_like(logits, dtype=torch.float32)
 
-        grid = (N, triton.cdiv(C, BLOCK_SIZE))
+        # grid = (N, triton.cdiv(C, BLOCK_SIZE))
+        grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
         cross_entropy_backward[grid](
             logits,
             row_stride,
@@ -244,17 +259,16 @@ def fused_cross_entropy_backward(
             logsumexp, 
             labels, 
             C, 
-            BLOCK_SIZE
         )
-
-        return grad
+ 
+        return cp.from_dlpack(grad)
 
     else:
 
         row_stride = logits.strides[0] // logits.itemsize
         grad = cp.zeros_like(logits , dtype=cp.float32)
 
-        grid = (N, triton.cdiv(C, BLOCK_SIZE))
+        grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
         cross_entropy_backward[grid](
             logits.data.ptr,
             row_stride,
@@ -262,7 +276,6 @@ def fused_cross_entropy_backward(
             logsumexp.data.ptr, 
             labels.data.ptr, 
             C, 
-            BLOCK_SIZE
         )
 
         return grad
