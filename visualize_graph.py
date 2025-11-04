@@ -197,8 +197,9 @@ def build_graph(output_tensor):
 
 def plot_graph(G):
 
-     # Consistent, clean layout
-    pos = nx.circular_layout(G)
+    import math
+
+    pos = nx.spring_layout(G, k=1 / math.sqrt(len(G.nodes)), iterations=100, seed=42)
     fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(22, 11), facecolor='white')
 
     ### Forward Pass
