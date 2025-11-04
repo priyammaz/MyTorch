@@ -1440,11 +1440,11 @@ class Tensor:
   
         out_data = np.expand_dims(self.data, axis=dim)
 
-        def _unsqueeze_backward(out_grad):
+        def _unsqueeze_backward(input_grad):
             if self.requires_grad:
                 
                 ### Accumulate all grads along the dimension we added ###
-                grad = out_grad.sum(axis=dim)
+                grad = input_grad.sum(axis=dim)
 
                 if self.grad is None:
                     self.grad = grad
@@ -1452,7 +1452,6 @@ class Tensor:
                     self.grad += grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-        
         out = Tensor(
             out_data,
             requires_grad=requires_grad,
@@ -1480,14 +1479,14 @@ class Tensor:
 
         out_data = self.data.reshape(out_shape)
 
-        def _squeeze_backward(out_grad):
+        def _squeeze_backward(input_grad):
             if self.requires_grad:
                 if dim is None:
                     # Put all size-1 dims back
-                    grad = out_grad.reshape(shape)
+                    grad = input_grad.reshape(shape)
                 else:
                     # Only reinsert the squeezed dimension
-                    grad = np.expand_dims(out_grad, axis=dim)
+                    grad = np.expand_dims(input_grad, axis=dim)
 
                 grad = grad.astype(self.data.dtype, copy=False)
 
@@ -1497,7 +1496,6 @@ class Tensor:
                     self.grad += grad
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-
         out = Tensor(
             out_data,
             requires_grad=requires_grad,
@@ -1635,10 +1633,10 @@ class Tensor:
         """
         out_data = self.data.cumsum(axis=dim)
 
-        def _cumsum_backward(grad_output):
+        def _cumsum_backward(input_grad):
             if self.requires_grad:
                 # Reverse, cumsum, then reverse again
-                grad_reversed = np.flip(grad_output, axis=dim)
+                grad_reversed = np.flip(input_grad, axis=dim)
                 grad_input = np.cumsum(grad_reversed, axis=dim)
                 grad_input = np.flip(grad_input, axis=dim)
 
@@ -1837,30 +1835,27 @@ class Tensor:
     These are just a collection of helpful operations that come in handy!
     """
     def masked_fill(self, mask, value):
-
-
-        device = self.device
-        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
     
         # forward
         out_data = np.where(mask.data, value, self.data)
 
-        def _masked_fill_backward(out_grad):
+        def _masked_fill_backward(input_grad):
             if self.requires_grad:
                 # Only pass gradient where mask == False
-                grad = np.where(mask.data, 0, out_grad)
+                grad = np.where(mask.data, 0, input_grad)
 
                 if self.grad is None:
                     self.grad = grad
                 else:
                     self.grad += grad
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
             out_data,
             requires_grad=requires_grad,
             grad_fn=_masked_fill_backward if requires_grad else None,
             grad_fn_name="<MaskedFillBackward>" if requires_grad else None,
-            device=device,
+            device=self.device,
         )
 
         if requires_grad:
@@ -1870,9 +1865,6 @@ class Tensor:
     
     def sort(self, dim=-1, descending=False):
         
-        device = self.device
-        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
-        
         # Forward: sort the data and get indices
         sorted_indices = np.argsort(self.data, axis=dim)
         if descending:
@@ -1880,20 +1872,22 @@ class Tensor:
         
         out_data = np.take_along_axis(self.data, sorted_indices, axis=dim)
         
-        def _sort_backward(out_grad):
+        def _sort_backward(input_grad):
             inv_indices = np.argsort(sorted_indices, axis=dim)
-            out_grad = np.take_along_axis(out_grad, inv_indices, axis=dim)
+            input_grad = np.take_along_axis(input_grad, inv_indices, axis=dim)
             if self.grad is None:
-                self.grad = out_grad
+                self.grad = input_grad
             else:
-                self.grad += out_grad
+                self.grad += input_grad
 
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        
         out = Tensor(
             out_data,
             requires_grad=requires_grad,
             grad_fn=_sort_backward if requires_grad else None,
             grad_fn_name="<SortBackward>" if requires_grad else None,
-            device=device,
+            device=self.device,
         )
         
         if requires_grad:
