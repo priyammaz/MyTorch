@@ -106,8 +106,7 @@ def concatenate(tensors, dim=0):
     )
 
     if requires_grad:
-        for t in tensors:
-            out._add_parents(t)
+        out._add_parents(*tensors)
 
     return out
 
@@ -156,7 +155,6 @@ def stack(tensors, dim=0):
     )
 
     if requires_grad:
-        for t in tensors:
-            out._add_parents(t)
+        out._add_parents(*tensors)
 
     return out
