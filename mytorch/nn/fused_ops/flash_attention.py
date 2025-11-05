@@ -22,7 +22,7 @@ import triton.language as tl
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 
 def get_fwd_autotune_configs():
-    # Read the autotune mode from environment variable, default to "none"
+
     mode = AUTOTUNE_MODE
 
     if mode == "none":
@@ -64,8 +64,8 @@ def get_fwd_autotune_configs():
         ]
 
 def get_preprocess_autotune_configs():
-    # Read the autotune mode from environment variable, default to "none"
-    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+
+    mode = AUTOTUNE_MODE
     
     # Single config for "none" mode (no autotuning, fixed configuration)
     if mode == "none":
@@ -104,8 +104,8 @@ def get_preprocess_autotune_configs():
         ]
 
 def get_bwd_autotune_configs():
-    # Read the autotune mode from environment variable, default to "none"
-    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+
+    mode = AUTOTUNE_MODE
     
     # Single config for "none" mode (no autotuning, fixed configuration)
     if mode == "none":

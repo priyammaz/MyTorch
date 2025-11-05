@@ -20,12 +20,18 @@ Removed all Causal related flags. Cross Attention is not causal, so we remove
 that flag!
 
 ### Change 3 ###
-In the original flash_attention.py we had a single backward kernel that computed
-both dQ and dK/dV. This was fine as our sequence lenghts were the same. But now that
-they are different, we will instead have two kernel calls to a dQ and dK/dV separately
-so we can handle the different lengths!
+In the original flash_attention.py we had a kernel called `_attn_bwd` inside which we 
+called `_attn_bwd_dq` and `_attn_bwd_dk_dv`. This meant each thread was responsible for 
+a block of dQ as well as a block of dK,dV! This only worked out so easily though because
+our attention matrix was just a square. 
 
+Now that we have different sequence lengths, we cannot divide our attention matrix into the
+same number of blocks in each direction. This means we will either have to have extra threads
+that dont do anything, or we wont have enough to cover one of the dimensions. Its much simpler
+here to just not do that and have to separate kernel calls, one that computes dQ and another 
+that computes dK,dV! So you will find in our `fused_cross_sdpa_backward` that we do exactly that!
 """
+
 import os
 import torch
 import cupy as cp
@@ -33,7 +39,7 @@ import triton
 import triton.language as tl
 # from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 DLPACK_DISABLE = False
-AUTOTUNE_MODE="none"
+AUTOTUNE_MODE="max"
 
 def get_fwd_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
@@ -79,7 +85,7 @@ def get_fwd_autotune_configs():
 
 def get_preprocess_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
-    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+    mode = AUTOTUNE_MODE
     
     # Single config for "none" mode (no autotuning, fixed configuration)
     if mode == "none":
@@ -117,15 +123,15 @@ def get_preprocess_autotune_configs():
             for num_warps in [4, 8, 16]
         ]
 
-def get_bwd_autotune_configs():
+def get_bwd_dq_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
-    mode = os.getenv("TRITON_FLASH_AUTOTUNE_MODE", "none").lower()
+    mode = AUTOTUNE_MODE
     
     # Single config for "none" mode (no autotuning, fixed configuration)
     if mode == "none":
         return [
             triton.Config(
-                {"BLOCK_SIZE_MACRO": 32, "BLOCK_SIZE_MICRO": 16},
+                {"BLOCK_SIZE_Q": 32, "BLOCK_SIZE_KV": 16},
                 num_stages=2,
                 num_warps=4,
             )
@@ -135,30 +141,74 @@ def get_bwd_autotune_configs():
     if mode == "medium":
         return [
             triton.Config(
-                {"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
+                {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
                 num_stages=num_stages,
                 num_warps=num_warps,
             )
-            for BLOCK_SIZE_MACRO in [32, 64]  # Reduced set
-            for BLOCK_SIZE_MICRO in [16, 32]  # Reduced set
+            for BLOCK_SIZE_Q in [32, 64]  # Reduced set
+            for BLOCK_SIZE_KV in [16, 32]  # Reduced set
             for num_stages in [2, 3]         # Reduced set
             for num_warps in [4, 8]          # Reduced set
-            if BLOCK_SIZE_MICRO < BLOCK_SIZE_MACRO
+            if BLOCK_SIZE_KV < BLOCK_SIZE_Q
         ]
     
     # Comprehensive configs for "max" mode (full search space)
     else:  # mode == "max" or any other value defaults to max
         return [
             triton.Config(
-                {"BLOCK_SIZE_MACRO": BLOCK_SIZE_MACRO, "BLOCK_SIZE_MICRO": BLOCK_SIZE_MICRO},
+                {"BLOCK_SIZE_Q": BLOCK_SIZE_Q, "BLOCK_SIZE_KV": BLOCK_SIZE_KV},
                 num_stages=num_stages,
                 num_warps=num_warps,
             )
-            for BLOCK_SIZE_MACRO in [16, 32, 64, 128]
-            for BLOCK_SIZE_MICRO in [16, 32, 64]
+            for BLOCK_SIZE_Q in [16, 32, 64, 128]
+            for BLOCK_SIZE_KV in [16, 32, 64]
             for num_stages in [2, 3, 4]
             for num_warps in [4, 8, 16]
-            if BLOCK_SIZE_MICRO < BLOCK_SIZE_MACRO
+            if BLOCK_SIZE_KV < BLOCK_SIZE_Q
+        ]
+
+def get_bwd_dkdv_autotune_configs():
+    # Read the autotune mode from environment variable, default to "none"
+    mode = AUTOTUNE_MODE
+    
+    # Single config for "none" mode (no autotuning, fixed configuration)
+    if mode == "none":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_KV": 32, "BLOCK_SIZE_Q": 16},
+                num_stages=2,
+                num_warps=4,
+            )
+        ]
+    
+    # Reduced configs for "medium" mode (fewer configurations for faster tuning)
+    if mode == "medium":
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_KV": BLOCK_SIZE_KV, "BLOCK_SIZE_Q": BLOCK_SIZE_Q},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE_KV in [32, 64]  # Reduced set
+            for BLOCK_SIZE_Q in [16, 32]  # Reduced set
+            for num_stages in [2, 3]         # Reduced set
+            for num_warps in [4, 8]          # Reduced set
+            if BLOCK_SIZE_Q < BLOCK_SIZE_KV
+        ]
+    
+    # Comprehensive configs for "max" mode (full search space)
+    else:  # mode == "max" or any other value defaults to max
+        return [
+            triton.Config(
+                {"BLOCK_SIZE_KV": BLOCK_SIZE_KV, "BLOCK_SIZE_Q": BLOCK_SIZE_Q},
+                num_stages=num_stages,
+                num_warps=num_warps,
+            )
+            for BLOCK_SIZE_KV in [16, 32, 64, 128]
+            for BLOCK_SIZE_Q in [16, 32, 64]
+            for num_stages in [2, 3, 4]
+            for num_warps in [4, 8, 16]
+            if BLOCK_SIZE_Q < BLOCK_SIZE_KV
         ]
 
 @triton.jit
@@ -424,7 +474,7 @@ def _attn_fwd(
 
 @triton.autotune(
     configs=get_preprocess_autotune_configs(),
-    key=["SEQ_LEN", "HEAD_DIM"],
+    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"],
 )
 @triton.jit
 def attn_backward_preprocess(
@@ -478,6 +528,10 @@ def attn_backward_preprocess(
     D_ptr += index_batch_head * stride_D_head
     tl.store(D_ptr + row_offsets, Delta, mask = mask)
 
+@triton.autotune(
+    configs=get_bwd_dq_autotune_configs(),
+    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_bwd_dq(
     Q_ptr, 
@@ -605,6 +659,10 @@ def _attn_bwd_dq(
     # Store dQ
     tl.store(dQ_ptr + Q_offsets, dQ_block.to(dQ_ptr.type.element_ty), mask=q_mask[:, None])
 
+@triton.autotune(
+    configs=get_bwd_dkdv_autotune_configs(),
+    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"],
+)
 @triton.jit
 def _attn_bwd_dk_dv(
     Q_ptr, 
@@ -735,8 +793,6 @@ def _attn_bwd_dk_dv(
     tl.store(dK_ptr + KV_Offsets, dK_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
     tl.store(dV_ptr + KV_Offsets, dV_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
     
-  
-
 def fused_cross_sdpa_forward(Q, K, V, 
                              softmax_scale=None, 
                              use_dlpack=True):
@@ -931,12 +987,10 @@ def fused_cross_sdpa_backward(dO,
             stride_V_len=V.stride(2), 
             stride_V_embed=V.stride(3),
             NUM_HEADS=NUM_HEADS, SEQ_LEN_Q=SEQ_LEN_Q, SEQ_LEN_KV=SEQ_LEN_KV, HEAD_DIM=HEAD_DIM,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
-            BLOCK_SIZE_Q=64, BLOCK_SIZE_KV=32,
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
         )
 
         grid_dk_dv = lambda meta: (triton.cdiv(SEQ_LEN_KV, meta["BLOCK_SIZE_KV"]), BATCH_SIZE * NUM_HEADS, 1)
-
         _attn_bwd_dk_dv[grid_dk_dv](
             Q_ptr=Q, 
             K_ptr=K, 
@@ -951,8 +1005,7 @@ def fused_cross_sdpa_backward(dO,
             stride_K_batch=K.stride(0), stride_K_head=K.stride(1), stride_K_len=K.stride(2), stride_K_embed=K.stride(3),
             stride_V_batch=V.stride(0), stride_V_head=V.stride(1), stride_V_len=V.stride(2), stride_V_embed=V.stride(3),
             NUM_HEADS=NUM_HEADS, SEQ_LEN_Q=SEQ_LEN_Q, SEQ_LEN_KV=SEQ_LEN_KV, HEAD_DIM=HEAD_DIM,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
-            BLOCK_SIZE_Q=16, BLOCK_SIZE_KV=32,
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
         )
     
     return dQ, dK, dV
@@ -964,9 +1017,9 @@ if __name__ == "__main__":
     from torch.utils.dlpack import from_dlpack
 
 
-    q = torch.randn((1,2,256,256), device="cuda", dtype=torch.float16, requires_grad=True)
-    k = torch.randn((1,2,512,256), device="cuda", dtype=torch.float16, requires_grad=True)
-    v = torch.randn((1,2,512,256), device="cuda", dtype=torch.float16, requires_grad=True)
+    q = torch.randn((1,2,1,256), device="cuda", dtype=torch.float16, requires_grad=True)
+    k = torch.randn((1,2,511,256), device="cuda", dtype=torch.float16, requires_grad=True)
+    v = torch.randn((1,2,511,256), device="cuda", dtype=torch.float16, requires_grad=True)
     o_grad = torch.ones_like(q)
     o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
     out = torch.nn.functional.scaled_dot_product_attention(q,k,v)
