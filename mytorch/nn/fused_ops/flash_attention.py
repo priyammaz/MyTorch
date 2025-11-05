@@ -155,6 +155,7 @@ def _attn_fwd_inner(
     Q_block,
     K_block_ptr,
     V_block_ptr,
+    attn_mask_ptr, # Masks are the shape (B x H x L x L)
     block_index_q,
     BLOCK_SIZE_Q,
     BLOCK_SIZE_KV,
@@ -162,7 +163,14 @@ def _attn_fwd_inner(
     offs_q: tl.constexpr,
     offs_kv: tl.constexpr,
     SEQ_LEN,
-    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    USE_CUSTOM_MASK: tl.constexpr, 
+    stride_mask_batch,  
+    stride_mask_head, 
+    stride_mask_q,
+    stride_mask_kv,
+    index_batch, 
+    index_head,
 ):      
     """
     The inner loop of the forward flash attention method grabs a chunk of queries
@@ -269,6 +277,28 @@ def _attn_fwd_inner(
             ### we mask our any invalid positions in our QK Block and dont have to worry about inside block transitions ###
             QK_block += tl.where(kv_padding_mask[None, :], 0, float("-inf"))
 
+        ### If we are using attention mask ###
+        if USE_CUSTOM_MASK:
+            
+            ### we need to advance to the correct block of our attention matrix that we are ###
+            ### currently processing inside our attention mask ###
+            ### again the offs_q tells us the block of queries we are processing and the 
+            ### kv_indices tell us which keys/values we are processing in this iter of the loop
+            mask_offset = (
+                index_batch * stride_mask_batch + 
+                index_head * stride_mask_head +
+                offs_q[:, None] * stride_mask_q + 
+                kv_indices[None, :] * stride_mask_kv
+            )
+
+            ### Grab this block of our mask ###
+            custom_mask = tl.load(attn_mask_ptr + mask_offset, 
+                                  mask=(offs_q[:, None] < SEQ_LEN) & (kv_indices[None, :] < SEQ_LEN),
+                                  other=False)
+        
+            ### Add -inf to the masked out positions, so it becomes 0 after softmax ###
+            QK_block += tl.where(custom_mask, 0, float("-inf"))
+
         ### Update our current estimate for the maximum
         m_ij = tl.maximum(m_i, tl.max(QK_block, 1))
         QK_block -= m_ij[:, None]
@@ -313,6 +343,7 @@ def _attn_fwd(
     Q,  
     K, 
     V,  
+    attn_mask,
     softmax_scale: tl.constexpr,
     M,  
     O, 
@@ -326,13 +357,18 @@ def _attn_fwd(
     stride_V_dim,
     stride_O_seq,
     stride_O_dim,
+    stride_mask_batch, 
+    stride_mask_head, 
+    stride_mask_q, 
+    stride_mask_kv,
     NUM_HEADS: tl.constexpr,
     SEQ_LEN,
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
     ATTN_MODE: tl.constexpr, # 0 for non_causal, 1 for causal
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16,
+    USE_CUSTOM_MASK: tl.constexpr,
 ):  
     """
     Main forward method for Flash Attention, where for a block of queries
@@ -376,6 +412,9 @@ def _attn_fwd(
 
     ### Intermediate buffer M is always a float32 for maintaining precision in the backward pass ###
     M = tl.cast(M, tl.pointer_type(tl.float32))
+
+    if USE_CUSTOM_MASK:
+        attn_mask = tl.cast(attn_mask, tl.pointer_type(tl.int1))
         
     ### our index batch head is just a flattened vector of our batch_size * number of heads ###
     ### this means if we want what batch we are on, we can divide by num heads ###
@@ -491,6 +530,7 @@ def _attn_fwd(
         Q_block, 
         K_block_ptr, 
         V_block_ptr, 
+        attn_mask,
         block_index_q, 
         BLOCK_SIZE_Q, 
         BLOCK_SIZE_KV, 
@@ -498,7 +538,14 @@ def _attn_fwd(
         offs_q, 
         offs_kv, 
         SEQ_LEN,
-        DTYPE_FLAG
+        DTYPE_FLAG,
+        USE_CUSTOM_MASK, 
+        stride_mask_batch, 
+        stride_mask_head, 
+        stride_mask_q, 
+        stride_mask_kv, 
+        index_batch, 
+        index_head
     )
 
     ### IF we are causal, we need to separately handle the diagonal ###
@@ -554,6 +601,7 @@ def _attn_fwd(
             Q_block, 
             K_block_ptr, 
             V_block_ptr, 
+            attn_mask,
             block_index_q, 
             BLOCK_SIZE_Q, 
             BLOCK_SIZE_KV, 
@@ -561,7 +609,14 @@ def _attn_fwd(
             offs_q, 
             offs_kv, 
             SEQ_LEN,
-            DTYPE_FLAG
+            DTYPE_FLAG,
+            USE_CUSTOM_MASK, 
+            stride_mask_batch, 
+            stride_mask_head, 
+            stride_mask_q, 
+            stride_mask_kv, 
+            index_batch, 
+            index_head
         )
 
     ### Store this as we need it for logsumexp in the backward pass ###
@@ -648,7 +703,9 @@ def _attn_bwd_dk_dv(
     dO_ptr, 
     M_ptr, 
     D_ptr, 
+    attn_mask_ptr,
     stride_len, stride_embed, 
+    stride_mask_q, stride_mask_kv,
     SEQ_LEN, 
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_ROW: tl.constexpr, 
@@ -658,7 +715,9 @@ def _attn_bwd_dk_dv(
     num_steps, 
     ln2, 
     MASK: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    USE_CUSTOM_MASK: tl.constexpr, 
+    mask_offset_base,
 ):
     """
     Main method to compute the grads for dK,dV in blocks. This basically
@@ -724,6 +783,25 @@ def _attn_bwd_dk_dv(
             ### Set our invalid positions to 0 ###
             P_T_block = tl.where(mask_block, P_T_block, 0.)
 
+        ### If we had an attention mask, we want to make sure we 0 out ###
+        ### any of the grads are coming from these masked positions! ###
+        if USE_CUSTOM_MASK:
+            
+            ### Compute the indexes for the block of mask we want ###
+            mask_offset = (
+                mask_offset_base + 
+                offsets_row[None, :] * stride_mask_q + 
+                offsets_col[:, None] * stride_mask_kv
+            )
+
+            ### Grab that that block of mask ###
+            custom_mask = tl.load(attn_mask_ptr + mask_offset, 
+                                  mask=(offsets_row[None, :] < SEQ_LEN) & (offsets_col[:, None] < SEQ_LEN),
+                                  other=False)
+
+            ### Fill invalid positions with 0! ###
+            P_T_block = tl.where(custom_mask, P_T_block, 0.)
+
         ### Now we start to accumulate grads. Each block of the output contribute to our 
         ### gradient for dV. dV is P^T @ dO
         ### But we are not processing all of our sequence length at once, only chunks of it
@@ -750,7 +828,9 @@ def _attn_bwd_dk_dv(
 def _attn_bwd_dq(
     dQ, Q, dO, M, 
     K_ptr, V_ptr, D_ptr, 
+    attn_mask_ptr,
     stride_len, stride_embed, 
+    stride_mask_q, stride_mask_kv,
     SEQ_LEN, 
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_ROW: tl.constexpr,
@@ -760,7 +840,9 @@ def _attn_bwd_dq(
     num_steps, 
     ln2: tl.constexpr, 
     MASK: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    USE_CUSTOM_MASK: tl.constexpr, 
+    mask_offset_base
 ):
     """
     Nearly identical for _attn_bwd_dk_dv but now we have a block of Q and are 
@@ -794,6 +876,21 @@ def _attn_bwd_dq(
             mask = offsets_row[:, None] >= offsets_col[None, :]
             P = tl.where(mask, P, 0.)
 
+        ### Custom Attention Mask ###
+        if USE_CUSTOM_MASK:
+
+            mask_offset = (
+                mask_offset_base + 
+                offsets_row[:, None] * stride_mask_q + 
+                offsets_col[None, :] * stride_mask_kv
+            )
+
+            custom_mask = tl.load(attn_mask_ptr + mask_offset,
+                                 mask=(offsets_row[:, None] < SEQ_LEN) & (offsets_col[None, :] < SEQ_LEN),
+                                 other=False)
+
+            P = tl.where(custom_mask, P, 0.)
+
         ### Same formulation just for dQ now ###
         dP = tl.dot(dO, V_T_block)
         dS = P * (dP - D_block[:, None]) * ln2
@@ -821,15 +918,18 @@ def _attn_bwd(
     dV_ptr, 
     M_ptr, 
     D_ptr, 
+    attn_mask_ptr,
     softmax_scale, 
     stride_batch, stride_head, stride_len, stride_embed, 
+    stride_mask_batch, stride_mask_head, stride_mask_q, stride_mask_kv,
     NUM_HEADS, 
     SEQ_LEN, 
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_MICRO: tl.constexpr,
     BLOCK_SIZE_MACRO: tl.constexpr,
     CAUSAL: tl.constexpr, # 1 for causal, 0 for noncausal 
-    DTYPE_FLAG: tl.constexpr # 0 for float32 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32 1 for float16,
+    USE_CUSTOM_MASK: tl.constexpr
 ):
     
     tl.static_assert(BLOCK_SIZE_MACRO % BLOCK_SIZE_MICRO == 0)
@@ -848,6 +948,9 @@ def _attn_bwd(
     dV_ptr = tl.cast(dV_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
     M_ptr = tl.cast(M_ptr, tl.pointer_type(tl.float32))
     D_ptr = tl.cast(D_ptr, tl.pointer_type(tl.float32))
+
+    if USE_CUSTOM_MASK:
+        attn_mask_ptr = tl.cast(attn_mask_ptr, tl.pointer_type(tl.int1))
 
     ### What Block are we processing? ###
     pid = tl.program_id(0)
@@ -871,6 +974,14 @@ def _attn_bwd(
     dV_ptr += offset_batch_head_4d
     M_ptr += offset_batch_head_3d
     D_ptr += offset_batch_head_3d
+
+    ### If we have an attention mask, we can compute which batch/head of our mask we want to index later ###
+    mask_offset_base = 0
+    if USE_CUSTOM_MASK:
+        mask_offset_base = (
+            idx_batch * stride_mask_batch +
+            idx_head * stride_mask_head
+        )
 
     ###################### dK dV #####################
 
@@ -938,14 +1049,17 @@ def _attn_bwd(
     ### If we are in causal model then we will Mask as a part of that diagonal is invalid 
     dK_block, dV_block = _attn_bwd_dk_dv(
         K, V, dK_block, dV_block, 
-        Q_ptr, dO_ptr, M_ptr, D_ptr, 
+        Q_ptr, dO_ptr, M_ptr, D_ptr, attn_mask_ptr, 
         stride_len, stride_embed, 
+        stride_mask_q, stride_mask_kv,
         SEQ_LEN, HEAD_DIM, 
         BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1,
         start_row, start_col, num_steps, 
         ln2, 
         MASK=(CAUSAL==1),
-        DTYPE_FLAG=DTYPE_FLAG
+        DTYPE_FLAG=DTYPE_FLAG,
+        USE_CUSTOM_MASK=USE_CUSTOM_MASK,
+        mask_offset_base=mask_offset_base
     )
 
     ### STAGE 2: Process Under the Diagonal Block for Causal###
@@ -980,14 +1094,17 @@ def _attn_bwd(
         ### Backward pass again on these blocks underneath that diagonal block for the Causal Case 
         dK_block, dV_block = _attn_bwd_dk_dv(
             K, V, dK_block, dV_block, 
-            Q_ptr, dO_ptr, M_ptr, D_ptr, 
+            Q_ptr, dO_ptr, M_ptr, D_ptr, attn_mask_ptr, 
             stride_len, stride_embed, 
+            stride_mask_q, stride_mask_kv,
             SEQ_LEN, HEAD_DIM, 
             BLOCK_SIZE_ROW_1, BLOCK_SIZE_COL_1,
             start_row, start_col, num_steps, 
             ln2, 
             MASK=False,
-            DTYPE_FLAG=DTYPE_FLAG
+            DTYPE_FLAG=DTYPE_FLAG,
+            USE_CUSTOM_MASK=USE_CUSTOM_MASK,
+            mask_offset_base=mask_offset_base
         )
 
     ### We didnt apply this scaling in our loop (as its just a constant) ###
@@ -1049,14 +1166,16 @@ def _attn_bwd(
     ### First pass ###
     dQ_block = _attn_bwd_dq(
         dQ_block, Q_block, dO_block, M_block, 
-        K_ptr, V_ptr, D_ptr, 
-        stride_len, stride_embed, 
+        K_ptr, V_ptr, D_ptr, attn_mask_ptr,
+        stride_len, stride_embed,
+        stride_mask_q, stride_mask_kv,
         SEQ_LEN, HEAD_DIM, 
         BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2, 
         start_row, start_col, num_steps, 
-        ln2, 
-        MASK=(CAUSAL==1),  # Only mask for diagonal
-        DTYPE_FLAG=DTYPE_FLAG
+        ln2, MASK=(CAUSAL==1),
+        DTYPE_FLAG=DTYPE_FLAG,
+        USE_CUSTOM_MASK=USE_CUSTOM_MASK,
+        mask_offset_base=mask_offset_base,
     )
 
     ### Second pass (only for causal models) ###
@@ -1066,14 +1185,16 @@ def _attn_bwd(
         num_steps = end_col // BLOCK_SIZE_COL_2
         dQ_block = _attn_bwd_dq(
             dQ_block, Q_block, dO_block, M_block, 
-            K_ptr, V_ptr, D_ptr, 
-            stride_len, stride_embed, 
+            K_ptr, V_ptr, D_ptr, attn_mask_ptr,
+            stride_len, stride_embed,
+            stride_mask_q, stride_mask_kv,
             SEQ_LEN, HEAD_DIM, 
             BLOCK_SIZE_ROW_2, BLOCK_SIZE_COL_2, 
             start_row, start_col, num_steps, 
-            ln2,
-            MASK=False,
-            DTYPE_FLAG=DTYPE_FLAG
+            ln2, MASK=False,
+            DTYPE_FLAG=DTYPE_FLAG,
+            USE_CUSTOM_MASK=USE_CUSTOM_MASK,
+            mask_offset_base=mask_offset_base,
         )
 
     ### Scale our grads with the same factor ###
@@ -1082,7 +1203,8 @@ def _attn_bwd(
     tl.store(dQ_ptr + Q_offsets, dQ_block, mask=mask_row[:, None])
 
 def fused_sdpa_forward(Q, K, V, 
-                       causal, 
+                       attn_mask=None,
+                       causal=False, 
                        softmax_scale=None, 
                        use_dlpack=True):
     
@@ -1101,6 +1223,12 @@ def fused_sdpa_forward(Q, K, V,
         Q = torch.utils.dlpack.from_dlpack(Q)
         K = torch.utils.dlpack.from_dlpack(K)
         V = torch.utils.dlpack.from_dlpack(V)
+
+        ### Check if we have Attention Mask ###
+        use_custom_mask = attn_mask is not None
+
+        if use_custom_mask:
+            attn_mask = torch.utils.dlpack.from_dlpack(attn_mask)
     
         ### Make sure there is contiguous memory layout ####
         if not Q.is_contiguous():
@@ -1109,6 +1237,8 @@ def fused_sdpa_forward(Q, K, V,
             K = K.contiguous()
         if not V.is_contiguous():
             V = V.contiguous()
+        if use_custom_mask and not attn_mask.is_contiguous():
+            attn_mask = attn_mask.contiguous()
 
         # Create output tensors
         O = torch.empty_like(Q)
@@ -1119,6 +1249,7 @@ def fused_sdpa_forward(Q, K, V,
             Q=Q,
             K=K,
             V=V,
+            attn_mask=attn_mask,
             softmax_scale=softmax_scale,
             M=M,
             O=O,
@@ -1132,11 +1263,16 @@ def fused_sdpa_forward(Q, K, V,
             stride_V_dim=V.stride(3),
             stride_O_seq=O.stride(2),
             stride_O_dim=O.stride(3),
+            stride_mask_batch=attn_mask.stride(0) if use_custom_mask else 0,
+            stride_mask_head=attn_mask.stride(1) if use_custom_mask else 0,
+            stride_mask_q=attn_mask.stride(2) if use_custom_mask else 0,
+            stride_mask_kv=attn_mask.stride(3) if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN=SEQ_LEN,
             HEAD_DIM=HEAD_DIM_Q,
             ATTN_MODE=1 if causal else 0,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
         ### Convert back to cupy ###
@@ -1147,7 +1283,10 @@ def fused_sdpa_forward(Q, K, V,
         M = cp.from_dlpack(M)
 
     else:
-            
+  
+        ### Check for custom mask ###
+        use_custom_mask = attn_mask is not None
+
         ### Make sure there is contiguous memory layout ####
         if not Q.flags.c_contiguous:
             Q = cp.ascontiguousarray(Q)
@@ -1155,6 +1294,8 @@ def fused_sdpa_forward(Q, K, V,
             K = cp.ascontiguousarray(K)
         if not V.flags.c_contiguous:
             V = cp.ascontiguousarray(V)
+        if use_custom_mask and not attn_mask.flags.c_contiguous:
+            attn_mask = cp.ascontiguousarray(attn_mask)
 
         O = cp.empty_like(Q)
         grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
@@ -1170,6 +1311,7 @@ def fused_sdpa_forward(Q, K, V,
             Q=Q.data.ptr,
             K=K.data.ptr,
             V=V.data.ptr,
+            attn_mask=attn_mask.data.ptr,
             softmax_scale=softmax_scale,
             M=M.data.ptr,
             O=O.data.ptr,
@@ -1183,11 +1325,16 @@ def fused_sdpa_forward(Q, K, V,
             stride_V_dim=V.strides[3] // V.itemsize,
             stride_O_seq=O.strides[2] // O.itemsize,
             stride_O_dim=O.strides[3] // O.itemsize,
+            stride_mask_batch=attn_mask.strides[0] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_head=attn_mask.strides[1] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN=SEQ_LEN,
             HEAD_DIM=HEAD_DIM_Q,
             ATTN_MODE=1 if causal else 0,
-            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
     return Q, K, V, O, M
@@ -1195,7 +1342,8 @@ def fused_sdpa_forward(Q, K, V,
 def fused_sdpa_backward(dO, 
                         Q, K, V, 
                         O, M, 
-                        causal,
+                        attn_mask=None,
+                        causal=False,
                         softmax_scale=None,
                         use_dlpack=True):
 
@@ -1218,9 +1366,16 @@ def fused_sdpa_backward(dO,
         O = torch.utils.dlpack.from_dlpack(O)
         M = torch.utils.dlpack.from_dlpack(M)
 
+        ### Check if we have Attention Mask ###
+        use_custom_mask = attn_mask is not None
+        if use_custom_mask:
+            attn_mask = torch.utils.dlpack.from_dlpack(attn_mask)
+
         ### Ensure our grads are contiguous ###
         if not dO.is_contiguous():
             dO = dO.contiguous()
+        if use_custom_mask and not attn_mask.is_contiguous():
+            attn_mask = attn_mask.contiguous()
 
         ### Ensure grads have the same dtype
         if not dO.dtype == Q.dtype:
@@ -1262,16 +1417,22 @@ def fused_sdpa_backward(dO,
             dV_ptr=dV, 
             M_ptr=M, 
             D_ptr=D, 
+            attn_mask_ptr=attn_mask,
             softmax_scale=softmax_scale, 
             stride_batch=Q.stride(0),
             stride_head=Q.stride(1),
             stride_len=Q.stride(2),
             stride_embed=Q.stride(3), 
+            stride_mask_batch=attn_mask.stride(0) if use_custom_mask else 0,
+            stride_mask_head=attn_mask.stride(1) if use_custom_mask else 0,
+            stride_mask_q=attn_mask.stride(2) if use_custom_mask else 0,
+            stride_mask_kv=attn_mask.stride(3) if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS, 
             SEQ_LEN=SEQ_LEN, 
             HEAD_DIM=HEAD_DIM, 
             CAUSAL=1 if causal else 0, 
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
         # Convert back to CuPy if needed
@@ -1346,3 +1507,34 @@ def fused_sdpa_backward(dO,
         )
 
     return dQ, dK, dV
+
+if __name__ == "__main__":
+
+    q = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    k = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    v = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    attn_mask = torch.ones((2,2,64,64)).bool().to("cuda")
+    attn_mask[0, :, :, -4:] = False
+    attn_mask[1, :, :, -4:] = False
+
+    attn_mask_cp = cp.array(attn_mask.detach().cpu().numpy())
+    o_grad = torch.ones_like(q)
+    o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
+    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=attn_mask, is_causal=True)
+    out.backward(o_grad)
+    q_grad_ref = cp.array(q.grad.detach().cpu().numpy())
+    k_grad_ref = cp.array(k.grad.detach().cpu().numpy())
+    v_grad_ref = cp.array(v.grad.detach().cpu().numpy())
+    out_ref = cp.array(out.detach().cpu().numpy())
+
+
+    q_cp = cp.array(q.detach().cpu().numpy())
+    k_cp = cp.array(k.detach().cpu().numpy())
+    v_cp = cp.array(v.detach().cpu().numpy())
+    q_cp, k_cp, v_cp, O, M = fused_sdpa_forward(q_cp,k_cp,v_cp, attn_mask_cp, causal=True)
+    dQ_cp, dK_cp, dV_cp = fused_sdpa_backward(o_grad_cp, q_cp, k_cp, v_cp, O, M, attn_mask_cp, causal=True)
+    print(cp.max(cp.abs(O-out_ref)))
+
+    print(cp.max(cp.abs(dQ_cp-q_grad_ref)))
+    print(cp.max(cp.abs(dK_cp-k_grad_ref)))
+    print(cp.max(cp.abs(dV_cp-v_grad_ref)))
