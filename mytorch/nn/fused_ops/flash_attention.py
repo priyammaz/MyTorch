@@ -10,8 +10,7 @@ https://triton-lang.org/main/getting-started/tutorials/06-fused-attention.html#s
 
 This adapts the existing code with Cupy!
 
-1) NO Support for attention masks. This does CAUSAL or Not Causal. Custom masks are not supported (YET?)
-2) NO Dropout on our attention scores! Maybe another feature to come?
+1) NO Dropout on our attention scores! Maybe another feature to come?
 
 """
 import os
