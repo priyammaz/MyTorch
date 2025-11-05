@@ -13,6 +13,12 @@ so they remain cpu/gpu agnostic
 """
 import os
 import numpy as np
+
+try:
+    import cupy as cp
+except:
+    cp = None
+
 from ..tensor import Tensor
 try:
     import triton
@@ -2474,7 +2480,10 @@ def cosine_sim_loss():
 #################
 ### ATTENTION ###
 #################
-def scaled_dot_product_attention(Q, K, V, causal=False, softmax_scale=None):
+def scaled_dot_product_attention(Q, K, V, 
+                                 attn_mask=None,
+                                 is_causal=False, 
+                                 softmax_scale=None):
     
     if not FUSED_AVAIL:
         raise Exception("Fused ops not available, install Triton!!!")
@@ -2490,23 +2499,59 @@ def scaled_dot_product_attention(Q, K, V, causal=False, softmax_scale=None):
         K_data = K_data._array
     if hasattr(V_data, "_array"):
         V_data = V_data._array
-    
-    assert (
-        Q_data.shape == K_data.shape == V_data.shape
-    ), f"Shapes mismatch: Q={Q_data.shape}, K={K_data.shape}, V={V_data.shape}"
-    assert len(Q_data.shape) == 4, f"Expected 4D tensors, got {len(Q_data.shape)}D"
 
-    Q_data, K_data, V_data, attn_out, M = FO.fused_sdpa_forward(
-        Q_data, K_data, V_data, 
-        causal=causal, softmax_scale=softmax_scale
-    )
+    ### SDPA Sanity Checks ###
+    batch_q, heads_q, len_q, embed_q = Q.shape
+    batch_k, heads_k, len_k, embed_k = K.shape
+    batch_v, heads_v, len_v, embed_v = V.shape
+
+    assert len_k == len_v, "Keys and Values must have the same length"
+    assert (embed_q == embed_k) and (embed_k == embed_v), "Q,K,V must all have the same embedding dimension"
+    if is_causal:
+        assert len_q == len_k, "Causal mode is only supported in Self-Attention, len of Q,K,V must all be the same!"
+    self_attn = True
+    if len_q != len_k:
+        self_attn = False
+    
+    if attn_mask is not None:
+        assert len(attn_mask.shape) == 4, "Expected Attention Mask in the shape of (B, ..., L, S)"
+        assert (len_q == attn_mask.shape[2]) and (len_k == attn_mask.shape[3]), f"Expected Attention Mask is Shape ({batch_q}, ... {len_q}, {len_k}), got {attn_mask.shape}"
+        if (attn_mask.shape[1] != heads_q) and (attn_mask.shape[1] != 1):
+            raise Exception("Expected either {heads_q} head dimension or 1 in attention mask")
+        
+        ### Kernel expects the shape (BxHxLxS) but its the same for every head so we can repeat them ###
+        if (attn_mask.shape[1] != heads_q) and (attn_mask.shape[1] == 1):
+            attn_mask = cp.repeat(attn_mask, heads_q, axis=1) 
+
+    if self_attn:
+        Q_data, K_data, V_data, attn_out, M = FO.fused_sdpa_forward(
+            Q=Q_data, K=K_data, V=V_data, attn_mask=attn_mask, causal=is_causal, softmax_scale=softmax_scale
+        )
+    else:
+        Q_data, K_data, V_data, attn_out, M = FO.fused_cross_sdpa_forward(
+            Q=Q_data, K=K_data, V=V_data, attn_mask=attn_mask, causal=is_causal, softmax_scale=softmax_scale
+        )
 
     def _sdpa_backward(grad_output):
-  
+        
+        if self_attn:
+            dQ, dK, dV = FO.fused_sdpa_backward(
+                dO=grad_output, Q=Q_data, K=K_data, V=V_data, O=attn_out, M=M, 
+                attn_mask=attn_mask, causal=is_causal, softmax_scale=softmax_scale
+            )
+        
+        else:
+            dQ, dK, dV = FO.fused_cross_sdpa_backward(
+                dO=grad_output, Q=Q_data, K=K_data, V=V_data, O=attn_out, M=M,
+                attn_mask=attn_mask, softmax_scale=softmax_scale
+            )
+
+
+
         dQ, dK, dV = FO.fused_sdpa_backward(grad_output, 
                                             Q_data, K_data, V_data, 
                                             attn_out, M, 
-                                            causal=causal,
+                                            causal=is_causal,
                                             softmax_scale=softmax_scale)
 
         ### Cast grads back to original dtype ###

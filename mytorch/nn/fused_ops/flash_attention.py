@@ -19,9 +19,8 @@ import torch
 import cupy as cp
 import triton
 import triton.language as tl
-# from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
-DLPACK_DISABLE = False
-AUTOTUNE_MODE = "none"
+from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+
 def get_fwd_autotune_configs():
 
     mode = AUTOTUNE_MODE
