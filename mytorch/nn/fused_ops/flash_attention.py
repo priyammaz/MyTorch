@@ -19,8 +19,9 @@ import torch
 import cupy as cp
 import triton
 import triton.language as tl
-from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
-
+# from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+DLPACK_DISABLE = False
+AUTOTUNE_MODE = "none"
 def get_fwd_autotune_configs():
 
     mode = AUTOTUNE_MODE
@@ -704,8 +705,10 @@ def _attn_bwd_dk_dv(
     M_ptr, 
     D_ptr, 
     attn_mask_ptr,
-    stride_len, stride_embed, 
-    stride_mask_q, stride_mask_kv,
+    stride_len, 
+    stride_embed, 
+    stride_mask_q, 
+    stride_mask_kv,
     SEQ_LEN, 
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_ROW: tl.constexpr, 
@@ -826,11 +829,18 @@ def _attn_bwd_dk_dv(
 
 @triton.jit
 def _attn_bwd_dq(
-    dQ, Q, dO, M, 
-    K_ptr, V_ptr, D_ptr, 
+    dQ, 
+    Q, 
+    dO, 
+    M, 
+    K_ptr, 
+    V_ptr, 
+    D_ptr, 
     attn_mask_ptr,
-    stride_len, stride_embed, 
-    stride_mask_q, stride_mask_kv,
+    stride_len, 
+    stride_embed, 
+    stride_mask_q, 
+    stride_mask_kv,
     SEQ_LEN, 
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_ROW: tl.constexpr,
@@ -920,8 +930,14 @@ def _attn_bwd(
     D_ptr, 
     attn_mask_ptr,
     softmax_scale, 
-    stride_batch, stride_head, stride_len, stride_embed, 
-    stride_mask_batch, stride_mask_head, stride_mask_q, stride_mask_kv,
+    stride_batch, 
+    stride_head, 
+    stride_len, 
+    stride_embed, 
+    stride_mask_batch, 
+    stride_mask_head, 
+    stride_mask_q, 
+    stride_mask_kv,
     NUM_HEADS, 
     SEQ_LEN, 
     HEAD_DIM: tl.constexpr, 

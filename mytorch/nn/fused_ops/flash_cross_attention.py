@@ -39,7 +39,7 @@ import triton
 import triton.language as tl
 # from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 DLPACK_DISABLE = False
-AUTOTUNE_MODE="max"
+AUTOTUNE_MODE="none"
 
 def get_fwd_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
@@ -219,10 +219,20 @@ def _attn_fwd_inner(
     Q_block,
     K_block_ptr,
     V_block_ptr,
+    attn_mask_ptr,
     BLOCK_SIZE_KV,
+    offs_q: tl.constexpr,
     offs_kv: tl.constexpr,
+    SEQ_LEN_Q,
     SEQ_LEN_KV,
-    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    USE_CUSTOM_MASK: tl.constexpr, 
+    stride_mask_batch,  
+    stride_mask_head, 
+    stride_mask_q,
+    stride_mask_kv,
+    index_batch, 
+    index_head,
 ):      
     """
     The inner loop of the forward flash attention method grabs a chunk of queries
@@ -262,6 +272,28 @@ def _attn_fwd_inner(
         ### or we are just processing all blocks. In either case, we want to make sure that ###
         ### we mask our any invalid positions in our QK Block and dont have to worry about inside block transitions ###
         QK_block += tl.where(kv_padding_mask[None, :], 0, float("-inf"))
+
+        ### If we are using attention mask ###
+        if USE_CUSTOM_MASK:
+            
+            ### we need to advance to the correct block of our attention matrix that we are ###
+            ### currently processing inside our attention mask ###
+            ### again the offs_q tells us the block of queries we are processing and the 
+            ### kv_indices tell us which keys/values we are processing in this iter of the loop
+            mask_offset = (
+                index_batch * stride_mask_batch + 
+                index_head * stride_mask_head +
+                offs_q[:, None] * stride_mask_q + 
+                kv_indices[None, :] * stride_mask_kv
+            )
+
+            ### Grab this block of our mask ###
+            custom_mask = tl.load(attn_mask_ptr + mask_offset, 
+                                  mask=(offs_q[:, None] < SEQ_LEN_Q) & (kv_indices[None, :] < SEQ_LEN_KV),
+                                  other=False)
+        
+            ### Add -inf to the masked out positions, so it becomes 0 after softmax ###
+            QK_block += tl.where(custom_mask, 0, float("-inf"))
 
         ### Update our current estimate for the maximum
         m_ij = tl.maximum(m_i, tl.max(QK_block, 1))
@@ -307,6 +339,7 @@ def _attn_fwd(
     Q,  
     K, 
     V,  
+    attn_mask,
     softmax_scale: tl.constexpr,
     M,  
     O, 
@@ -322,6 +355,10 @@ def _attn_fwd(
     stride_V_dim,
     stride_O_seq,
     stride_O_dim,
+    stride_mask_batch, 
+    stride_mask_head, 
+    stride_mask_q, 
+    stride_mask_kv,
     NUM_HEADS: tl.constexpr,
     SEQ_LEN_Q,
     SEQ_LEN_KV,
@@ -329,6 +366,7 @@ def _attn_fwd(
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
     DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    USE_CUSTOM_MASK: tl.constexpr
 ):  
     """
     Main forward method for Flash Attention, where for a block of queries
@@ -361,6 +399,9 @@ def _attn_fwd(
 
     ### Intermediate buffer M is always a float32 for maintaining precision in the backward pass ###
     M = tl.cast(M, tl.pointer_type(tl.float32))
+
+    if USE_CUSTOM_MASK: 
+        attn_mask = tl.cast(attn_mask, tl.pointer_type(tl.int1))
         
     ### our index batch head is just a flattened vector of our batch_size * number of heads ###
     ### this means if we want what batch we are on, we can divide by num heads ###
@@ -448,10 +489,20 @@ def _attn_fwd(
         Q_block, 
         K_block_ptr, 
         V_block_ptr, 
+        attn_mask,
         BLOCK_SIZE_KV, 
+        offs_q,
         offs_kv, 
+        SEQ_LEN_Q,
         SEQ_LEN_KV,
-        DTYPE_FLAG
+        DTYPE_FLAG,
+        USE_CUSTOM_MASK, 
+        stride_mask_batch, 
+        stride_mask_head, 
+        stride_mask_q, 
+        stride_mask_kv, 
+        index_batch, 
+        index_head
     )
 
     ### Store this as we need it for logsumexp in the backward pass ###
@@ -541,6 +592,7 @@ def _attn_bwd_dq(
     dQ_ptr, 
     M_ptr, 
     D_ptr, 
+    attn_mask_ptr,
     softmax_scale: tl.constexpr,
     stride_Q_batch, 
     stride_Q_head, 
@@ -554,13 +606,18 @@ def _attn_bwd_dq(
     stride_V_head, 
     stride_V_len, 
     stride_V_embed,
+    stride_mask_batch,
+    stride_mask_head,
+    stride_mask_q,
+    stride_mask_kv,
     NUM_HEADS: tl.constexpr,
     SEQ_LEN_Q: tl.constexpr,
     SEQ_LEN_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr
+    DTYPE_FLAG: tl.constexpr,
+    USE_CUSTOM_MASK: tl.constexpr 
 ):
     
     ln2: tl.constexpr = 0.693147182464
@@ -643,6 +700,24 @@ def _attn_bwd_dq(
         # No causal masking needed for cross-attention
         # Just apply padding mask
         P = tl.where(kv_mask[None, :], P, 0.)
+
+        if USE_CUSTOM_MASK:
+
+            ### Pointers to block of mask we want ###
+            mask_offset = (
+                idx_batch * stride_mask_batch + 
+                idx_head * stride_mask_head + 
+                offs_q[:, None] * stride_mask_q +
+                offs_kv[None, :] * stride_mask_kv
+            )
+
+            ### Get block of mask ###
+            custom_mask = tl.load(attn_mask_ptr + mask_offset, 
+                                  mask=(offs_q[:, None] < SEQ_LEN_Q) & (offs_kv[None, :] < SEQ_LEN_KV),
+                                  other=False)
+            
+            ### Set grads to 0 for masked positions ###
+            P = tl.where(custom_mask, P, 0.)
         
         # Compute dP = dO @ V^T
         dP = tl.dot(dO_block, V_T_block)
@@ -673,6 +748,7 @@ def _attn_bwd_dk_dv(
     dV_ptr,
     M_ptr, 
     D_ptr, 
+    attn_mask_ptr,
     softmax_scale: tl.constexpr,
     stride_Q_batch, 
     stride_Q_head, 
@@ -686,13 +762,18 @@ def _attn_bwd_dk_dv(
     stride_V_head, 
     stride_V_len, 
     stride_V_embed,
+    stride_mask_batch, 
+    stride_mask_head, 
+    stride_mask_q, 
+    stride_mask_kv,
     NUM_HEADS: tl.constexpr,
     SEQ_LEN_Q: tl.constexpr,
     SEQ_LEN_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr, 
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr
+    DTYPE_FLAG: tl.constexpr,
+    USE_CUSTOM_MASK: tl.constexpr
 ):
     
     ln2: tl.constexpr = 0.693147182464
@@ -774,6 +855,25 @@ def _attn_bwd_dk_dv(
 
         ### Get our Softmax Back ###
         P_T_block = tl.math.exp2(S_T_block - M_block[None, :])
+        
+        ### If we had a custom attention mask we want to make sure we zero out any grads ###
+        ### coming in from those masked positions ###
+        if USE_CUSTOM_MASK:
+
+            mask_offset_T = (
+                idx_batch * stride_mask_batch + 
+                idx_head * stride_mask_head + 
+                offs_kv[:, None] * stride_mask_kv +
+                offs_q[None, :] * stride_mask_q
+            )
+
+            custom_mask_T = tl.load(
+                attn_mask_ptr + mask_offset_T,
+                mask=(offs_kv[:, None] < SEQ_LEN_KV) & (offs_q[None, :] < SEQ_LEN_Q),
+                other=False
+            )
+
+            P_T_block = tl.where(custom_mask_T, P_T_block, 0.)
 
         ### Compute dV which is P^T @ dO ###
         dV_block = tl.dot(P_T_block.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16), dO_block, acc=dV_block)
@@ -794,6 +894,7 @@ def _attn_bwd_dk_dv(
     tl.store(dV_ptr + KV_Offsets, dV_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
     
 def fused_cross_sdpa_forward(Q, K, V, 
+                             attn_mask=None,
                              softmax_scale=None, 
                              use_dlpack=True):
     
@@ -814,7 +915,13 @@ def fused_cross_sdpa_forward(Q, K, V,
         Q = torch.utils.dlpack.from_dlpack(Q)
         K = torch.utils.dlpack.from_dlpack(K)
         V = torch.utils.dlpack.from_dlpack(V)
-    
+        
+        ### Check if we have Attention Mask ###
+        use_custom_mask = attn_mask is not None
+
+        if use_custom_mask:
+            attn_mask = torch.utils.dlpack.from_dlpack(attn_mask)
+
         ### Make sure there is contiguous memory layout ####
         if not Q.is_contiguous():
             Q = Q.contiguous()
@@ -822,6 +929,8 @@ def fused_cross_sdpa_forward(Q, K, V,
             K = K.contiguous()
         if not V.is_contiguous():
             V = V.contiguous()
+        if use_custom_mask and not attn_mask.is_contiguous():
+            attn_mask = attn_mask.contiguous()
 
         # Create output tensors
         O = torch.empty_like(Q)
@@ -832,6 +941,7 @@ def fused_cross_sdpa_forward(Q, K, V,
             Q=Q,
             K=K,
             V=V,
+            attn_mask=attn_mask,
             softmax_scale=softmax_scale,
             M=M,
             O=O,
@@ -847,11 +957,16 @@ def fused_cross_sdpa_forward(Q, K, V,
             stride_V_dim=V.stride(3),
             stride_O_seq=O.stride(2),
             stride_O_dim=O.stride(3),
+            stride_mask_batch=attn_mask.stride(0) if use_custom_mask else 0,
+            stride_mask_head=attn_mask.stride(1) if use_custom_mask else 0,
+            stride_mask_q=attn_mask.stride(2) if use_custom_mask else 0,
+            stride_mask_kv=attn_mask.stride(3) if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN_Q=SEQ_LEN_Q,
             SEQ_LEN_KV=SEQ_LEN_KV,
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
         ### Convert back to cupy ###
@@ -862,6 +977,9 @@ def fused_cross_sdpa_forward(Q, K, V,
         M = cp.from_dlpack(M)
 
     else:
+
+        ### Check if using attention mask ###
+        use_custom_mask = attn_mask is not None
             
         ### Make sure there is contiguous memory layout ####
         if not Q.flags.c_contiguous:
@@ -870,6 +988,8 @@ def fused_cross_sdpa_forward(Q, K, V,
             K = cp.ascontiguousarray(K)
         if not V.flags.c_contiguous:
             V = cp.ascontiguousarray(V)
+        if use_custom_mask and not attn_mask.flags.c_contiguous:
+            attn_mask = cp.ascontiguousarray(attn_mask)
 
         O = cp.empty_like(Q)
         grid = lambda args: (triton.cdiv(SEQ_LEN_Q, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
@@ -885,6 +1005,7 @@ def fused_cross_sdpa_forward(Q, K, V,
             Q=Q.data.ptr,
             K=K.data.ptr,
             V=V.data.ptr,
+            attn_mask=attn_mask.data.ptr,
             softmax_scale=softmax_scale,
             M=M.data.ptr,
             O=O.data.ptr,
@@ -900,11 +1021,16 @@ def fused_cross_sdpa_forward(Q, K, V,
             stride_V_dim=V.strides[3] // V.itemsize,
             stride_O_seq=O.strides[2] // O.itemsize,
             stride_O_dim=O.strides[3] // O.itemsize,
+            stride_mask_batch=attn_mask.strides[0] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_head=attn_mask.strides[1] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
             SEQ_LEN_Q=SEQ_LEN_Q,
             SEQ_LEN_KV=SEQ_LEN_KV,
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
     return Q, K, V, O, M
@@ -912,6 +1038,7 @@ def fused_cross_sdpa_forward(Q, K, V,
 def fused_cross_sdpa_backward(dO, 
                               Q, K, V, 
                               O, M, 
+                              attn_mask=None,
                               softmax_scale=None,
                               use_dlpack=True):
 
@@ -935,9 +1062,16 @@ def fused_cross_sdpa_backward(dO,
         O = torch.utils.dlpack.from_dlpack(O)
         M = torch.utils.dlpack.from_dlpack(M)
 
+        ### Check if we have Attention Mask ###
+        use_custom_mask = attn_mask is not None
+        if use_custom_mask:
+            attn_mask = torch.utils.dlpack.from_dlpack(attn_mask)
+
         ### Ensure our grads are contiguous ###
         if not dO.is_contiguous():
             dO = dO.contiguous()
+        if use_custom_mask and not attn_mask.is_contiguous():
+            attn_mask = attn_mask.contiguous()
 
         ### Ensure grads have the same dtype
         if not dO.dtype == Q.dtype:
@@ -972,7 +1106,7 @@ def fused_cross_sdpa_backward(dO,
 
         grid_dq = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd_dq[grid_dq](
-            Q_ptr=Q, K_ptr=K, V_ptr=V, dO_ptr=dO, dQ_ptr=dQ, M_ptr=M, D_ptr=D,
+            Q_ptr=Q, K_ptr=K, V_ptr=V, dO_ptr=dO, dQ_ptr=dQ, M_ptr=M, D_ptr=D, attn_mask_ptr=attn_mask,
             softmax_scale=softmax_scale,
             stride_Q_batch=Q.stride(0), 
             stride_Q_head=Q.stride(1), 
@@ -986,8 +1120,13 @@ def fused_cross_sdpa_backward(dO,
             stride_V_head=V.stride(1), 
             stride_V_len=V.stride(2), 
             stride_V_embed=V.stride(3),
+            stride_mask_batch=attn_mask.stride(0) if attn_mask is not None else 0,
+            stride_mask_head=attn_mask.stride(1) if attn_mask is not None else 0,
+            stride_mask_q=attn_mask.stride(2) if attn_mask is not None else 0,
+            stride_mask_kv=attn_mask.stride(3) if attn_mask is not None else 0,
             NUM_HEADS=NUM_HEADS, SEQ_LEN_Q=SEQ_LEN_Q, SEQ_LEN_KV=SEQ_LEN_KV, HEAD_DIM=HEAD_DIM,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
         grid_dk_dv = lambda meta: (triton.cdiv(SEQ_LEN_KV, meta["BLOCK_SIZE_KV"]), BATCH_SIZE * NUM_HEADS, 1)
@@ -1000,12 +1139,18 @@ def fused_cross_sdpa_backward(dO,
             dV_ptr=dV, 
             M_ptr=M, 
             D_ptr=D,
+            attn_mask_ptr=attn_mask,
             softmax_scale=softmax_scale,
             stride_Q_batch=Q.stride(0), stride_Q_head=Q.stride(1), stride_Q_len=Q.stride(2), stride_Q_embed=Q.stride(3),
             stride_K_batch=K.stride(0), stride_K_head=K.stride(1), stride_K_len=K.stride(2), stride_K_embed=K.stride(3),
             stride_V_batch=V.stride(0), stride_V_head=V.stride(1), stride_V_len=V.stride(2), stride_V_embed=V.stride(3),
+            stride_mask_batch=attn_mask.stride(0) if attn_mask is not None else 0,
+            stride_mask_head=attn_mask.stride(1) if attn_mask is not None else 0,
+            stride_mask_q=attn_mask.stride(2) if attn_mask is not None else 0,
+            stride_mask_kv=attn_mask.stride(3) if attn_mask is not None else 0,
             NUM_HEADS=NUM_HEADS, SEQ_LEN_Q=SEQ_LEN_Q, SEQ_LEN_KV=SEQ_LEN_KV, HEAD_DIM=HEAD_DIM,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
     
     return dQ, dK, dV
@@ -1017,12 +1162,17 @@ if __name__ == "__main__":
     from torch.utils.dlpack import from_dlpack
 
 
-    q = torch.randn((1,2,1,256), device="cuda", dtype=torch.float16, requires_grad=True)
-    k = torch.randn((1,2,511,256), device="cuda", dtype=torch.float16, requires_grad=True)
-    v = torch.randn((1,2,511,256), device="cuda", dtype=torch.float16, requires_grad=True)
+    q = torch.randn((2,2,128,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    k = torch.randn((2,2,256,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    v = torch.randn((2,2,256,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    attn_mask = torch.ones((2,2,128,256)).bool().to("cuda")
+    attn_mask[0, :, :, -20:] = False
+    attn_mask[1, :, :, -4:] = False
+
+    attn_mask_cp = cp.array(attn_mask.detach().cpu().numpy())
     o_grad = torch.ones_like(q)
     o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
-    out = torch.nn.functional.scaled_dot_product_attention(q,k,v)
+    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=None)
     out.backward(o_grad)
     q_grad_ref = cp.array(q.grad.detach().cpu().numpy())
     k_grad_ref = cp.array(k.grad.detach().cpu().numpy())
