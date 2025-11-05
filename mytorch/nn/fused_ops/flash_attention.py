@@ -1456,10 +1456,16 @@ def fused_sdpa_backward(dO,
         dK = cp.from_dlpack(dK)
         dV = cp.from_dlpack(dV)
 
-    else:
+    else:  
+
+        ### Check if we have Attention Mask ###
+        use_custom_mask = attn_mask is not None
+
         ### Ensure our grads are contiguous ###
         if not dO.flags.c_contiguous:
             dO = cp.ascontiguousarray(dO)
+        if use_custom_mask and not attn_mask.flags.c_contiguous:
+            attn_mask = cp.ascontiguousarray(attn_mask)
 
         ### Ensure grads have the same dtype
         if not dO.dtype == Q.dtype:
@@ -1492,7 +1498,7 @@ def fused_sdpa_backward(dO,
             stride_dO_heads=dO.strides[1] // dO.itemsize, 
             stride_dO_len=dO.strides[2] // dO.itemsize, 
             stride_dO_embed=dO.strides[3] // dO.itemsize,
-            stride_D_head=D.strides[1] // D.itemsize, # (B x H x L)
+            stride_D_head=D.strides[1] // D.itemsize, 
             SEQ_LEN=SEQ_LEN,
             EMBED_DIM=HEAD_DIM,
             DTYPE_FLAG=0 if dO.dtype == cp.float32 else 1
@@ -1510,16 +1516,22 @@ def fused_sdpa_backward(dO,
             dV_ptr=dV.data.ptr, 
             M_ptr=M.data.ptr, 
             D_ptr=D.data.ptr, 
+            attn_mask_ptr=attn_mask.data.ptr,
             softmax_scale=softmax_scale, 
             stride_batch=Q.strides[0] // Q.itemsize,
             stride_head=Q.strides[1] // Q.itemsize,
             stride_len=Q.strides[2] // Q.itemsize,
             stride_embed=Q.strides[3] // Q.itemsize, 
+            stride_mask_batch=attn_mask.strides[0] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_head=attn_mask.strides[1] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if use_custom_mask else 0,
+            stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS, 
             SEQ_LEN=SEQ_LEN, 
             HEAD_DIM=HEAD_DIM, 
             CAUSAL=1 if causal else 0, 
-            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1
+            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
         )
 
     return dQ, dK, dV
@@ -1530,11 +1542,11 @@ if __name__ == "__main__":
     k = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
     v = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
     attn_mask = torch.ones((2,2,64,64)).bool().to("cuda")
-    attn_mask[0, :, :, -4:] = False
+    attn_mask[0, :, :, -20:] = False
     attn_mask[1, :, :, -4:] = False
 
     attn_mask_cp = cp.array(attn_mask.detach().cpu().numpy())
-    o_grad = torch.ones_like(q)
+    o_grad = torch.randn_like(q)
     o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
     out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=attn_mask, is_causal=True)
     out.backward(o_grad)

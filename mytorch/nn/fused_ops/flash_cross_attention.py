@@ -632,6 +632,9 @@ def _attn_bwd_dq(
     M_ptr = tl.cast(M_ptr, tl.pointer_type(tl.float32))
     D_ptr = tl.cast(D_ptr, tl.pointer_type(tl.float32))
 
+    if USE_CUSTOM_MASK:
+        attn_mask_ptr = tl.cast(attn_mask_ptr, tl.pointer_type(tl.int1))
+
     # Which block of Q are we processing?
     pid = tl.program_id(0)
     
@@ -789,6 +792,9 @@ def _attn_bwd_dk_dv(
     M_ptr = tl.cast(M_ptr, tl.pointer_type(tl.float32))
     D_ptr = tl.cast(D_ptr, tl.pointer_type(tl.float32))
 
+    if USE_CUSTOM_MASK:
+        attn_mask_ptr = tl.cast(attn_mask_ptr, tl.pointer_type(tl.int1))
+        
     # Which block of KV are we processing?
     pid = tl.program_id(0)
     
@@ -1101,9 +1107,7 @@ def fused_cross_sdpa_backward(dO,
             EMBED_DIM=HEAD_DIM,
             DTYPE_FLAG=0 if dO.dtype == torch.float32 else 1
         )
-
-        print(torch.max(torch.abs(D - torch.sum(O*dO, axis=-1))))
-
+      
         grid_dq = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd_dq[grid_dq](
             Q_ptr=Q, K_ptr=K, V_ptr=V, dO_ptr=dO, dQ_ptr=dQ, M_ptr=M, D_ptr=D, attn_mask_ptr=attn_mask,
@@ -1141,9 +1145,18 @@ def fused_cross_sdpa_backward(dO,
             D_ptr=D,
             attn_mask_ptr=attn_mask,
             softmax_scale=softmax_scale,
-            stride_Q_batch=Q.stride(0), stride_Q_head=Q.stride(1), stride_Q_len=Q.stride(2), stride_Q_embed=Q.stride(3),
-            stride_K_batch=K.stride(0), stride_K_head=K.stride(1), stride_K_len=K.stride(2), stride_K_embed=K.stride(3),
-            stride_V_batch=V.stride(0), stride_V_head=V.stride(1), stride_V_len=V.stride(2), stride_V_embed=V.stride(3),
+            stride_Q_batch=Q.stride(0), 
+            stride_Q_head=Q.stride(1), 
+            stride_Q_len=Q.stride(2), 
+            stride_Q_embed=Q.stride(3),
+            stride_K_batch=K.stride(0), 
+            stride_K_head=K.stride(1), 
+            stride_K_len=K.stride(2), 
+            stride_K_embed=K.stride(3),
+            stride_V_batch=V.stride(0), 
+            stride_V_head=V.stride(1), 
+            stride_V_len=V.stride(2), 
+            stride_V_embed=V.stride(3),
             stride_mask_batch=attn_mask.stride(0) if attn_mask is not None else 0,
             stride_mask_head=attn_mask.stride(1) if attn_mask is not None else 0,
             stride_mask_q=attn_mask.stride(2) if attn_mask is not None else 0,
@@ -1152,7 +1165,124 @@ def fused_cross_sdpa_backward(dO,
             DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
             USE_CUSTOM_MASK=use_custom_mask
         )
+
+        # Convert back to CuPy if needed
+        dQ = cp.from_dlpack(dQ)
+        dK = cp.from_dlpack(dK)
+        dV = cp.from_dlpack(dV)
     
+    else:
+
+        use_custom_mask = attn_mask is not None
+
+        ### Ensure our grads are contiguous ###
+        if not dO.flags.c_contiguous:
+            dO = cp.ascontiguousarray(dO)
+        if use_custom_mask and not attn_mask.flags.c_contiguous:
+            attn_mask = cp.ascontiguousarray(attn_mask)
+
+        ### Ensure grads have the same dtype
+        if not dO.dtype == Q.dtype:
+            dO = dO.astype(Q.dtype)
+
+        ### Create Empty Grads to populate ###
+        dQ = cp.zeros_like(Q, dtype=Q.dtype)
+        dK = cp.zeros_like(K, dtype=K.dtype)
+        dV = cp.zeros_like(V, dtype=V.dtype)
+        
+        ### Default softmax scale if not provided ###    
+        if softmax_scale is None:
+            softmax_scale = 1 / HEAD_DIM**0.5
+
+        # preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
+        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
+
+        ### This will contain our sum(O * dO, axis=-1) intermediate computation ###
+        ### Do we need a kernel for this? probably not, but thats fine! ###
+        D = cp.empty_like(M, dtype=cp.float32)  # Shape: (BATCH_SIZE, NUM_HEADS, SEQ_LEN)
+
+        # Compute all the elements Di
+        attn_backward_preprocess[preprocess_grid](
+            O_ptr=O.data.ptr, 
+            dO_ptr=dO.data.ptr,
+            D_ptr=D.data.ptr,
+            stride_O_heads=O.strides[1] // O.itemsize, 
+            stride_O_len=O.strides[2] // O.itemsize, 
+            stride_O_embed=O.strides[3] // O.itemsize,
+            stride_dO_heads=dO.strides[1] // dO.itemsize, 
+            stride_dO_len=dO.strides[2] // dO.itemsize, 
+            stride_dO_embed=dO.strides[3] // dO.itemsize,
+            stride_D_head=D.strides[1] // D.itemsize, 
+            SEQ_LEN_Q=SEQ_LEN_Q,
+            EMBED_DIM=HEAD_DIM,
+            DTYPE_FLAG=0 if dO.dtype == cp.float32 else 1
+        )
+        
+        grid_dq = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
+        _attn_bwd_dq[grid_dq](
+            Q_ptr=Q.data.ptr, 
+            K_ptr=K.data.ptr, 
+            V_ptr=V.data.ptr, 
+            dO_ptr=dO.data.ptr, 
+            dQ_ptr=dQ.data.ptr, 
+            M_ptr=M.data.ptr, 
+            D_ptr=D.data.ptr, 
+            attn_mask_ptr=attn_mask.data.ptr,
+            softmax_scale=softmax_scale,
+            stride_Q_batch=Q.strides[0] // Q.itemsize, 
+            stride_Q_head=Q.strides[1] // Q.itemsize, 
+            stride_Q_len=Q.strides[2] // Q.itemsize, 
+            stride_Q_embed=Q.strides[3] // Q.itemsize, 
+            stride_K_batch=K.strides[0] // K.itemsize,  
+            stride_K_head=K.strides[1] // K.itemsize,  
+            stride_K_len=K.strides[2] // K.itemsize,  
+            stride_K_embed=K.strides[3] // K.itemsize,  
+            stride_V_batch=V.strides[0] // V.itemsize,  
+            stride_V_head=V.strides[1] // V.itemsize,  
+            stride_V_len=V.strides[2] // V.itemsize,  
+            stride_V_embed=V.strides[3] // V.itemsize,  
+            stride_mask_batch=attn_mask.strides[0] // attn_mask.itemsize if attn_mask is not None else 0,
+            stride_mask_head=attn_mask.strides[1] // attn_mask.itemsize if attn_mask is not None else 0,
+            stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if attn_mask is not None else 0,
+            stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if attn_mask is not None else 0,
+            NUM_HEADS=NUM_HEADS, SEQ_LEN_Q=SEQ_LEN_Q, SEQ_LEN_KV=SEQ_LEN_KV, HEAD_DIM=HEAD_DIM,
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
+        )
+
+        grid_dk_dv = lambda meta: (triton.cdiv(SEQ_LEN_KV, meta["BLOCK_SIZE_KV"]), BATCH_SIZE * NUM_HEADS, 1)
+        _attn_bwd_dk_dv[grid_dk_dv](
+            Q_ptr=Q.data.ptr, 
+            K_ptr=K.data.ptr, 
+            V_ptr=V.data.ptr, 
+            dO_ptr=dO.data.ptr, 
+            dK_ptr=dK.data.ptr, 
+            dV_ptr=dV.data.ptr, 
+            M_ptr=M.data.ptr, 
+            D_ptr=D.data.ptr,
+            attn_mask_ptr=attn_mask.data.ptr,
+            softmax_scale=softmax_scale,
+            stride_Q_batch=Q.strides[0] // Q.itemsize, 
+            stride_Q_head=Q.strides[1] // Q.itemsize, 
+            stride_Q_len=Q.strides[2] // Q.itemsize, 
+            stride_Q_embed=Q.strides[3] // Q.itemsize, 
+            stride_K_batch=K.strides[0] // K.itemsize,  
+            stride_K_head=K.strides[1] // K.itemsize,  
+            stride_K_len=K.strides[2] // K.itemsize,  
+            stride_K_embed=K.strides[3] // K.itemsize,  
+            stride_V_batch=V.strides[0] // V.itemsize,  
+            stride_V_head=V.strides[1] // V.itemsize,  
+            stride_V_len=V.strides[2] // V.itemsize,  
+            stride_V_embed=V.strides[3] // V.itemsize,  
+            stride_mask_batch=attn_mask.strides[0] // attn_mask.itemsize if attn_mask is not None else 0,
+            stride_mask_head=attn_mask.strides[1] // attn_mask.itemsize if attn_mask is not None else 0,
+            stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if attn_mask is not None else 0,
+            stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if attn_mask is not None else 0,
+            NUM_HEADS=NUM_HEADS, SEQ_LEN_Q=SEQ_LEN_Q, SEQ_LEN_KV=SEQ_LEN_KV, HEAD_DIM=HEAD_DIM,
+            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            USE_CUSTOM_MASK=use_custom_mask
+        )
+
     return dQ, dK, dV
 
 
@@ -1170,9 +1300,9 @@ if __name__ == "__main__":
     attn_mask[1, :, :, -4:] = False
 
     attn_mask_cp = cp.array(attn_mask.detach().cpu().numpy())
-    o_grad = torch.ones_like(q)
+    o_grad = torch.randn_like(q)
     o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
-    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=None)
+    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=attn_mask)
     out.backward(o_grad)
     q_grad_ref = cp.array(q.grad.detach().cpu().numpy())
     k_grad_ref = cp.array(k.grad.detach().cpu().numpy())
@@ -1183,10 +1313,9 @@ if __name__ == "__main__":
     q_cp = cp.array(q.detach().cpu().numpy())
     k_cp = cp.array(k.detach().cpu().numpy())
     v_cp = cp.array(v.detach().cpu().numpy())
-    q_cp, k_cp, v_cp, O, M = fused_cross_sdpa_forward(q_cp,k_cp,v_cp)
-    dQ_cp, dK_cp, dV_cp = fused_cross_sdpa_backward(o_grad_cp, q_cp, k_cp, v_cp, O, M)
+    q_cp, k_cp, v_cp, O, M = fused_cross_sdpa_forward(q_cp,k_cp,v_cp, attn_mask_cp, use_dlpack=True)
+    dQ_cp, dK_cp, dV_cp = fused_cross_sdpa_backward(o_grad_cp, q_cp, k_cp, v_cp, O, M, attn_mask_cp, use_dlpack=True)
     print(cp.max(cp.abs(O-out_ref)))
-
     print(cp.max(cp.abs(dQ_cp-q_grad_ref)))
     print(cp.max(cp.abs(dK_cp-k_grad_ref)))
     print(cp.max(cp.abs(dV_cp-v_grad_ref)))
