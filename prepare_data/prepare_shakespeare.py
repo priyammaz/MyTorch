@@ -9,7 +9,7 @@ import requests
 import numpy as np
 import argparse
 
-def prep_shakespear(path_to_store, test_split_pct=0.1):
+def prep_shakespeare(path_to_store, test_split_pct=0.1):
     data_url = 'https://raw.githubusercontent.com/karpathy/char-rnn/master/data/tinyshakespeare/input.txt'
     all_txt = requests.get(data_url).text
     n = len(all_txt)
@@ -27,11 +27,11 @@ def prep_shakespear(path_to_store, test_split_pct=0.1):
     
     ### Quick encoding ###
     def encode(s):
-        return [char2idx[c] for c in all_txt]
+        return [char2idx[c] for c in s]
     
     ### Train/Test Split ###
-    train = all_txt[:int(n*0.9)]
-    test = all_txt[int(n*0.9):]
+    train = all_txt[:int(n*(1-test_split_pct))]
+    test = all_txt[int(n*(1-test_split_pct)):]
 
     train_ids = encode(train)
     val_ids = encode(test)
@@ -69,6 +69,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    prep_shakespear(args.path_to_save)
+    prep_shakespeare(args.path_to_save)
 
 
