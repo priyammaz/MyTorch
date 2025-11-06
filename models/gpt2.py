@@ -17,22 +17,22 @@ class GPT2Config:
     attn_dropout_p: float = 0.0 # Currently not supported for our flash attn
     use_bias: bool = False
     use_full_auto: bool = False
-    use_flash_attention: bool = False
     use_fused_ops: bool = False
 
 class Embeddings(nn.Module):
 
-    def __init__(self, vocab_size, embed_dim, context_length):
+    def __init__(self, vocab_size, embed_dim, context_length, fused):
         super().__init__()
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.context_length = context_length
+        self.fused = fused
 
         ### Embeddings for Tokens ###
-        self.char_embeddings = nn.Embedding(vocab_size, embed_dim)
+        self.char_embeddings = nn.Embedding(vocab_size, embed_dim, fused=self.fused)
 
         ### Positional Embeddings ###
-        self.position_embeddings = nn.Embedding(context_length, embed_dim)
+        self.position_embeddings = nn.Embedding(context_length, embed_dim, fused=self.fused)
 
     def forward(self, input_ids):
 
@@ -71,10 +71,10 @@ class Attention(nn.Module):
         self.fused = fused
 
         ### Attention Projections ###
-        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto, fused=self.fused)
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto)
 
         ### Post Attention Projection ###
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto, fused=self.fused)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto)
         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
 
         if not self.fused:
@@ -118,7 +118,7 @@ class Attention(nn.Module):
 
         else:
    
-            output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+            output = F.scaled_dot_product_attention(q, k, v, causal=True)
             
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
 
@@ -137,16 +137,15 @@ class FeedForward(nn.Module):
                  mlp_ratio=4, 
                  mlp_dropout_p=0.1,
                  use_bias=True,
-                 auto=False,
-                 fused=False):
+                 auto=False):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
 
-        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=fused)
+        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto)
         self.activation = nn.GELU()
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
 
-        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=fused)
+        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
     def forward(self, x):
@@ -182,7 +181,7 @@ class TransformerBlock(nn.Module):
                                    fused=fused)
         
         self.layernorm1 = nn.LayerNorm(embed_dim, bias=use_bias, auto=auto, fused=fused)
-        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto, fused=fused)
+        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto)
         self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
 
     def forward(self, x):
@@ -203,7 +202,8 @@ class GPT2(nn.Module):
  
         self.embeddings = Embeddings(vocab_size=config.vocab_size, 
                                      embed_dim=config.embed_dim, 
-                                     context_length=config.max_seq_len)
+                                     context_length=config.max_seq_len,
+                                     fused=config.use_fused_ops)
         
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim=config.embed_dim, 
@@ -218,12 +218,11 @@ class GPT2(nn.Module):
             for _ in range(config.num_blocks)
         ])
 
-        self.final_layer_norm = nn.LayerNorm(config.embed_dim, auto=config.use_full_auto, fused=config.use_fused_ops)
+        self.final_layer_norm = nn.LayerNorm(config.embed_dim)
         self.lm_head = nn.Linear(config.embed_dim, 
                                  config.vocab_size, 
                                  bias=config.use_bias,
-                                 auto=config.use_full_auto,
-                                 fused=config.use_fused_ops)
+                                 auto=config.use_full_auto)
 
         ### Initialize Weights ###
         self.apply(_init_weights)
@@ -245,7 +244,7 @@ class GPT2(nn.Module):
         x = self.lm_head(x)
         
         return x
-
+    
 ### Standard Weight Init for Transformers ###
 def _init_weights(module):
     if isinstance(module, nn.Linear):
