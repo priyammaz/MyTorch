@@ -18,7 +18,9 @@ import torch
 import cupy as cp
 import triton
 import triton.language as tl
-from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+# from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+DLPACK_DISABLE = False
+AUTOTUNE_MODE = "none"
 
 def get_fwd_autotune_configs():
 
@@ -163,7 +165,8 @@ def _attn_fwd_inner(
     offs_kv: tl.constexpr,
     SEQ_LEN,
     DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
-    USE_CUSTOM_MASK: tl.constexpr, 
+    USE_CUSTOM_MASK: tl.constexpr,
+    BROADCAST_MASK_HEAD: tl.constexpr, 
     stride_mask_batch,  
     stride_mask_head, 
     stride_mask_q,
@@ -283,9 +286,14 @@ def _attn_fwd_inner(
             ### currently processing inside our attention mask ###
             ### again the offs_q tells us the block of queries we are processing and the 
             ### kv_indices tell us which keys/values we are processing in this iter of the loop
+
+            ### Also our mask can either be of shape (B x 1 x L x L) in which case we need to broadcast
+            ### over the Head dimension. So if we just need to repeatedly stay in the first Head dim in our 
+            ### mask (dim=0) then we just keep it 0 always. If our mask is in the shape of (B x H x L x L) 
+            ### then we need to make sure to advance forward to the correct Head dimension using index_head!
             mask_offset = (
                 index_batch * stride_mask_batch + 
-                index_head * stride_mask_head +
+                (0 if BROADCAST_MASK_HEAD else index_head) * stride_mask_head +
                 offs_q[:, None] * stride_mask_q + 
                 kv_indices[None, :] * stride_mask_kv
             )
@@ -368,6 +376,7 @@ def _attn_fwd(
     ATTN_MODE: tl.constexpr, # 0 for non_causal, 1 for causal
     DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16,
     USE_CUSTOM_MASK: tl.constexpr,
+    BROADCAST_MASK_HEAD: tl.constexpr
 ):  
     """
     Main forward method for Flash Attention, where for a block of queries
@@ -539,6 +548,7 @@ def _attn_fwd(
         SEQ_LEN,
         DTYPE_FLAG,
         USE_CUSTOM_MASK, 
+        BROADCAST_MASK_HEAD,
         stride_mask_batch, 
         stride_mask_head, 
         stride_mask_q, 
@@ -610,6 +620,7 @@ def _attn_fwd(
             SEQ_LEN,
             DTYPE_FLAG,
             USE_CUSTOM_MASK, 
+            BROADCAST_MASK_HEAD,
             stride_mask_batch, 
             stride_mask_head, 
             stride_mask_q, 
@@ -943,7 +954,8 @@ def _attn_bwd(
     BLOCK_SIZE_MACRO: tl.constexpr,
     CAUSAL: tl.constexpr, # 1 for causal, 0 for noncausal 
     DTYPE_FLAG: tl.constexpr, # 0 for float32 1 for float16,
-    USE_CUSTOM_MASK: tl.constexpr
+    USE_CUSTOM_MASK: tl.constexpr,
+    BROADCAST_MASK_HEAD: tl.constexpr
 ):
     
     tl.static_assert(BLOCK_SIZE_MACRO % BLOCK_SIZE_MICRO == 0)
@@ -990,11 +1002,12 @@ def _attn_bwd(
     D_ptr += offset_batch_head_3d
 
     ### If we have an attention mask, we can compute which batch/head of our mask we want to index later ###
+    ### Just like in the forward pass, if our mask is of shape (Bx1xLxL) we dont need to offset by the head dim ###
     mask_offset_base = 0
     if USE_CUSTOM_MASK:
         mask_offset_base = (
             idx_batch * stride_mask_batch +
-            idx_head * stride_mask_head
+            (0 if BROADCAST_MASK_HEAD else idx_head) * stride_mask_head
         )
 
     ###################### dK dV #####################
@@ -1222,14 +1235,30 @@ def fused_sdpa_forward(Q, K, V,
                        softmax_scale=None, 
                        use_dlpack=True):
     
-    HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
-    HEAD_DIM_V = V.shape[-1]
-    BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
-    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
-    assert Q.dtype == K.dtype and K.dtype == V.dtype, "Expect all Q,K,V Tensors to have the same data type"
+    BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, HEAD_DIM_Q = Q.shape
+    _, NUM_KV_HEADS, SEQ_LEN_KV, HEAD_DIM_K = K.shape
+    _, _, _, HEAD_DIM_V = V.shape
+
+    # Sanity checks
+    assert K.shape[1] == V.shape[1], "K and V must have the same number of heads!"
+    assert NUM_HEADS % NUM_KV_HEADS == 0, (
+        "Number of query heads must be divisible by the number of key/value heads!"
+    )
+    assert HEAD_DIM_Q == HEAD_DIM_K == HEAD_DIM_V, (
+        "Q, K, V head dimensions must match!"
+    )
+
+    assert SEQ_LEN_Q == SEQ_LEN_KV, "Self Attention expects Q,K,V to all have the same sequence length"
+
+    assert Q.dtype == K.dtype == V.dtype, (
+        "Q, K, V must have the same data type!"
+    )
+
+    if attn_mask is not None and attn_mask.shape[1] != 1:
+        assert attn_mask.shape[1] == NUM_HEADS, "Attention mask must either have 1 as head dim for broadcast, or match head dim in Queries"
 
     if softmax_scale is None:
-        softmax_scale = 1 / HEAD_DIM**0.5
+        softmax_scale = 1 / HEAD_DIM_Q**0.5
 
     if not DLPACK_DISABLE and use_dlpack:
         
@@ -1241,9 +1270,11 @@ def fused_sdpa_forward(Q, K, V,
         ### Check if we have Attention Mask ###
         use_custom_mask = attn_mask is not None
 
+        broadcast_mask_head = False
         if use_custom_mask:
             attn_mask = torch.utils.dlpack.from_dlpack(attn_mask)
-    
+            broadcast_mask_head = (attn_mask.shape[1] == 1)
+ 
         ### Make sure there is contiguous memory layout ####
         if not Q.is_contiguous():
             Q = Q.contiguous()
@@ -1254,10 +1285,11 @@ def fused_sdpa_forward(Q, K, V,
         if use_custom_mask and not attn_mask.is_contiguous():
             attn_mask = attn_mask.contiguous()
 
+
         # Create output tensors
         O = torch.empty_like(Q)
-        M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
-        grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+        M = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, dtype=torch.float32, device=Q.device)
+        grid = lambda args: (triton.cdiv(SEQ_LEN_Q, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
 
         _attn_fwd[grid](
             Q=Q,
@@ -1282,11 +1314,12 @@ def fused_sdpa_forward(Q, K, V,
             stride_mask_q=attn_mask.stride(2) if use_custom_mask else 0,
             stride_mask_kv=attn_mask.stride(3) if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
-            SEQ_LEN=SEQ_LEN,
+            SEQ_LEN=SEQ_LEN_Q,
             HEAD_DIM=HEAD_DIM_Q,
             ATTN_MODE=1 if causal else 0,
             DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
-            USE_CUSTOM_MASK=use_custom_mask
+            USE_CUSTOM_MASK=use_custom_mask,
+            BROADCAST_MASK_HEAD=broadcast_mask_head
         )
 
         ### Convert back to cupy ###
@@ -1301,6 +1334,10 @@ def fused_sdpa_forward(Q, K, V,
         ### Check for custom mask ###
         use_custom_mask = attn_mask is not None
 
+        broadcast_mask_head = False
+        if use_custom_mask:
+            broadcast_mask_head = (attn_mask.shape[1] == 1)
+
         ### Make sure there is contiguous memory layout ####
         if not Q.flags.c_contiguous:
             Q = cp.ascontiguousarray(Q)
@@ -1312,13 +1349,13 @@ def fused_sdpa_forward(Q, K, V,
             attn_mask = cp.ascontiguousarray(attn_mask)
 
         O = cp.empty_like(Q)
-        grid = lambda args: (triton.cdiv(SEQ_LEN, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
+        grid = lambda args: (triton.cdiv(SEQ_LEN_Q, args["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS, 1)
 
         # M is the logsumexp for the backward pass, one for each query
         # Make sure to create it on the right device as we are not using empty_like
         with cp.cuda.Device(Q.device.id):
             M = cp.empty(
-                (BATCH_SIZE, NUM_HEADS, SEQ_LEN), dtype=cp.float32
+                (BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q), dtype=cp.float32
             )
 
         _attn_fwd[grid](
@@ -1344,11 +1381,12 @@ def fused_sdpa_forward(Q, K, V,
             stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if use_custom_mask else 0,
             stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
-            SEQ_LEN=SEQ_LEN,
+            SEQ_LEN=SEQ_LEN_Q,
             HEAD_DIM=HEAD_DIM_Q,
             ATTN_MODE=1 if causal else 0,
             DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
-            USE_CUSTOM_MASK=use_custom_mask
+            USE_CUSTOM_MASK=use_custom_mask,
+            BROADCAST_MASK_HEAD=broadcast_mask_head
         )
 
     return Q, K, V, O, M
@@ -1361,15 +1399,31 @@ def fused_sdpa_backward(dO,
                         softmax_scale=None,
                         use_dlpack=True):
 
-    HEAD_DIM_Q, HEAD_DIM_K = Q.shape[-1], K.shape[-1]
-    HEAD_DIM_V = V.shape[-1]
-    BATCH_SIZE, NUM_HEADS, SEQ_LEN, HEAD_DIM = Q.shape
-    assert HEAD_DIM_Q == HEAD_DIM_K and HEAD_DIM_K == HEAD_DIM_V
-    assert Q.dtype == K.dtype and K.dtype == V.dtype and V.dtype == O.dtype, "Expect all Q,K,V,O Tensors to have the same data type"
+    BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, HEAD_DIM_Q = Q.shape
+    _, NUM_KV_HEADS, SEQ_LEN_KV, HEAD_DIM_K = K.shape
+    _, _, _, HEAD_DIM_V = V.shape
+
+    # Sanity checks
+    assert K.shape[1] == V.shape[1], "K and V must have the same number of heads!"
+    assert NUM_HEADS % NUM_KV_HEADS == 0, (
+        "Number of query heads must be divisible by the number of key/value heads!"
+    )
+    assert HEAD_DIM_Q == HEAD_DIM_K == HEAD_DIM_V, (
+        "Q, K, V head dimensions must match!"
+    )
+
+    assert SEQ_LEN_Q == SEQ_LEN_KV, "Self Attention expects Q,K,V to all have the same sequence length"
+
+    assert Q.dtype == K.dtype == V.dtype, (
+        "Q, K, V must have the same data type!"
+    )
+
+    if attn_mask is not None and attn_mask.shape[1] != 1:
+        assert attn_mask.shape[1] == NUM_HEADS, "Attention mask must either have 1 as head dim for broadcast, or match head dim in Queries"
 
     ### Default softmax scale if not provided ###    
     if softmax_scale is None:
-        softmax_scale = 1 / HEAD_DIM**0.5
+        softmax_scale = 1 / HEAD_DIM_Q**0.5
         
     if not DLPACK_DISABLE and use_dlpack:
 
@@ -1382,8 +1436,11 @@ def fused_sdpa_backward(dO,
 
         ### Check if we have Attention Mask ###
         use_custom_mask = attn_mask is not None
+
+        broadcast_mask_head = False
         if use_custom_mask:
             attn_mask = torch.utils.dlpack.from_dlpack(attn_mask)
+            broadcast_mask_head = (attn_mask.shape[1] == 1)
 
         ### Ensure our grads are contiguous ###
         if not dO.is_contiguous():
@@ -1399,9 +1456,9 @@ def fused_sdpa_backward(dO,
         dQ = torch.zeros_like(Q, dtype=Q.dtype)
         dK = torch.zeros_like(K, dtype=K.dtype)
         dV = torch.zeros_like(V, dtype=V.dtype)
-        D = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN, dtype=torch.float32, device=Q.device)
+        D = torch.empty(BATCH_SIZE, NUM_HEADS, SEQ_LEN_Q, dtype=torch.float32, device=Q.device)
     
-        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
+        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
 
         # Compute all the elements Di
         attn_backward_preprocess[preprocess_grid](
@@ -1415,12 +1472,12 @@ def fused_sdpa_backward(dO,
             stride_dO_len=dO.stride(2), 
             stride_dO_embed=dO.stride(3),
             stride_D_head=D.stride(1),
-            SEQ_LEN=SEQ_LEN,
-            EMBED_DIM=HEAD_DIM,
+            SEQ_LEN=SEQ_LEN_Q,
+            EMBED_DIM=HEAD_DIM_Q,
             DTYPE_FLAG=0 if dO.dtype == torch.float32 else 1
         )
 
-        grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
+        grid = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd[grid](
             Q_ptr=Q, 
             K_ptr=K, 
@@ -1442,11 +1499,12 @@ def fused_sdpa_backward(dO,
             stride_mask_q=attn_mask.stride(2) if use_custom_mask else 0,
             stride_mask_kv=attn_mask.stride(3) if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS, 
-            SEQ_LEN=SEQ_LEN, 
-            HEAD_DIM=HEAD_DIM, 
+            SEQ_LEN=SEQ_LEN_Q, 
+            HEAD_DIM=HEAD_DIM_Q, 
             CAUSAL=1 if causal else 0, 
             DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
-            USE_CUSTOM_MASK=use_custom_mask
+            USE_CUSTOM_MASK=use_custom_mask,
+            BROADCAST_MASK_HEAD=broadcast_mask_head
         )
 
         # Convert back to CuPy if needed
@@ -1462,8 +1520,11 @@ def fused_sdpa_backward(dO,
         ### Ensure our grads are contiguous ###
         if not dO.flags.c_contiguous:
             dO = cp.ascontiguousarray(dO)
+        
+        broadcast_mask_head = False
         if use_custom_mask and not attn_mask.flags.c_contiguous:
             attn_mask = cp.ascontiguousarray(attn_mask)
+            broadcast_mask_head = (attn_mask.shape[1] == 1)
 
         ### Ensure grads have the same dtype
         if not dO.dtype == Q.dtype:
@@ -1476,10 +1537,10 @@ def fused_sdpa_backward(dO,
 
         ### Default softmax scale if not provided ###    
         if softmax_scale is None:
-            softmax_scale = 1 / HEAD_DIM**0.5
+            softmax_scale = 1 / HEAD_DIM_Q**0.5
 
         # preprocess_grid = (SEQ_LEN // BLOCK_SIZE_MACRO, BATCH_SIZE * NUM_HEADS)
-        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
+        preprocess_grid = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE"]), BATCH_SIZE * NUM_HEADS)
 
         ### This will contain our sum(O * dO, axis=-1) intermediate computation ###
         ### Do we need a kernel for this? probably not, but thats fine! ###
@@ -1497,13 +1558,13 @@ def fused_sdpa_backward(dO,
             stride_dO_len=dO.strides[2] // dO.itemsize, 
             stride_dO_embed=dO.strides[3] // dO.itemsize,
             stride_D_head=D.strides[1] // D.itemsize, 
-            SEQ_LEN=SEQ_LEN,
-            EMBED_DIM=HEAD_DIM,
+            SEQ_LEN=SEQ_LEN_Q,
+            EMBED_DIM=HEAD_DIM_Q,
             DTYPE_FLAG=0 if dO.dtype == cp.float32 else 1
         )
 
 
-        grid = lambda meta: (triton.cdiv(SEQ_LEN, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
+        grid = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_MACRO"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd[grid](
             Q_ptr=Q.data.ptr, 
             K_ptr=K.data.ptr, 
@@ -1525,28 +1586,29 @@ def fused_sdpa_backward(dO,
             stride_mask_q=attn_mask.strides[2] // attn_mask.itemsize if use_custom_mask else 0,
             stride_mask_kv=attn_mask.strides[3] // attn_mask.itemsize if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS, 
-            SEQ_LEN=SEQ_LEN, 
-            HEAD_DIM=HEAD_DIM, 
+            SEQ_LEN=SEQ_LEN_Q, 
+            HEAD_DIM=HEAD_DIM_Q, 
             CAUSAL=1 if causal else 0, 
             DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
-            USE_CUSTOM_MASK=use_custom_mask
+            USE_CUSTOM_MASK=use_custom_mask,
+            BROADCAST_MASK_HEAD=broadcast_mask_head
         )
 
     return dQ, dK, dV
 
 if __name__ == "__main__":
 
-    q = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
-    k = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
-    v = torch.randn((2,2,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
-    attn_mask = torch.ones((2,2,64,64)).bool().to("cuda")
+    q = torch.randn((2,8,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    k = torch.randn((2,8,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    v = torch.randn((2,8,64,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    attn_mask = torch.ones((2,8,64,64)).bool().to("cuda")
     attn_mask[0, :, :, -20:] = False
     attn_mask[1, :, :, -4:] = False
 
     attn_mask_cp = cp.array(attn_mask.detach().cpu().numpy())
     o_grad = torch.randn_like(q)
     o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
-    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=attn_mask, is_causal=True)
+    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, is_causal=True, attn_mask=attn_mask)
     out.backward(o_grad)
     q_grad_ref = cp.array(q.grad.detach().cpu().numpy())
     k_grad_ref = cp.array(k.grad.detach().cpu().numpy())
@@ -1557,7 +1619,7 @@ if __name__ == "__main__":
     q_cp = cp.array(q.detach().cpu().numpy())
     k_cp = cp.array(k.detach().cpu().numpy())
     v_cp = cp.array(v.detach().cpu().numpy())
-    q_cp, k_cp, v_cp, O, M = fused_sdpa_forward(q_cp,k_cp,v_cp, attn_mask_cp, causal=True)
+    q_cp, k_cp, v_cp, O, M = fused_sdpa_forward(q_cp,k_cp,v_cp, causal=True, attn_mask=attn_mask_cp)
     dQ_cp, dK_cp, dV_cp = fused_sdpa_backward(o_grad_cp, q_cp, k_cp, v_cp, O, M, attn_mask_cp, causal=True)
     print(cp.max(cp.abs(O-out_ref)))
 

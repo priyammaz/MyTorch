@@ -2518,10 +2518,6 @@ def scaled_dot_product_attention(Q, K, V,
         assert (len_q == attn_mask.shape[2]) and (len_k == attn_mask.shape[3]), f"Expected Attention Mask is Shape ({batch_q}, ... {len_q}, {len_k}), got {attn_mask.shape}"
         if (attn_mask.shape[1] != heads_q) and (attn_mask.shape[1] != 1):
             raise Exception("Expected either {heads_q} head dimension or 1 in attention mask")
-        
-        ### Kernel expects the shape (BxHxLxS) but its the same for every head so we can repeat them ###
-        if (attn_mask.shape[1] != heads_q) and (attn_mask.shape[1] == 1):
-            attn_mask = cp.repeat(attn_mask, heads_q, axis=1) 
 
     if self_attn:
         Q_data, K_data, V_data, attn_out, M = FO.fused_sdpa_forward(
@@ -2545,8 +2541,6 @@ def scaled_dot_product_attention(Q, K, V,
                 dO=grad_output, Q=Q_data, K=K_data, V=V_data, O=attn_out, M=M,
                 attn_mask=attn_mask, softmax_scale=softmax_scale
             )
-
-
 
         dQ, dK, dV = FO.fused_sdpa_backward(grad_output, 
                                             Q_data, K_data, V_data, 
