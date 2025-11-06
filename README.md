@@ -589,7 +589,7 @@ HENRY BOLINGBROKE:
 Welcome, my lord.
 ```
 
-### Train OpenWebText (124M Parameters)
+### Pre-Train GPT2 (124M Parameters) on OpenWebText
 
 Training a tiny GPT model isn't too much of a problem. What about training a GPT2-Base model?
 
@@ -600,15 +600,73 @@ Training a tiny GPT model isn't too much of a problem. What about training a GPT
 python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
 ```
 
-### Train on OpenWebText
+### Pre-Train on OpenWebText
 
 ```python
-bash gpt2_trainer/train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --log_wandb
+bash gpt2_trainer/train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --triton_autotune --log_wandb
 ```
 
 My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 250K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
 
 <img src="https://github.com/priyammaz/MyTorch/blob/main/src/gpt2_owt_curve.png?raw=true" alt="drawing" width="600"/>
+
+### Finetune GPT2 On Shakespeare
+
+Now that you have a model that is pretrained, we can finetune it on Shakespeare!
+
+#### Prepare Shakespeare Data for GPT2
+
+The following command will create a new ```train.bin``` and ```val.bin``` inside ```data/shakespeare_gpt2```.
+
+```bash
+python prepare_data/prepare_shakespeare_gpt2.py
+```
+
+#### Start Training
+
+By default we freeze the everything but the last 3 layers of the Transformer! This expects that your pretrained checkpoint is inside ```work_dir/gpt2-base-owt``` which is where the pre-training should have saved it by default. It will also use the most recent checkpoint available automatically, but you can point to different checkpoints as well. Just take a look at ```gpt2_trainer/finetune_gpt2_base_shakespeare.sh``` to make any changes you need! This only takes a few minutes (and will probably heavily overfit!)
+
+```bash
+bash gpt2_trainer/finetune_gpt2_base_shakespeare.sh --fused --mixed_precision --triton_autotune
+```
+#### Inference 
+
+This will have produced a new checkpoint (for finetuning) to ```work_dir/gpt2-base-ft-shakespeare```. So we can then go ahead and inference it!
+
+```bash
+python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-base-ft-shakespeare --device "cuda"
+```
+
+Here is an example of a generation! Not too bad!
+```
+MENENIUS:
+Once more, I have taken him on
+
+HASTINGS:
+Conspirators are limit'd by force,
+Which if privilege be the best remedy of their illegality.
+The consuls, and here 'gainst this father's life,
+The enslaved by the state, chew and shake of the state's state!
+You nobler attainder'd you;
+Your children user.
+
+BRUTUS:
+What is the presence of this fellow that we will to palliance
+And wish at once:
+If you appeal unto him, froward, see where all this was stirred;
+His woes of your constructions
+Are not fixed gasping to hear how flatter'd your sweet blood,
+At your broils bidding and bids these to repeat.
+The man that all husband and then all his children
+
+Were not born normal:
+Did never, so he knew he meant to wage a traitor
+He had, that tramples the jungle
+Which then in hazel kind natures first their root.
+For they say, he did disobedient unto them:
+But where did these hapless saplings
+
+```
 
 ### How does AutoGrad work?
 
@@ -710,6 +768,7 @@ Triton is not too challenging to learn, it just needs some practice! I think my 
 I am not even close to done! Here are some of the stuff I want to work on next to keep this going (on top of finishing all the unfinished ops from above)!
 
 - [x] Make a Tiny GPT2 Example for Colab
+- [x] Finetune GPT2 Base on Shakespeare example
 - [x] Fused Linear Layer w/ Grouped MatMul and Bias
 - [x] Fused Embedding Layer
 - [ ] Flash Attention
