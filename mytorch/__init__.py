@@ -27,3 +27,4 @@ from .utils import *
 from .save_load import save, load
 from .sampling import *
 from .accelerate import Accelerator
+from .utils import checkpoint
