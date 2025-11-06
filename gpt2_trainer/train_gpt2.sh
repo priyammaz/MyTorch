@@ -10,6 +10,9 @@ MIXED_PRECISION=false
 DLPACK_DISABLE=false
 LOG_WANDB=false
 
+### Add PWD to Sys Directory to enable MyTorch import to resolve ###
+export PYTHONPATH="$(pwd):$PYTHONPATH"
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         owt|shakespeare)
@@ -83,7 +86,7 @@ fi
 
 case "$TARGET" in
     owt)
-        $CMD -m gpt2_trainer.train_gpt2.py \
+        $CMD gpt2_trainer/train_gpt2.py  \
             --project_name gpt2-large-owt \
             --working_directory work_dir \
             --checkpoint_iterations 10000 \
@@ -108,7 +111,7 @@ case "$TARGET" in
             $EXTRA_ARGS
         ;;
     shakespeare)
-        $CMD -m gpt2_trainer.train_gpt2 \
+        $CMD gpt2_trainer/train_gpt2.py \
             --project_name gpt2-small-shakespeare \
             --working_directory work_dir \
             --context_length 256 \
