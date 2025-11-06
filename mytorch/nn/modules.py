@@ -399,11 +399,15 @@ class Linear(Module):
         return output
     
 class Embedding(Module):
-    def __init__(self, num_embeddings, embedding_dim):
+    def __init__(self, num_embeddings, embedding_dim, fused=False):
         super().__init__()
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
 
+        self.fused = fused
+        if fused and not FUSED_AVAIL:
+            raise Exception("Triton Installation Necessary for Fused Ops")
+        
         limit = 1.0 / np.sqrt(embedding_dim)
         self.weight = zeros((num_embeddings, embedding_dim), requires_grad=True)
         init.uniform_(self.weight, -limit, limit)
@@ -418,8 +422,7 @@ class Embedding(Module):
         return f"num_embeddings={self.num_embeddings}, embedding_dim={self.embedding_dim}"
     
     def forward(self, indices):
-        embeds = self.weight[indices]
-        return embeds
+        return F.embedding(indices=indices, weight=self.weight, fused=self.fused)
     
 class Dropout(Module):
     def __init__(self, dropout_p=0.5):
