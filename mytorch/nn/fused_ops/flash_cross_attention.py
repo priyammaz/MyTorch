@@ -4,7 +4,7 @@ we only support cross attention here! Cross attention implies the length of our 
 the length of our Keys and Values.
 
 We could have put this all together in the single flash_attention.py, but
-it makes that code more challenging and this is tough enough. So to maintain
+it makes that code look more challenging and this is already tough enough. So to maintain
 readability (at the cost of extra lines) we separate them out!
 
 WHAT CHANGED: 
@@ -32,7 +32,6 @@ here to just not do that and have to separate kernel calls, one that computes dQ
 that computes dK,dV! So you will find in our `fused_cross_sdpa_backward` that we do exactly that!
 """
 
-import os
 import torch
 import cupy as cp
 import triton
