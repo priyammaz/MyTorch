@@ -118,7 +118,7 @@ class Attention(nn.Module):
 
         else:
    
-            output = F.scaled_dot_product_attention(q, k, v, causal=True)
+            output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
             
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
 
