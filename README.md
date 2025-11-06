@@ -506,13 +506,13 @@ python prepare_data/prepare_shakespeare.py --path_to_save "data/shakespeare"
 
 And from there you can launch your training!
 ```
-bash train_gpt2.sh shakespeare 
+bash gpt2_trainer/train_gpt2.sh shakespeare
 ```
 
 Optionally you can add the following tags:
 
 ```
-bash train_gpt2.sh shakespeare  --mixed_precision --fused --num_gpus 2 --log_wandb
+bash gpt2_trainer/train_gpt2.sh shakespeare --mixed_precision --fused --num_gpus 2 --log_wandb
 ```
 
 This should only take a few minutes and create a final checkpoint in ```work_dir/gpt2-small-shakespeare```
@@ -556,15 +556,14 @@ mytorchrun launch train_gpt2.py \
 We can also go ahead and inference this model with:
 
 ```
-python inference_gpt2.py work_dir/gpt2-small-shakespeare/ --device cuda
+python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-small-shakespeare/ --device cuda
 ```
 
 Optionally you can add the following options:
 
 ```
-python inference_gpt2.py work_dir/gpt2-small-shakespeare/ --device cuda --temperature 0.8 --topk 15
+python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-small-shakespeare/ --device cuda --temperature 0.8 --topk 15
 ```
-
 
 Sample Output:
 
@@ -604,7 +603,7 @@ python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
 ### Train on OpenWebText
 
 ```python
-bash train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --log_wandb
+bash gpt2_trainer/train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --log_wandb
 ```
 
 My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 250K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
@@ -638,6 +637,23 @@ Depth first search is not exactly correct though. Lets look at this example! Jus
 This is why we track our children of every node. Until a node has exhasted all its children (i.e. all the paths have come to it) we cannot continue onwards. The light-blue node in this case has 2 children. Doing the top path will exhaust one of them, but we must complete the second path as well to exhast the second child. Therefore we gate our Depth First Search so we dont continue to propagate past a node that hasn't been fully exhasted!
 
 So now, we use the orange path to give our first gradient injection into the light-blue node and then work our way back up and then continue down the yellow path. Once the yellow path ends on the light-blue node, we can then propagate the gradient back again via the purple path and then green path for the final nodes. 
+
+### Topological Sort
+
+If we have restrictions in our backpropagation (of what nodes we can call ```.backward()``` on) then it would be convenient to sort out the order in which I can do this! The algorithm for this is called [Topological Sort](https://en.wikipedia.org/wiki/Topological_sorting). You can watch me step through this algorithm [here](https://www.youtube.com/watch?v=C783PDxXmfY&t=10345s)
+
+Here is an example of this:
+
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/topo_sort.png?raw=true" alt="drawing" width="600"/>
+
+
+Notice that in the backward pass, we cannot go from Node 2 to Node 1, until we complete the other backward passes? That is exactly what Topological sort allows us to do!
+
+You can create your own plot! Just go to ```visualize_graph.py``` and update the ```easy_operation``` method to be whatever you want to see whats happening! Caveat though, too complex of a function might be way to crowder on the plot. To get this current plot just run
+
+```bash
+python visualize_graph.py
+```
 
 ### Blending AutoGrad and Manual Grad
 
@@ -693,19 +709,22 @@ Triton is not too challenging to learn, it just needs some practice! I think my 
 
 I am not even close to done! Here are some of the stuff I want to work on next to keep this going (on top of finishing all the unfinished ops from above)!
 
-- [ ] Make a Tiny GPT2 Example for Colab
-- [ ] Fused Linear Layer w/ Grouped MatMul and Bias
-- [ ] Fused Embedding Layer
+- [x] Make a Tiny GPT2 Example for Colab
+- [x] Fused Linear Layer w/ Grouped MatMul and Bias
+- [x] Fused Embedding Layer
 - [ ] Flash Attention
   - [ ] Add Dropout
-  - [ ] Add Cross Attention
-  - [ ] Add custom attention masks
+  - [x] Add Cross Attention
+  - [x] Add custom attention masks
   - [ ] Add Sliding Window Attention
-  - [ ] Add Grouped Query Attention
+  - [x] Add Grouped Query Attention
 - [ ] KV Cache for Inference
-  - [ ] Fused Kernel for KV Caching
-- [ ] Reimplement and Reproduce Llama
+- [ ] Reimplement and Reproduce (something like) Llama, closer to nanoChat
   - [ ] Rotary Embeddings
+  - [ ] Repeat
+  - [ ] Optimizer Groups
+  - [ ] Better inference wrapper
+- [ ] GRPO Trainer for post-training
 - [ ] Mixture of Experts
 - [x] Benchmark Scripts to scope gains from Fused Ops
 - [ ] Use Fused Conv2d/Conv1d for AvgPool Op
