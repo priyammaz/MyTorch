@@ -645,7 +645,7 @@ class Accelerator:
         if self.rank == 0:
             wandb.log(log_dict, step=step)
 
-    def save_state(self, path_to_checkpoint):
+    def save_state(self, path_to_checkpoint, save_model_only=False):
 
         """
         Checkpoint model weights and optimizer
@@ -674,39 +674,41 @@ class Accelerator:
 
             save_file(model_state, os.path.join(path_to_checkpoint, "model.safetensors"))
 
-            ### Get Optimizer states ###
-            if hasattr(self, "optimizer") and self.optimizer is not None:
- 
-                opt = self.optimizer
-                opt_state = {}
+            if not save_model_only:
+                
+                ### Get Optimizer states ###
+                if hasattr(self, "optimizer") and self.optimizer is not None:
+    
+                    opt = self.optimizer
+                    opt_state = {}
 
-                if hasattr(opt, "m"):
-                    opt_state["m"] = [cp.asnumpy(m) for m in opt.m]
-                if hasattr(opt, "v"):
-                    opt_state["v"] = [cp.asnumpy(v) for v in opt.v]
-                if hasattr(opt, "t"):
-                    opt_state["t"] = opt.t
-                if hasattr(opt, "beta1_pow"):
-                    opt_state["beta1_pow"] = opt.beta1_pow
-                if hasattr(opt, "beta2_pow"):
-                    opt_state["beta2_pow"] = opt.beta2_pow
+                    if hasattr(opt, "m"):
+                        opt_state["m"] = [cp.asnumpy(m) for m in opt.m]
+                    if hasattr(opt, "v"):
+                        opt_state["v"] = [cp.asnumpy(v) for v in opt.v]
+                    if hasattr(opt, "t"):
+                        opt_state["t"] = opt.t
+                    if hasattr(opt, "beta1_pow"):
+                        opt_state["beta1_pow"] = opt.beta1_pow
+                    if hasattr(opt, "beta2_pow"):
+                        opt_state["beta2_pow"] = opt.beta2_pow
 
-                if len(opt_state) > 0:
-                    opt_path = os.path.join(path_to_checkpoint, "optimizer.bin")
-                    with open(opt_path, "wb") as f:
-                        pickle.dump(opt_state, f)
+                    if len(opt_state) > 0:
+                        opt_path = os.path.join(path_to_checkpoint, "optimizer.bin")
+                        with open(opt_path, "wb") as f:
+                            pickle.dump(opt_state, f)
 
-            if self.mixed_precision:
+                if self.mixed_precision:
 
-                mixed_precision_config = {"scale": self.scaler.scale,
-                                          "growth_factor": self.scaler.growth_factor,
-                                          "backoff_factor": self.scaler.backoff_factor, 
-                                          "growth_interval": self.scaler.growth_interval, 
-                                          "unskipped": self.scaler.unskipped}
+                    mixed_precision_config = {"scale": self.scaler.scale,
+                                            "growth_factor": self.scaler.growth_factor,
+                                            "backoff_factor": self.scaler.backoff_factor, 
+                                            "growth_interval": self.scaler.growth_interval, 
+                                            "unskipped": self.scaler.unskipped}
 
-                mp_config_path = os.path.join(path_to_checkpoint, "mp_config.bin")
-                with open(mp_config_path, "wb") as f:
-                    pickle.dump(mixed_precision_config, f)
+                    mp_config_path = os.path.join(path_to_checkpoint, "mp_config.bin")
+                    with open(mp_config_path, "wb") as f:
+                        pickle.dump(mixed_precision_config, f)
 
         self.wait_for_everyone()
     
