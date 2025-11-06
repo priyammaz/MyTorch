@@ -1540,13 +1540,55 @@ def maxpool1d():
 def avgpool1d():
     pass
 
-def embedding(indices, weight):
+def embedding(indices, weight, fused=False):
     """
     Standard indexing op to get embeddings for the indexes we want
 
     No need for "auto" here, __getitem__ implemented in Tensor class
     """
-    return weight[indices]
+
+    if not fused:
+        return weight[indices]
+    
+    else:
+
+        if hasattr(indices.data, "_array"):
+            indices = indices.data._array
+        else:
+            indices = indices.data
+
+        if hasattr(weight.data, "_array"):
+            weight_array = weight.data._array
+        else:
+            weight_array = weight.data
+
+        output = FO.fused_embedding_forward(weight_array, indices)
+
+        def _embedding_backward(grad_output):
+          
+            grads = FO.fused_embedding_backward(grad_output, 
+                                                weight_array, 
+                                                indices)
+
+            ### Accumulate Grads ####
+            if weight.grad is None:
+                weight.grad = grads
+            else:
+                weight.grad += grads
+
+        requires_grad = weight.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(
+            output, 
+            requires_grad=requires_grad,
+            grad_fn=_embedding_backward if requires_grad else None, 
+            grad_fn_name="<EmbeddingBackward>" if requires_grad else None
+        )
+
+        if requires_grad:
+            output._add_parents(weight)
+
+        return output
+
 
 def dropout(input, dropout_p, training=True, auto=False):
 

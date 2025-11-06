@@ -7,3 +7,4 @@ from .conv import fused_conv2d_forward, fused_conv2d_backward, \
     fused_conv1d_forward, fused_conv1d_backward
 from .linear import fused_linear_forward
 from .matmul import fused_grouped_matmul
+from .embedding import fused_embedding_forward, fused_embedding_backward
