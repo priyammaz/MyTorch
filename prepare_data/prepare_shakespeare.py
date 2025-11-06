@@ -69,6 +69,6 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
 
-    prep_shakespeare(args.path_to_save)
+    prep_shakespeare(args.path_to_save, args.test_split_pct)
 
 
