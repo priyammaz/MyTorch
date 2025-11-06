@@ -37,9 +37,7 @@ import torch
 import cupy as cp
 import triton
 import triton.language as tl
-# from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
-DLPACK_DISABLE=False
-AUTOTUNE_MODE="none"
+from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 
 def get_fwd_autotune_configs():
     # Read the autotune mode from environment variable, default to "none"
@@ -361,6 +359,7 @@ def _attn_fwd(
     stride_mask_q, 
     stride_mask_kv,
     NUM_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
     SEQ_LEN_Q,
     SEQ_LEN_KV,
     HEAD_DIM: tl.constexpr,
@@ -412,12 +411,15 @@ def _attn_fwd(
     index_batch = index_batch_head // NUM_HEADS
     index_head = index_batch_head % NUM_HEADS
 
+    group_size = NUM_HEADS // NUM_KV_HEADS
+    index_kv_head = index_head // group_size
+
     ### Compute our offset of where a particular batch and head starts ###
     q_offset = (
     index_batch.to(tl.int64) * stride_Q_batch + index_head.to(tl.int64) * stride_Q_head
     )
     kv_offset = (
-        index_batch.to(tl.int64) * stride_K_batch + index_head.to(tl.int64) * stride_K_head
+        index_batch.to(tl.int64) * stride_K_batch + index_kv_head.to(tl.int64) * stride_K_head
     )
 
     Q_block_ptr = tl.make_block_ptr(
@@ -614,6 +616,7 @@ def _attn_bwd_dq(
     stride_mask_q,
     stride_mask_kv,
     NUM_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
     SEQ_LEN_Q: tl.constexpr,
     SEQ_LEN_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr, 
@@ -646,11 +649,13 @@ def _attn_bwd_dq(
     index_batch_head = tl.program_id(1)
     idx_batch = index_batch_head // NUM_HEADS
     idx_head = index_batch_head % NUM_HEADS
+    group_size = NUM_HEADS // NUM_KV_HEADS
+    idx_kv_head = idx_head // group_size
 
-    offset_batch_head_4d_Q = idx_batch * stride_Q_batch + idx_head * stride_Q_head # for (B x H x L x E) Tensors
-    offset_batch_head_4d_K = idx_batch * stride_K_batch + idx_head * stride_K_head # for (B x H x L x E) Tensors
-    offset_batch_head_4d_V = idx_batch * stride_V_batch + idx_head * stride_V_head # for (B x H x L x E) Tensors
-    offset_batch_head_3d = index_batch_head * SEQ_LEN_Q                            # for (B x H x L) Tensors
+    offset_batch_head_4d_Q = idx_batch * stride_Q_batch + idx_head * stride_Q_head    # for (B x H x L x E) Tensors
+    offset_batch_head_4d_K = idx_batch * stride_K_batch + idx_kv_head * stride_K_head # for (B x H x L x E) Tensors
+    offset_batch_head_4d_V = idx_batch * stride_V_batch + idx_kv_head * stride_V_head # for (B x H x L x E) Tensors
+    offset_batch_head_3d = index_batch_head * SEQ_LEN_Q                               # for (B x H x L) Tensors
 
     Q_ptr += offset_batch_head_4d_Q
     K_ptr += offset_batch_head_4d_K
@@ -774,6 +779,7 @@ def _attn_bwd_dk_dv(
     stride_mask_q, 
     stride_mask_kv,
     NUM_HEADS: tl.constexpr,
+    NUM_KV_HEADS: tl.constexpr,
     SEQ_LEN_Q: tl.constexpr,
     SEQ_LEN_KV: tl.constexpr,
     HEAD_DIM: tl.constexpr, 
@@ -807,11 +813,13 @@ def _attn_bwd_dk_dv(
     index_batch_head = tl.program_id(1)
     idx_batch = index_batch_head // NUM_HEADS
     idx_head = index_batch_head % NUM_HEADS
+    group_size = NUM_HEADS // NUM_KV_HEADS
+    idx_kv_head = idx_head // group_size
 
-    offset_batch_head_4d_Q = idx_batch * stride_Q_batch + idx_head * stride_Q_head # for (B x H x L x E) Tensors
-    offset_batch_head_4d_K = idx_batch * stride_K_batch + idx_head * stride_K_head # for (B x H x L x E) Tensors
-    offset_batch_head_4d_V = idx_batch * stride_V_batch + idx_head * stride_V_head # for (B x H x L x E) Tensors
-    offset_batch_head_3d = index_batch_head * SEQ_LEN_Q                            # for (B x H x L) Tensors
+    offset_batch_head_4d_Q = idx_batch * stride_Q_batch + idx_head * stride_Q_head    # for (B x H x L x E) Tensors
+    offset_batch_head_4d_K = idx_batch * stride_K_batch + idx_kv_head * stride_K_head # for (B x H x L x E) Tensors
+    offset_batch_head_4d_V = idx_batch * stride_V_batch + idx_kv_head * stride_V_head # for (B x H x L x E) Tensors
+    offset_batch_head_3d = index_batch_head * SEQ_LEN_Q                               # for (B x H x L) Tensors
 
     Q_ptr += offset_batch_head_4d_Q
     K_ptr += offset_batch_head_4d_K
@@ -901,9 +909,13 @@ def _attn_bwd_dk_dv(
     dK_block *= softmax_scale * rln2
 
     ### Store ###
-    tl.store(dK_ptr + KV_Offsets, dK_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
-    tl.store(dV_ptr + KV_Offsets, dV_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
-    
+    if NUM_HEADS == NUM_KV_HEADS:
+        tl.store(dK_ptr + KV_Offsets, dK_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
+        tl.store(dV_ptr + KV_Offsets, dV_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
+    else:
+        tl.atomic_add(dK_ptr + KV_Offsets, dK_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
+        tl.atomic_add(dV_ptr + KV_Offsets, dV_block.to(dK_ptr.type.element_ty), mask=kv_mask[:, None])
+
 def fused_cross_sdpa_forward(Q, K, V, 
                              attn_mask=None,
                              softmax_scale=None, 
@@ -987,6 +999,7 @@ def fused_cross_sdpa_forward(Q, K, V,
             stride_mask_q=attn_mask.stride(2) if use_custom_mask else 0,
             stride_mask_kv=attn_mask.stride(3) if use_custom_mask else 0,
             NUM_HEADS=NUM_HEADS,
+            NUM_KV_HEADS=NUM_KV_HEADS,
             SEQ_LEN_Q=SEQ_LEN_Q,
             SEQ_LEN_KV=SEQ_LEN_KV,
             HEAD_DIM=HEAD_DIM_Q,
@@ -1098,14 +1111,14 @@ def fused_cross_sdpa_backward(dO,
         softmax_scale = 1 / HEAD_DIM_Q**0.5
         
     if not DLPACK_DISABLE and use_dlpack:
-
+    
         dO = torch.utils.dlpack.from_dlpack(dO)
         Q = torch.utils.dlpack.from_dlpack(Q)
         K = torch.utils.dlpack.from_dlpack(K)
         V = torch.utils.dlpack.from_dlpack(V)
         O = torch.utils.dlpack.from_dlpack(O)
         M = torch.utils.dlpack.from_dlpack(M)
-
+ 
         ### Check if we have Attention Mask ###
         use_custom_mask = attn_mask is not None
 
@@ -1151,7 +1164,14 @@ def fused_cross_sdpa_backward(dO,
       
         grid_dq = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd_dq[grid_dq](
-            Q_ptr=Q, K_ptr=K, V_ptr=V, dO_ptr=dO, dQ_ptr=dQ, M_ptr=M, D_ptr=D, attn_mask_ptr=attn_mask,
+            Q_ptr=Q, 
+            K_ptr=K, 
+            V_ptr=V, 
+            dO_ptr=dO, 
+            dQ_ptr=dQ, 
+            M_ptr=M, 
+            D_ptr=D, 
+            attn_mask_ptr=attn_mask,
             softmax_scale=softmax_scale,
             stride_Q_batch=Q.stride(0), 
             stride_Q_head=Q.stride(1), 
@@ -1170,6 +1190,7 @@ def fused_cross_sdpa_backward(dO,
             stride_mask_q=attn_mask.stride(2) if attn_mask is not None else 0,
             stride_mask_kv=attn_mask.stride(3) if attn_mask is not None else 0,
             NUM_HEADS=NUM_HEADS, 
+            NUM_KV_HEADS=NUM_KV_HEADS,
             SEQ_LEN_Q=SEQ_LEN_Q, 
             SEQ_LEN_KV=SEQ_LEN_KV, 
             HEAD_DIM=HEAD_DIM_Q,
@@ -1206,7 +1227,8 @@ def fused_cross_sdpa_backward(dO,
             stride_mask_head=attn_mask.stride(1) if attn_mask is not None else 0,
             stride_mask_q=attn_mask.stride(2) if attn_mask is not None else 0,
             stride_mask_kv=attn_mask.stride(3) if attn_mask is not None else 0,
-            NUM_HEADS=NUM_HEADS, 
+            NUM_HEADS=NUM_HEADS,
+            NUM_KV_HEADS=NUM_KV_HEADS, 
             SEQ_LEN_Q=SEQ_LEN_Q, 
             SEQ_LEN_KV=SEQ_LEN_KV, 
             HEAD_DIM=HEAD_DIM_Q,
@@ -1354,8 +1376,8 @@ if __name__ == "__main__":
 
 
     q = torch.randn((2,8,128,128), device="cuda", dtype=torch.float16, requires_grad=True)
-    k = torch.randn((2,8,256,128), device="cuda", dtype=torch.float16, requires_grad=True)
-    v = torch.randn((2,8,256,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    k = torch.randn((2,2,256,128), device="cuda", dtype=torch.float16, requires_grad=True)
+    v = torch.randn((2,2,256,128), device="cuda", dtype=torch.float16, requires_grad=True)
     attn_mask = torch.ones((2,1,128,256)).bool().to("cuda")
     attn_mask[0, :, :, -20:] = False
     attn_mask[1, :, :, -4:] = False
@@ -1363,7 +1385,7 @@ if __name__ == "__main__":
     attn_mask_cp = cp.array(attn_mask.detach().cpu().numpy())
     o_grad = torch.randn_like(q)
     o_grad_cp = cp.array(o_grad.detach().cpu().numpy())
-    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, attn_mask=attn_mask)
+    out = torch.nn.functional.scaled_dot_product_attention(q,k,v, enable_gqa=True)
     out.backward(o_grad)
     q_grad_ref = cp.array(q.grad.detach().cpu().numpy())
     k_grad_ref = cp.array(k.grad.detach().cpu().numpy())
@@ -1374,8 +1396,8 @@ if __name__ == "__main__":
     q_cp = cp.array(q.detach().cpu().numpy())
     k_cp = cp.array(k.detach().cpu().numpy())
     v_cp = cp.array(v.detach().cpu().numpy())
-    q_cp, k_cp, v_cp, O, M = fused_cross_sdpa_forward(q_cp,k_cp,v_cp, attn_mask_cp, use_dlpack=True)
-    dQ_cp, dK_cp, dV_cp = fused_cross_sdpa_backward(o_grad_cp, q_cp, k_cp, v_cp, O, M, attn_mask_cp, use_dlpack=True)
+    q_cp, k_cp, v_cp, O, M = fused_cross_sdpa_forward(q_cp,k_cp,v_cp)
+    dQ_cp, dK_cp, dV_cp = fused_cross_sdpa_backward(o_grad_cp, q_cp, k_cp, v_cp, O, M)
     print(cp.max(cp.abs(O-out_ref)))
     print(cp.max(cp.abs(dQ_cp-q_grad_ref)))
     print(cp.max(cp.abs(dK_cp-k_grad_ref)))
