@@ -9,6 +9,7 @@ from models.gpt2 import GPT2, GPT2Config
 from mytorch import Accelerator
 from tqdm import tqdm
 import pickle
+import time
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Train GPT2 with MyTorch")
@@ -34,6 +35,7 @@ def parse_args():
     parser.add_argument("--path_to_data", type=str, required=True)
     parser.add_argument("--num_workers", type=int, default=4)
     parser.add_argument("--train_iterations", type=int, default=150000)
+    parser.add_argument("--use_chinchilla", action="store_true")
     parser.add_argument("--eval_interval", type=int, default=2000)
     parser.add_argument("--eval_iterations", type=int, default=200)
     parser.add_argument("--batch_size_per_gpu", type=int, default=8)
@@ -210,6 +212,15 @@ for param in model.parameters():
         total_params += np.prod(param.shape)
 accelerator.print("Total Trainable Parameters:", total_params)
 
+### Set Training Steps If Using Chinchilla ###
+if args.use_chinchilla:
+    accelerator.print("Using Chinchilla Scaling Law!")
+    train_iterations = (total_params * 20) // toks_per_batch
+else:
+    train_iterations = args.train_iterations
+
+accelerator.print(f"Training for {train_iterations} Iterations")
+
 ### Load Optimizer ###
 optimizer = optim.AdamW(model.parameters(), 
                         lr=args.max_lr, 
@@ -220,7 +231,7 @@ optimizer = optim.AdamW(model.parameters(),
 ### Load Scheduler ###
 scheduler = mytorch.lr_scheduler.CosineLRScheduler(
     optimizer=optimizer, max_lr=args.max_lr, 
-    min_lr=args.min_lr, total_steps=args.train_iterations,
+    min_lr=args.min_lr, total_steps=train_iterations,
     warmup_steps=args.warmup_steps
 )
 
@@ -231,8 +242,6 @@ model, optimizer, trainloader, testloader = accelerator.prepare(
 
 ### Resume from Checkpoint ###
 if args.resume_from_checkpoint is not None:
-
-    ### Grab path to checkpoint ###
 
     ### This is if we pass in a full path to checkpoint ###
     if os.path.exists(args.resume_from_checkpoint):
@@ -259,15 +268,20 @@ else:
 loss_fn = nn.CrossEntropyLoss(fused=args.fused)
 
 ### Train Model ###
-pbar = tqdm(range(args.train_iterations), 
+pbar = tqdm(range(train_iterations), 
             disable=not accelerator.is_main_process(),
             initial=completed_steps)
 
+t0 = None
 train = True
 while train:
 
     for inputs, targets in trainloader:
         
+        # Time Batch 
+        if t0 is None:
+            t0 = time.time()
+
         # Move to correct device 
         inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
 
@@ -279,7 +293,7 @@ while train:
         accelerator.backward(loss)
         
         # Clip gradients (and get the grads to check on training health)
-        grad_norm = accelerator.clip_grad_norm_(args.max_grad_norm)
+        accelerator.clip_grad_norm_(args.max_grad_norm)
 
         # Step optimizer
         optimizer.step()
@@ -288,7 +302,12 @@ while train:
         ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
         if accelerator.sync_grad:
             
-            ### One full accumulation complete ###
+            ### Get Time and reset start time ###
+            t1 = time.time()
+            dt = t1 - t0
+            t0 = None
+            
+            ### Iter ###
             completed_steps += 1
             pbar.update(1)
 
@@ -302,11 +321,16 @@ while train:
                 loss = accelerator.gather_for_metrics(loss)
 
                 ### Grab our stored grad_norm for checking on model health ###
-                log_statement = f"Iter {completed_steps}, Loss: {loss:.4f}, LR: {scheduler.get_last_lr():.2e}"
+                lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
+                log_parts = [
+                    f"Iter:{completed_steps}",
+                    f"Loss:{loss:7.4f}",
+                    f"LR:{lr:9.2e}",
+                ]
                 if accelerator.grad_norm is not None:
-                    log_statement += f" Grad Norm: {accelerator.grad_norm:.3f}"
-
-                ### Print to Console ###
+                    log_parts.append(f"GradNorm:{accelerator.grad_norm:7.3f}")
+                log_parts.append(f"Toks/Sec:{int(toks_per_batch / dt):6d}")
+                log_statement = " | ".join(log_parts)
                 accelerator.print(log_statement)
 
                 ### Log with Wandb if enabled ###
@@ -349,7 +373,7 @@ while train:
                 ### Set back into Training Mode ###
                 model.train()
 
-        if completed_steps >= args.train_iterations:
+        if completed_steps >= train_iterations:
             accelerator.print("Completed Training!!!")
             train = False
             break

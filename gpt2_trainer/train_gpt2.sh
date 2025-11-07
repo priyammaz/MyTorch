@@ -100,6 +100,7 @@ case "$TARGET" in
             --eval_iterations 200 \
             --batch_size_per_gpu 16 \
             --tokens_per_batch 491520  \
+            --gradient_accumulation_steps 4 \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
@@ -107,7 +108,7 @@ case "$TARGET" in
             --max_grad_norm 1.0 \
             --beta1 0.9 \
             --beta2 0.95 \
-            --log_iter 25 \
+            --log_iter 5 \
             $EXTRA_ARGS
         ;;
     shakespeare)
