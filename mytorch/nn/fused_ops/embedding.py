@@ -294,7 +294,6 @@ def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
         
 if __name__ == "__main__":
 
-
     from torch.nn import Embedding
 
     def test_fused_embedding():
