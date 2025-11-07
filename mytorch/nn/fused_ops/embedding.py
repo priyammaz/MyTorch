@@ -33,7 +33,7 @@ def embedding_forward_kernel(
     ### Get the indexes of what embeddings we are loading ###
     start_m = pid_m * BLOCK_SIZE_M
     offsets_m = start_m + tl.arange(0, BLOCK_SIZE_M)
-    mask_m = start_m < n_elements
+    mask_m = offsets_m < n_elements
     indices = tl.load(indices_ptr + offsets_m, mask=mask_m, other=0)
 
     ### Get the indexes of what part of those embeddings we are loading ###
@@ -41,17 +41,20 @@ def embedding_forward_kernel(
     offsets_n = start_n + tl.arange(0, BLOCK_SIZE_N)
     mask_n = offsets_n < embedding_dim
 
+    ### Get the combined mask where our indexing is valid ###
+    combined_mask = mask_m[:, None] & mask_n[None, :]
+
     ### Get the offsets now (BLOCK_SIZE_M, 1) + (1 x BLOCK_SIZE_N)###
     ### each embedding has embed_dim number of values, so we advance by that ###
     ### much to get the correct starting pointer ###
     embedding_offsets = indices[:, None] * embedding_dim + offsets_n[None, :]
     embeddings = tl.load(embeddings_ptr + embedding_offsets, 
-                         mask=mask_m[:, None] & mask_n[None, :], 
+                         mask=combined_mask, 
                          other=0.0)
     
     ### This is just a copy op, we grabbed from our embedding matrix and place into our output matrix ###
     output_offsets = offsets_m[:, None] * embedding_dim + offsets_n[None, :]
-    tl.store(output_ptr + output_offsets, embeddings, mask=mask_m[:, None] & mask_n[None, :])
+    tl.store(output_ptr + output_offsets, embeddings, mask=combined_mask)
 
 @triton.jit
 def embedding_backward_kernel(
@@ -107,6 +110,9 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
     ### Only support int32 indexes ###
     indices = indices.astype("int32")
 
+    assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
+    assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
+
     if use_dlpack:
 
         ### Get the original shape ###
@@ -157,7 +163,7 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
             BLOCK_SIZE_N=BLOCK_SIZE_N,
             DTYPE_FLAG=0 if embeddings.dtype == torch.float32 else 1
         )
-
+        output = output.contiguous()
         return cp.from_dlpack(output.reshape(*original_indices_shape, -1))
     
     else:
@@ -206,13 +212,18 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
             DTYPE_FLAG=0 if embeddings.dtype == torch.float32 else 1
         )
 
-        return cp.from_dlpack(output.reshape(*original_indices_shape, -1))
+        embeds = output.reshape(*original_indices_shape, -1)
 
+        return embeds
+    
 def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
 
     ### Only support int32 indexes ###
     indices = indices.astype("int32")
 
+    assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
+    assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
+    
     if use_dlpack:
 
         ### Flatten ###
