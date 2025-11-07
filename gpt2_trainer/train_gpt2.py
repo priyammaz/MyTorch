@@ -36,7 +36,9 @@ def parse_args():
     parser.add_argument("--train_iterations", type=int, default=150000)
     parser.add_argument("--eval_interval", type=int, default=2000)
     parser.add_argument("--eval_iterations", type=int, default=200)
-    parser.add_argument("--batch_size", type=int, default=256)
+    parser.add_argument("--batch_size_per_gpu", type=int, default=8)
+    parser.add_argument("--gradient_accumulation_steps", type=int)
+    parser.add_argument("--tokens_per_batch", type=int, default=491520)
     parser.add_argument("--max_lr", type=float, default=6e-4)
     parser.add_argument("--min_lr", type=float, default=6e-5)
     parser.add_argument("--warmup_steps", type=int, default=2000)
@@ -44,7 +46,6 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
-    parser.add_argument("--gradient_accumulation_steps", type=int, default=16)
     parser.add_argument("--mixed_precision", action="store_true")
 
     ### Logging Config ###
@@ -56,6 +57,10 @@ def parse_args():
     return args
 
 args = parse_args()
+
+### Init DDP ###
+accelerator = Accelerator(mixed_precision=args.mixed_precision,
+                          log_wandb=args.log_wandb)
 
 ### Load Model Variant ###
 if args.model_size == "small":
@@ -123,10 +128,27 @@ class TokenLoader(Dataset):
         y = self.arr[start_idx+1:start_idx+self.context_length+1]
         return mytorch.Tensor(x), mytorch.Tensor(y)
 
+### If Grad Accum Steps is not provided we can compute it from our target tokens per batch ###
+if args.gradient_accumulation_steps is not None:
+    gradient_accumulation_steps = args.gradient_accumulation_steps
+else:
+    tokens_per_batch_goal = args.tokens_per_batch
+    tokens_per_gpu = tokens_per_batch_goal // accelerator.num_processes
+    needed_batch_size = tokens_per_gpu // args.context_length
+    gradient_accumulation_steps = needed_batch_size // args.batch_size_per_gpu
+
+### Set This Accelerator For Sync ###
+accelerator.gradient_accumulation_steps = gradient_accumulation_steps
+
+### Compute Tokens Per Batch ###
+toks_per_batch = args.batch_size_per_gpu * gradient_accumulation_steps * accelerator.num_processes * args.context_length
+accelerator.print(f"Tokens Processed Per Batch:", toks_per_batch)
+accelerator.print(f"Using Micro-Batch Size of {args.batch_size_per_gpu} for {gradient_accumulation_steps} Gradient Accumulation Steps")
+
+### Build Datasets ###
 trainset = TokenLoader(os.path.join(args.path_to_data, 'train.bin'), context_length=args.context_length)
 testset = TokenLoader(os.path.join(args.path_to_data, 'val.bin'), context_length=args.context_length)    
-
-micro_batchsize = args.batch_size//args.gradient_accumulation_steps
+micro_batchsize = args.batch_size_per_gpu
 trainloader = DataLoader(trainset, batch_size=micro_batchsize, num_workers=args.num_workers)
 testloader = DataLoader(testset, batch_size=micro_batchsize, num_workers=args.num_workers)
 
@@ -135,11 +157,6 @@ path_to_experiment = os.path.join(args.working_directory, args.project_name)
 if args.run_name is not None:
     path_to_experiment = os.path.join(path_to_experiment, args.run_name)
 os.makedirs(path_to_experiment, exist_ok=True)
-
-### Init DDP ###
-accelerator = Accelerator(gradient_accumulation_steps=args.gradient_accumulation_steps,
-                          mixed_precision=args.mixed_precision,
-                          log_wandb=args.log_wandb)
 
 ### Config to store model information (so we can load precise setup for inference!) ###
 training_config = {
@@ -151,8 +168,9 @@ training_config = {
                     "mlp_ratio": mlp_ratio,
                     "use_bias": args.use_bias,
                     "dropout": args.dropout_p,
-                    "batch_size": args.batch_size,
-                    "grad_accumulation_steps": args.gradient_accumulation_steps,
+                    "batch_size_per_gpu": args.batch_size_per_gpu,
+                    "grad_accumulation_steps": gradient_accumulation_steps,
+                    "tokens_per_batch": toks_per_batch,
                     "max_lr": args.max_lr,
                     "weight_decay": args.weight_decay,
                     "adam_beta1": args.beta1,

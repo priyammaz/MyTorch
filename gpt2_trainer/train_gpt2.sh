@@ -98,8 +98,8 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size 120 \
-            --gradient_accumulation_steps 8  \
+            --batch_size_per_gpu 16 \
+            --tokens_per_batch 491520  \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
@@ -121,7 +121,7 @@ case "$TARGET" in
             --train_iterations 2500 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size 32 \
+            --batch_size_per_gpu 32 \
             --gradient_accumulation_steps 1 \
             --max_lr 1e-3 \
             --min_lr 1e-4 \
