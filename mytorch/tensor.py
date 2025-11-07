@@ -5,6 +5,8 @@ from contextlib import contextmanager
 import warnings
 from . import _array as ap
 from .dtypes import *
+import time
+from collections import defaultdict
 
 class no_grad:
     def __enter__(self):
@@ -178,7 +180,11 @@ class Tensor:
 
         self._retain_grad = True
 
-    def backward(self, grad=None, retain_graph=False):
+    def backward(self, 
+                 grad=None, 
+                 retain_graph=False, 
+                 time_backward=False,
+                 num_ops_to_show=-1): # -1 will show all of them!
         
         if retain_graph:
             if not self._warn_retain_grad:
@@ -187,7 +193,7 @@ class Tensor:
                 )
                 self._warn_retain_grad = True
 
-        # Initialize output gradient
+        # Initialize output gradient (ones in the shape of our data)
         if grad is None:
             grad = ap.Array.ones_like(self.data, dtype=self.dtype, device=self.device)
 
@@ -213,10 +219,24 @@ class Tensor:
         build_topo(self)
 
         # Iterate in reverse topological order
+
+        if time_backward:
+            timings = defaultdict(float) 
+
         for t in reversed(topo_order):
-            if t.grad_fn is not None:
+            grad_fn = t.grad_fn
+            if grad_fn is not None:
+                grad_fn_name = getattr(t, "grad_fn_name", grad_fn.__class__.__name__)
+
+                if time_backward:
+                    start_time = time.perf_counter()
+
                 t.grad_fn(t.grad)  # accumulate into parents
                 
+                if time_backward:
+                    end_time = time.perf_counter()
+                    timings[grad_fn_name] += (end_time - start_time)
+
                 ### Drop references immediately ###
                 retain_this = getattr(t, "_retain_grad", False) or retain_graph
                 
@@ -229,6 +249,11 @@ class Tensor:
                     if not t.is_leaf:
                         t.grad = None
 
+        if time_backward:
+            print(f"\nTop {num_ops_to_show} most time-consuming backward functions:")
+            sorted_timings = sorted(timings.items(), key=lambda x: x[1], reverse=True)[:num_ops_to_show]
+            for name, total_time in sorted_timings:
+                print(f"{name:<30s} {total_time * 1000:.3f} ms total")
 
     ###################################
     ######## BINARY OPERATIONS ########
