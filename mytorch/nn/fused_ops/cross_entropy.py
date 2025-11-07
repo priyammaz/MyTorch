@@ -9,6 +9,8 @@ import triton
 import triton.language as tl
 from .utils import calc_num_warps
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+# DLPACK_DISABLE = False
+# AUTOTUNE_MODE="none"
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
@@ -19,7 +21,8 @@ def cross_entropy_forward(
     logsumexp_ptr,         
     labels_ptr, 
     NUM_CLASSES: tl.constexpr, 
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
+    DTYPE_FLAG: tl.constexpr # 0 if float32, 1 if float16
 ):
     """
     Our Logits will be some (N x NUM_CLASSES)
@@ -46,10 +49,10 @@ def cross_entropy_forward(
     row_idx = tl.program_id(0)
 
     ### Cast Pointers ###
-    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32))
+    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
     loss_ptr = tl.cast(loss_ptr, tl.pointer_type(tl.float32))
     logsumexp_ptr = tl.cast(logsumexp_ptr, tl.pointer_type(tl.float32))
-    labels_ptr = tl.cast(labels_ptr, tl.pointer_type(tl.int64))
+    labels_ptr = tl.cast(labels_ptr, tl.pointer_type(tl.int32))
     
     ### Get starting pointer of the row we want ###
     logits_ptr += row_idx * logits_row_stride
@@ -72,20 +75,20 @@ def cross_entropy_forward(
     ### We dont want any over/underflows at this stage ###
     ### also we are about to do a max as well as an exp, so -inf doesnt effect ###
     ### max and exponentiating it set it to zero ! ###
-    logits = tl.load(logits_ptr + col_offsets, mask=mask, other=-float("inf"))#.to(tl.float32)
+    logits = tl.load(logits_ptr + col_offsets, mask=mask, other=-float("inf"))
     
+    ### Load Label Index ###
+    label_idx = tl.load(labels_ptr)
+
     ### Compute the logsumexp (stable so subtract the max inside and add it back outside) ###
     c = tl.max(logits, axis=0)
     logsumexp = c + tl.log(tl.sum(tl.exp(logits - c), axis=0))
-
-    ### Load Label Index ###
-    label_idx = tl.load(labels_ptr)#.to(tl.int64)
 
     ### -100 is our default ignore index ###
     if label_idx != -100:
 
         ### Load logit at the label idx ###
-        x_label = tl.load(logits_ptr + label_idx)#.to(tl.float32)
+        x_label = tl.load(logits_ptr + label_idx)
         loss = logsumexp - x_label
 
     else:
@@ -97,15 +100,16 @@ def cross_entropy_forward(
 def get_backward_autotune_mode():
     if AUTOTUNE_MODE == "max":
         return [
-                triton.Config({"BLOCK_SIZE": 64}, num_warps=2, num_stages=2),
-                triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=2),
-                triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=4),
-                triton.Config({"BLOCK_SIZE": 256}, num_warps=8, num_stages=2),
-                triton.Config({"BLOCK_SIZE": 256}, num_warps=8, num_stages=4),
-                triton.Config({"BLOCK_SIZE": 512}, num_warps=8, num_stages=3),
+                triton.Config({"BLOCK_SIZE": 64}, num_warps=8),
+                triton.Config({"BLOCK_SIZE": 128}, num_warps=8),
+                triton.Config({"BLOCK_SIZE": 256}, num_warps=8),
+                triton.Config({"BLOCK_SIZE": 512}, num_warps=8),
+                triton.Config({"BLOCK_SIZE": 1024}, num_warps=8),
+                triton.Config({"BLOCK_SIZE": 2048}, num_warps=8),
+                triton.Config({"BLOCK_SIZE": 4096}, num_warps=8),
             ]
     else:
-        return [triton.Config({"BLOCK_SIZE": 128}, num_warps=4, num_stages=2)]
+        return [triton.Config({"BLOCK_SIZE": 4096}, num_warps=8)]
 
 @triton.autotune(
     configs=get_backward_autotune_mode(),
@@ -115,11 +119,11 @@ def get_backward_autotune_mode():
 def cross_entropy_backward(
     logits_ptr,            # Original logits for loading (N x NUM_CLASSES)
     logits_row_stride,     # Element stride for rows
-    grad_ptr,              # Gradient output buffer (N x NUM_CLASSES)
     logsumexp_ptr,         # (N,) precomputed logsumexp
     labels_ptr,            # (N,) labels (int64)
     NUM_CLASSES: tl.constexpr, 
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
+    DTYPE_FLAG: tl.constexpr
 ):  
     """
     The backward pass formula is Pj - yj, where yj is 1 for the correct
@@ -142,15 +146,13 @@ def cross_entropy_backward(
     block_idx = tl.program_id(1)
     
     # Cast pointers
-    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32))
-    grad_ptr = tl.cast(grad_ptr, tl.pointer_type(tl.float32))
+    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
     logsumexp_ptr = tl.cast(logsumexp_ptr, tl.pointer_type(tl.float32))
-    labels_ptr = tl.cast(labels_ptr, tl.pointer_type(tl.int64))
+    labels_ptr = tl.cast(labels_ptr, tl.pointer_type(tl.int32))
     
     # Advance to correct row
     logits_ptr += row_idx * logits_row_stride
-    grad_ptr += row_idx * logits_row_stride  
-    
+
     # Load scalars for this row
     logsumexp = tl.load(logsumexp_ptr + row_idx)
     label_idx = tl.load(labels_ptr + row_idx).to(tl.int32)
@@ -160,20 +162,23 @@ def cross_entropy_backward(
     mask = col_offsets < NUM_CLASSES
     
     # Load logits
-    x = tl.load(logits_ptr + col_offsets, mask=mask, other=-float("inf")).to(tl.float32)
+    x = tl.load(logits_ptr + col_offsets, mask=mask, other=-float("inf"))
     
     # Compute softmax
     y = tl.exp(x - logsumexp)
     
     # Subtract 1 for correct label
-    mask_correct_label = (col_offsets == label_idx)
-    y = tl.where(mask_correct_label, y - 1.0, y)
+    y = tl.where(
+        col_offsets == label_idx,
+        y - 1.0,  # exp(x - logsumexp) - 1
+        y,        # exp(x - logsumexp)
+    )
     
     # Zero out ignored labels
     y = tl.where(label_idx != -100, y, 0.0)
     
     # Store to correct location
-    tl.store(grad_ptr + col_offsets, y, mask=mask)
+    tl.store(logits_ptr + col_offsets, y, mask=mask)
 
 def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
     N, C = logits.shape
@@ -185,7 +190,10 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
         labels = torch.utils.dlpack.from_dlpack(labels)
     
         N, C = logits.shape
-        loss = torch.zeros(N, dtype=torch.float32, device=logits.device)
+
+        ### Intermediate stuff should be stored in higher precision always otherwise ###
+        ### cross entropy becomes unsafe ###
+        loss = torch.empty(N, dtype = torch.float32, device=logits.device)
         logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
 
         BLOCK_SIZE = triton.next_power_of_2(C)
@@ -199,7 +207,8 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
             logsumexp, 
             labels, 
             C, 
-            BLOCK_SIZE
+            BLOCK_SIZE,
+            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1
         )
         
         # Convert back to CuPy
@@ -222,8 +231,9 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
                 logsumexp.data.ptr, 
                 labels.data.ptr, 
                 C, 
-                BLOCK_SIZE
-        )       
+                BLOCK_SIZE,
+                DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1
+            )       
         
         return loss, logsumexp
 
@@ -243,39 +253,36 @@ def fused_cross_entropy_backward(
     N, C = logits.shape
 
     if not DLPACK_DISABLE and use_dlpack:
+
         logits = torch.utils.dlpack.from_dlpack(logits)
         labels = torch.utils.dlpack.from_dlpack(labels)
         logsumexp = torch.utils.dlpack.from_dlpack(logsumexp)
-        
-        row_stride = logits.stride(0)
-        grad = torch.zeros_like(logits, dtype=torch.float32)
 
-        # grid = (N, triton.cdiv(C, BLOCK_SIZE))
+        # grad = torch.zeros_like(logits) <- this is an expensive allocation for large vocabs!
+        #                                    instead lets just overwrite our logits with the grads
+        #                                    this actually made the op about 2x faster!
+
         grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
         cross_entropy_backward[grid](
             logits,
-            row_stride,
-            grad, 
+            logits.stride(0),
             logsumexp, 
             labels, 
             C, 
+            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1
         )
- 
-        return cp.from_dlpack(grad)
+      
+        return cp.from_dlpack(logits) # <- our logits have been replaced with the grad here!
 
     else:
-
-        row_stride = logits.strides[0] // logits.itemsize
-        grad = cp.zeros_like(logits , dtype=cp.float32)
-
         grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
         cross_entropy_backward[grid](
             logits.data.ptr,
-            row_stride,
-            grad.data.ptr, 
+            logits.strides[0] // logits.itemsize,
             logsumexp.data.ptr, 
             labels.data.ptr, 
             C, 
+            DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1
         )
 
-        return grad
+        return logits

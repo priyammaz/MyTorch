@@ -13,6 +13,7 @@ so they remain cpu/gpu agnostic
 """
 import os
 import numpy as np
+import warnings
 
 try:
     import cupy as cp
@@ -24,11 +25,12 @@ try:
     import triton
     from . import fused_ops as FO
     FUSED_AVAIL = True
-except:
+except Exception as e:
+
+    warnings.warn(e)
     FUSED_AVAIL = False
     FLAG_ONCE = False
 
-import warnings
 
 ### Check ENV Flag for Fused Ops ###
 ### So this forces Fused Ops Always ###
@@ -2412,12 +2414,11 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
             
             assert "cuda" in logits.device, "Fused Operations can only be performed on Cuda Tensors!"
 
-            ### Fused Op only happens in float32 ###
-            logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
-
-            ### Triton kernel expects long tensors (int64) labels ###
-            targets_data = targets.data.reshape(flattened_dim).astype("int64")
-
+            logits_data = logits.data.reshape(flattened_dim, num_classes)
+            
+            ### Triton kernel expects long tensors (int32) labels ###
+            targets_data = targets.data.reshape(flattened_dim).astype("int32")
+       
             targets_flat = targets_data
             mask = (targets_flat != ignore_index)
             valid_counts = mask.sum()
