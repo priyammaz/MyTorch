@@ -218,7 +218,9 @@ class GPT2(nn.Module):
             for _ in range(config.num_blocks)
         ])
 
-        self.final_layer_norm = nn.LayerNorm(config.embed_dim)
+        self.final_layer_norm = nn.LayerNorm(config.embed_dim, 
+                                             auto=config.use_full_auto, 
+                                             fused=config.use_fused_ops)
         self.lm_head = nn.Linear(config.embed_dim, 
                                  config.vocab_size, 
                                  bias=config.use_bias,
