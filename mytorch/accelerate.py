@@ -555,11 +555,20 @@ class Accelerator:
             self.scaler.unscale_grads(self.model.parameters())
         
         ### Compute local norm squared ###
+        # local_norm_sq = 0.0
+        # for param in self.model.parameters():
+        #     if hasattr(param, "grad") and param.grad is not None:
+        #         norm = float(cp.sum(param.grad ** 2))
+        #         local_norm_sq += norm
+
+        ### Same as above but avoids multiple kernel launches ###
         local_norm_sq = 0.0
-        for param in self.model.parameters():
-            if hasattr(param, "grad") and param.grad is not None:
-                norm = float(cp.sum(param.grad ** 2))
-                local_norm_sq += norm
+        grads = [param.grad for param in self.model.parameters() if hasattr(param, "grad") and param.grad is not None]
+        if grads:
+            flat_grads = cp.concatenate([g.reshape(-1) for g in grads])
+            local_norm_sq = float(cp.sum(flat_grads ** 2))
+        else:
+            local_norm_sq = 0.0
  
         ### AllReduce to get global norm squared ###
         if self.comm is not None:
