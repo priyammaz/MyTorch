@@ -2568,7 +2568,7 @@ def scaled_dot_product_attention(Q, K, V,
         )
     else:
         Q_data, K_data, V_data, attn_out, M = FO.fused_cross_sdpa_forward(
-            Q=Q_data, K=K_data, V=V_data, attn_mask=attn_mask, causal=is_causal, softmax_scale=softmax_scale
+            Q=Q_data, K=K_data, V=V_data, attn_mask=attn_mask, softmax_scale=softmax_scale
         )
 
     def _sdpa_backward(grad_output):
