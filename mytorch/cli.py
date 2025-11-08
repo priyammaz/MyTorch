@@ -5,6 +5,7 @@ import sys
 from pathlib import Path
 import questionary
 import shutil
+from .banner import banner
 
 custom_style_fancy = questionary.Style([
     ("highlighted", "fg:#00ff88 bold"), 
@@ -15,6 +16,7 @@ DEFAULT_CONFIG_PATH = Path(os.path.join(Path.home(), ".cache", "mytorch", "defau
 DEFAULT_CONFIG_ENV = {
     "distributed": False, 
     "num_gpus": 1, 
+    "gpu_indices": "all",
     "master_addr": "127.0.0.1", 
     "master_port": "13333",
     "use_fused": "False",
@@ -228,9 +230,23 @@ def test():
     print("\nYour MyTorch environment is properly configured!")
     print()
 
+def env():
+    try:
+        config = load_config()
+    except FileNotFoundError as e:
+        print(f"Run `mytorchrun config` to generate config files for environment")
+        sys.exit(1)
+
+    print("\n" + "-" * terminal_width)
+    print("Launch Configuration:")
+    print("-" * terminal_width)
+    for key, value in config.items():
+        print(f"  {key}: {value}")
+    print("-" * terminal_width)
+
 def launch():
     from mytorch.distributed.launch import main as launch_main
-    
+
     # Parse CLI args to see what was explicitly provided
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--config", type=str, default=None, help="Path to config file")
@@ -251,6 +267,18 @@ def launch():
     # Set Environment Variables 
     os.environ["TRITON_AUTOTUNE_MODE"] = str(config.get("triton_autotune", "none"))
     os.environ["USE_FUSED_OPS"] = str(config.get("use_fused", "False"))
+    gpu_indices = str(config.get("gpu_indices"))
+    if gpu_indices != "all":
+        os.environ["CUDA_VISIBLE_DEVICES"] = gpu_indices
+
+    print(banner)
+
+    print("\n" + "-" * terminal_width)
+    print("Launch Configuration:")
+    print("-" * terminal_width)
+    for key, value in config.items():
+        print(f"  {key}: {value}")
+    print("-" * terminal_width)
 
     # Build final args: CLI overrides config
     final_args = []
@@ -276,6 +304,7 @@ def launch():
 
 def interactive_config():
     """Run interactive configuration setup."""
+    print(banner)
     print("-" * terminal_width)
 
     config = {}
@@ -299,7 +328,7 @@ def interactive_config():
         ],
         style=custom_style_fancy
     ).ask()
-
+    
     fused_ops = questionary.select(
         "Do you want to use Fused Operations (Requires Triton Install)",
         choices=[
@@ -333,6 +362,15 @@ def interactive_config():
         ).ask()
 
         config["num_gpus"] = num_gpus
+
+        gpu_indices = questionary.text(
+            "What GPU(s) (by id) should be used for training as a comma-separated list? [all]"
+            ).ask()
+        
+        if len(gpu_indices) == 0:
+            gpu_indices = DEFAULT_CONFIG_ENV["gpu_indices"] 
+
+        config["gpu_indices"] = gpu_indices     
 
         master_address = questionary.text(
             "Master Address",
@@ -390,6 +428,8 @@ def main():
                          help='Run environment tests')
     subparsers.add_parser('config', 
                          help='Run tests')
+    subparsers.add_parser("env", 
+                          help="See current env setup")
     
     args, remaining = parser.parse_known_args()
 
@@ -402,6 +442,9 @@ def main():
 
     elif args.command == "test":
         test()
+    
+    elif args.command == "env":
+        env()
 
     else:
         parser.print_help()
