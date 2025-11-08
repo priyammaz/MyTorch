@@ -1,6 +1,17 @@
 import math 
 
-class LinearLRScheduler:
+class Scheduler:
+    def step(self):
+        raise NotImplementedError
+    
+    def get_last_lr(self):
+        if hasattr(self.optimizer, "lr"):
+            return self.optimizer.lr
+        elif hasattr(self.optimizer, "param_groups"):
+            lr = [g["lr"] for g in self.optimizer.param_groups]
+            return lr
+        
+class LinearLRScheduler(Scheduler):
     def __init__(self, optimizer, max_lr, min_lr=0.0, total_steps=1000, warmup_steps=0):
         """
         Linearly decay LR from max_lr to min_lr after warmup.
@@ -21,12 +32,9 @@ class LinearLRScheduler:
             progress = (self.step_count - self.warmup_steps) / max(1, self.total_steps - self.warmup_steps)
             lr = self.max_lr - (self.max_lr - self.min_lr) * progress
 
-        self.optimizer.lr = lr
+        self.optimizer._update_lr(lr)
 
-    def get_last_lr(self):
-        return self.optimizer.lr
-
-class ExponentialLRScheduler:
+class ExponentialLRScheduler(Scheduler):
     def __init__(self, optimizer, max_lr, gamma=0.99, warmup_steps=0):
         """
         Exponentially decay LR after warmup.
@@ -47,12 +55,9 @@ class ExponentialLRScheduler:
             steps_since_warmup = self.step_count - self.warmup_steps
             lr = self.base_lr * (self.gamma ** steps_since_warmup)
 
-        self.optimizer.lr = lr
-
-    def get_last_lr(self):
-        return self.optimizer.lr
+        self.optimizer._update_lr(lr)
     
-class CosineLRScheduler:
+class CosineLRScheduler(Scheduler):
     def __init__(self, optimizer, max_lr, min_lr=0.0, total_steps=1000, warmup_steps=0):
         """
         Cosine learning rate scheduler.
@@ -82,12 +87,9 @@ class CosineLRScheduler:
             lr = self.min_lr + 0.5 * (self.max_lr - self.min_lr) * (1 + math.cos(math.pi * progress))
 
         # Update optimizer LR
-        self.optimizer.lr = lr
+        self.optimizer._update_lr(lr)
 
-    def get_last_lr(self):
-        return self.optimizer.lr
-    
-class StepLRScheduler:
+class StepLRScheduler(Scheduler):
     def __init__(self, optimizer, initial_lr, step_size, gamma=0.1, warmup_steps=0):
         """
         Step learning rate scheduler.
@@ -116,7 +118,4 @@ class StepLRScheduler:
             factor = self.gamma ** (steps_since_warmup // self.step_size)
             lr = self.initial_lr * factor
 
-        self.optimizer.lr = lr
-
-    def get_last_lr(self):
-        return self.optimizer.lr
+        self.optimizer._update_lr(lr)

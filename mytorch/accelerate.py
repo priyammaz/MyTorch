@@ -17,9 +17,8 @@ import warnings
 from .nn import *
 from .optim import *
 from .utils import data
-from .tensor import Tensor, zeros_like, zeros
+from .tensor import Tensor, zeros_like
 from .dtypes import *
-from .ops import concatenate
 
 try:
     import wandb
@@ -292,28 +291,48 @@ class Accelerator:
 
         accelerator = self 
 
-        ### We will update Full Precision Params but train w/ Half Precision ###
+        if not hasattr(self, "model"):
+            raise Exception("No model found!! Make sure to run .prepare() on model as well!")
+
         if self.mixed_precision:
-            optimizer.params = self.fp32_params
-        
-        ### Adam has momentum params that have already been initialized ###
-        ### we need to reinit them on the correct device ###
+            """
+            Mixed precision is pretty simple for the optimizer. What we want to do is train our model
+            in fp16 but use fp32 weights. So how we do this is we do all of our computatiosn in fp16, 
+            but we keep aside a copy of the weights in fp32 (this is what our optimizer sees) so when 
+            we do grad updates, we arent going to have floating point errors (to a certain limit, our
+            grads could have NANs but this is what the dynamic grad scaling handles!)
+            """
 
-        if not 'Fused' in optimizer.__class__.__name__:
-            if hasattr(optimizer, "m"):
-                optimizer.m = [zeros_like(p).data for p in optimizer.params]
-            if hasattr(optimizer, "v"):
-                optimizer.v = [zeros_like(p).data for p in optimizer.params]
-        else:
+            fp16_to_fp32 = {}
+            model_parameters = list(self.model._parameters_no_dedup())
+
+            ### Create a dictionary of ids to map our fp32 and fp16 params together ###
+            ### We only do this because our parameters can be in different groups in our ###
+            ### optimizer, so we need to make sure we are mapping the correct fp16 param in our ###
+            ### model (which is just a list of all the parameters in our model) to its corresponding ###
+            ### fp32 copy we kept aside in our `prepare_model()` method! ###
+            for fp16_param, fp32_param in zip(model_parameters, self.fp32_params):
+                fp16_to_fp32[int(fp16_param.data._array.data.ptr)] = fp32_param
             
-            if hasattr(optimizer, "flat_params"):
-                optimizer.flat_params = concatenate([p.reshape(-1) for p in optimizer.params]).data
-            if hasattr(optimizer, "m"):
-                optimizer.m = zeros(optimizer.total_size, device=accelerator.device).data
-            if hasattr(optimizer, "v"):
-                optimizer.v = zeros(optimizer.total_size, device=accelerator.device).data
+            ### Now loop through optimizer groups ###
+            for group in optimizer.param_groups:
 
+                new_params = []
+                for param in group["params"]:
+                     
+                    ### look up the cooresponding fp32 params ###
+                    ptr = int(param.data._array.data.ptr)
+                    if ptr in fp16_to_fp32:
+                        new_params.append(fp16_to_fp32[ptr])
+                    else:
+                        raise ValueError("Parameter not found in fp32 mapping")
+                    
+                ### Our optimizer now is looking at the fp32 params only! ###
+                group["params"] = new_params
 
+        ### Reinit the Optimizer on the correct device (just incase) ###
+        optimizer._init_optimizer_state(device=self.device)
+      
         class OptimizerWrapper:
             def __init__(self, base_optimizer):
                 self.base_optimizer = base_optimizer
@@ -333,11 +352,11 @@ class Accelerator:
 
                     ### If we just updated and were in mixed precision mode, we only updated ###
                     ### our fp32 copy of the weights. We need to copy those back into our model ###
-                    ### now for the next iteration! It is important to use the copy() operation ###
+                    ### now for the next iteration! It is important to use the copy operation ###
                     ### as we dont want to cast our fp32_copy to fp16! ###
                     if accelerator.mixed_precision:
                         for fp32_param, param in zip(accelerator.fp32_params, accelerator.model._parameters_no_dedup()):
-                            param.data = fp32_param.data.copy().astype(cp.float16)
+                            param.data[:] = fp32_param.data.astype(cp.float16, copy=True)
 
             def zero_grad(self, *args, **kwargs):   
 
@@ -718,21 +737,8 @@ class Accelerator:
                 ### Get Optimizer states ###
                 if hasattr(self, "optimizer") and self.optimizer is not None:
     
-                    opt = self.optimizer
-                    opt_state = {}
-
-                    if hasattr(opt, "m"):
-                        opt_state["m"] = [cp.asnumpy(m) for m in opt.m]
-                    if hasattr(opt, "v"):
-                        opt_state["v"] = [cp.asnumpy(v) for v in opt.v]
-                    if hasattr(opt, "t"):
-                        opt_state["t"] = opt.t
-                    if hasattr(opt, "beta1_pow"):
-                        opt_state["beta1_pow"] = opt.beta1_pow
-                    if hasattr(opt, "beta2_pow"):
-                        opt_state["beta2_pow"] = opt.beta2_pow
-
-                    if len(opt_state) > 0:
+                    opt_state = self.optimizer.state_dict()
+                    if opt_state is not None:
                         opt_path = os.path.join(path_to_checkpoint, "optimizer.bin")
                         with open(opt_path, "wb") as f:
                             pickle.dump(opt_state, f)
@@ -740,10 +746,10 @@ class Accelerator:
                 if self.mixed_precision:
 
                     mixed_precision_config = {"scale": self.scaler.scale,
-                                            "growth_factor": self.scaler.growth_factor,
-                                            "backoff_factor": self.scaler.backoff_factor, 
-                                            "growth_interval": self.scaler.growth_interval, 
-                                            "unskipped": self.scaler.unskipped}
+                                              "growth_factor": self.scaler.growth_factor,
+                                              "backoff_factor": self.scaler.backoff_factor, 
+                                              "growth_interval": self.scaler.growth_interval, 
+                                              "unskipped": self.scaler.unskipped}
 
                     mp_config_path = os.path.join(path_to_checkpoint, "mp_config.bin")
                     with open(mp_config_path, "wb") as f:
@@ -788,30 +794,9 @@ class Accelerator:
                 opt_state = pickle.load(f)
             
             if self.optimizer is not None:
-
-                if hasattr(self.optimizer, "m") and "m" in opt_state:
-                    self.optimizer.m = [cp.asarray(m) for m in opt_state["m"]]
-
-                    if self.comm is not None:
-                        for m in self.optimizer.m:
-                            self.comm.broadcast(m)
-
-                if hasattr(self.optimizer, "v") and "v" in opt_state:
-                    self.optimizer.v = [cp.asarray(v) for v in opt_state["v"]]
-
-                    if self.comm is not None:
-                        for v in self.optimizer.v:
-                            self.comm.broadcast(v)
-
-                if hasattr(self.optimizer, "t") and "t" in opt_state:
-                    self.optimizer.t = opt_state["t"]
-                if hasattr(self.optimizer, "beta1_pow") and "beta1_pow" in opt_state:
-                    self.optimizer.beta1_pow = opt_state["beta1_pow"]
-                if hasattr(self.optimizer, "beta2_pow") and "beta2_pow" in opt_state:
-                    self.optimizer.beta2_pow = opt_state["beta2_pow"]
+                self.optimizer.load_state_dict(opt_state)
 
         if self.mixed_precision:
-            
             path_to_mp_config = os.path.join(path_to_checkpoint, "mp_config.bin")
             if os.path.exists(path_to_mp_config):
                 with open(path_to_mp_config, "rb") as f:

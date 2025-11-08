@@ -233,11 +233,12 @@ gpt2config = GPT2Config(
     mlp_dropout_p=args.dropout_p, 
     mlp_ratio=mlp_ratio, 
     use_bias=args.use_bias, 
-    use_fused_ops=(args.fused or (True if os.environ.get("USE_FUSED_OPS", "False") == "True" else False)) # <- mytorchrun can force all other ops to be 
+    use_fused_ops=(args.fused or (True if os.environ.get("USE_FUSED_OPS", "False") == "True" else False)) # <- mytorchrun can force all other ops to be fused 
 )                                                                                                         #    but flash_attn needs this flag inside the        
                                                                                                           #    model to trigger, otherwise it will use naive
                                                                                                           #    a little messy but i want both mytorchrun and 
-                                                                                                          #    normal distributed launch to work!
+                                                                                                          #    normal distributed launch to work, and i dont
+                                                                                                          #    want to check env flags inside the model
 model = GPT2(gpt2config)
 
 total_params = 0
@@ -256,11 +257,22 @@ else:
 accelerator.print(f"Training for {train_iterations} Iterations")
 
 ### Load Optimizer ###
-optimizer = optim.AdamW(model.parameters(), 
-                        lr=args.max_lr, 
-                        weight_decay=args.weight_decay,
+decay_params = []
+no_decay_params = []
+for name, param in model.named_parameters():
+    if len(param.shape) < 2: # <- dont apply weight decay to layernorm/biases
+        no_decay_params.append(param)
+    else:
+        decay_params.append(param)
+param_groups = [
+    {"params": decay_params, "weight_decay": args.weight_decay},
+    {"params": no_decay_params, "weight_decay": 0.0}
+]
+optimizer = optim.AdamW(param_groups, 
+                        lr=args.max_lr,
                         beta1=args.beta1, 
                         beta2=args.beta2)
+accelerator.print(optimizer)
 
 ### Load Scheduler ###
 scheduler = mytorch.lr_scheduler.CosineLRScheduler(
@@ -354,13 +366,14 @@ while train:
                 ### Gather (no-op if we are on single GPU) ###
                 loss = accelerator.gather_for_metrics(loss)
 
-                ### Grab our stored grad_norm for checking on model health ###
+                ### Logging stuff ###
                 lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
                 log_parts = [
                     f"Iter: {completed_steps:6d}",
                     f"Loss: {loss:7.4f}",
                     f"LR: {lr:9.2e}"
                 ]
+                ### Grab our stored grad_norm for checking on model health ###
                 if accelerator.grad_norm is not None:
                     log_parts.append(f"GradNorm: {accelerator.grad_norm:7.3f}")
                 log_parts.append(f"Toks/Sec: {int(toks_per_batch / dt):6d}")
@@ -375,7 +388,7 @@ while train:
                     if accelerator.grad_norm is not None:
                         logging_dict["grad_norm"] = accelerator.grad_norm 
                     accelerator.log(logging_dict, step=completed_steps)
-                
+ 
             if completed_steps % args.checkpoint_iterations == 0 and args.always_save_checkpoint:
                 accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
 
@@ -415,5 +428,5 @@ while train:
             break
 
 ### Save final checkpoint once done ! ###
-accelerator.save_state(os.path.join(path_to_experiment, f"final_checkpoint"))
+accelerator.save_state(os.path.join(path_to_experiment, f"final_checkpoint"), save_model_only=True)
 accelerator.end_training()
