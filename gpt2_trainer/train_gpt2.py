@@ -4,23 +4,26 @@ Basic Training script that can be launched in a few ways:
 Existing Bash Script: `gpt2_trainer/train_gpt2.py`
 
 To run on single GPU (shakespeare): 
-$ bash gpt2_trainer/train_gpt2.sh shakespeare
+$ bash gpt2_trainer/train_gpt2.sh shakespeare --batch_size 32
 
 To enable Fused Ops/Mixed Precision
-$ bash gpt2_trainer/train_gpt2.sh shakespeare --fused --mixed_precision
+$ bash gpt2_trainer/train_gpt2.sh shakespeare --fused --mixed_precision --batch_size 32
 
 To train on multiple GPUs
-$ bash gpt2_trainer/train_gpt2.sh shakespeare --fused --mixed_precision --num_gpus 4
+$ bash gpt2_trainer/train_gpt2.sh shakespeare --fused --mixed_precision --num_gpus 4 --batch_size 32
 
 Use mytorchrun launcher instead (requires mytorch-core install and `mytorchrun config` setup!)
-$ bash gpt_trainer/train_gpt2_launcher.sh shakespeare
+$ bash gpt_trainer/train_gpt2_launcher.sh shakespeare --batch_size 32
 
 To reproduce GPT2 (124M) on OpenWebText:
-$ bash gpt2_trainer/train_gpt2.sh owt --fused --mixed_precision --num_gpus 4
+$ bash gpt2_trainer/train_gpt2.sh owt --fused --mixed_precision --num_gpus 4 --batch_size 32
 or assuming your `mytorchrun config` is setup:
-$ bash gpt_trainer/train_gpt2_launcher.sh owt
+$ bash gpt_trainer/train_gpt2_launcher.sh owt --batch_size 32
 
+GPT2 (124M) Training will target roughly 500K tok/batch, grad accumulation will be automatically calculated
+for your specific system! 
 """
+
 
 import os
 import argparse
