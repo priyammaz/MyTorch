@@ -32,13 +32,13 @@ class Cache:
     """
     def __init__(self, config):
 
-        ### Counter for Number of Tokens in Cache ###
-        self._seen_tokens = 0
-
         ### Key/Value Cache (List of Tensor, where list is over model layers) ###
         ### We use these empty tensors as a placeholder ###
         self.key_cache = [mytorch.Tensor([]) for _ in range(config.num_blocks)]
         self.value_cache = [mytorch.Tensor([]) for _ in range(config.num_blocks)]
+        
+        ### What is our max context size? ###
+        self.max_seq_len = config.max_seq_len 
 
     def __repr__(self):        
 
@@ -51,15 +51,10 @@ class Cache:
         return f"DyanmicCache(Num_Layers: {len(self.key_cache)} | Cached Tokens: {cached_tokens})"
         
     def update(self, key_states, value_states, layer_idx):
-        
-        ### Only iterate num tokens seen on the first layer ###
-        ### key_states (B x H x L x E)
-        ### value_states (B x H x L x E)
-
-        if layer_idx == 0:  
-            self._seen_tokens += key_states.shape[-2]
-
-      
+        """
+        Basically a deque. We start filling in tokens, but once we fill our context length
+        we will start dropping old tokens to make room for the new ones!
+        """
         ### Append New key/Value states to key/value cache ###
         ### If we are starting then there is nothing so just fill it in ###
         if self.get_seq_len(layer_idx) == 0:
@@ -70,6 +65,12 @@ class Cache:
         else:
             self.key_cache[layer_idx] = mytorch.concatenate([self.key_cache[layer_idx], key_states], dim=-2)
             self.value_cache[layer_idx] = mytorch.concatenate([self.value_cache[layer_idx], value_states], dim=-2)
+
+        current_len = self.key_cache[layer_idx].shape[-2]
+        if current_len > self.max_seq_len:
+            num_to_remove = current_len - self.max_seq_len
+            self.key_cache[layer_idx] = self.key_cache[layer_idx][:, :, num_to_remove:, :]
+            self.value_cache[layer_idx] = self.value_cache[layer_idx][:, :, num_to_remove:, :]
    
         return self.key_cache[layer_idx], self.value_cache[layer_idx]
     
@@ -82,7 +83,6 @@ class Cache:
             cached_tokens = self.key_cache[layer_idx].shape[-2]
 
         return cached_tokens
-
 
 class Embeddings(nn.Module):
 
@@ -138,15 +138,15 @@ class Attention(nn.Module):
         self.fused = fused
 
         ### Attention Projections ###
-        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto)
+        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto, fused=self.fused)
 
         ### Post Attention Projection ###
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto)
+        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto, fused=self.fused)
         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
-  
+
         if not self.fused:
             self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p) # Currently only support attn dropout in non-fused
-            self.softmax = nn.Softmax(auto=auto, fused=True)
+            self.softmax = nn.Softmax(auto=auto, fused=self.fused)
 
             ### If we are not using fused attention we need to manually pass in our 
             ### attention mask! So lets just save it as a buffer right here!
@@ -184,8 +184,8 @@ class Attention(nn.Module):
 
             # If our queries are a single input and we are doing attention with our k/v cache 
             # which is by definition before the queries, then we dont really need a causal mask!
-            # thus we only need our masking when the cache is empty 
-            if (cache is not None) and (cache.get_seq_len == 0):
+            # thus we only need our masking when the cache is empty or if there is no cache at all
+            if ((cache is not None) and (cache.get_seq_len == 0)) or (cache is None):
                 kv_seq_len = k.shape[-2]
                 scores = scores + self.causal_mask[:, :, :seq_len, :kv_seq_len].astype(scores.data.dtype)
 
@@ -236,15 +236,16 @@ class FeedForward(nn.Module):
                  mlp_ratio=4, 
                  mlp_dropout_p=0.1,
                  use_bias=True,
-                 auto=False):
+                 auto=False,
+                 fused=False):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
 
-        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=True)
+        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=fused)
         self.activation = nn.GELU()
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
 
-        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=True)
+        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=fused)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
     def forward(self, x):
@@ -279,7 +280,7 @@ class TransformerBlock(nn.Module):
                                    fused=fused)
         
         self.layernorm1 = nn.LayerNorm(embed_dim, bias=use_bias, auto=auto, fused=fused)
-        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto)
+        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto, fused=fused)
         self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
 
     def forward(self, x, cache=None, layer_idx=None):
@@ -296,11 +297,10 @@ class GPT2(nn.Module):
         super().__init__()
 
         self.config = config
- 
         self.embeddings = Embeddings(vocab_size=config.vocab_size, 
                                      embed_dim=config.embed_dim, 
                                      context_length=config.max_seq_len,
-                                     fused=True)
+                                     fused=config.use_fused_ops)
         
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim=config.embed_dim, 
@@ -321,7 +321,8 @@ class GPT2(nn.Module):
         self.lm_head = nn.Linear(config.embed_dim, 
                                  config.vocab_size, 
                                  bias=config.use_bias,
-                                 auto=config.use_full_auto)
+                                 auto=config.use_full_auto, 
+                                 fused=config.use_fused_ops)
 
         ### Initialize Weights ###
         self.apply(_init_weights)
