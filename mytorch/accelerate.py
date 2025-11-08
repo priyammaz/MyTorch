@@ -352,7 +352,7 @@ class Accelerator:
 
                     ### If we just updated and were in mixed precision mode, we only updated ###
                     ### our fp32 copy of the weights. We need to copy those back into our model ###
-                    ### now for the next iteration! It is important to use the copy operation ###
+                    ### now for the next iteration! It is important to use the copy() operation ###
                     ### as we dont want to cast our fp32_copy to fp16! ###
                     if accelerator.mixed_precision:
                         for fp32_param, param in zip(accelerator.fp32_params, accelerator.model._parameters_no_dedup()):
