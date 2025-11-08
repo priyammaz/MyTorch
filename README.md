@@ -227,7 +227,7 @@ No Deep Learning Framework would be complete without a set of modules! These are
 | **Core Layers** | **Impl** | **Fused** | **Normalization** | **Impl** | **Fused** | **Activations** | **Impl** | **Fused** | 
 |---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
 | Linear | ✅ | ✅ | LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ |
-| Embedding | ✅ | ❌| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ |
+| Embedding | ✅ | ✅| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ |
 | Dropout | ✅ | ❌ | BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ❌ | 
 |  | | | GroupNorm | ❌ | ❌ | Softmax | ✅ | ✅ |
 | | | | InstanceNorm | ❌ | ❌ | LeakyReLU | ❌ | ❌ |
@@ -250,9 +250,8 @@ No Deep Learning Framework would be complete without a set of modules! These are
 
 The focus for MyTorch is for LLM training, but Convolutions are also important! Unfortunately, it is very challenging to get CUDNN level performance (even with triton kernels) for convolutions. So these will be more of a learning exercise than for actual use! We could leverage the [Cudnn Frontend](https://github.com/NVIDIA/cudnn-frontend) but I want the dependencies to be as minimal as possible, and the goal here is to learn!
 
-| **Operation**         | **Impl** | **Fused** |
+| **Core Layers**         | **Impl** | **Fused** |
 |-----------------------|----------|-----------|
-| **Core Layers**       |          |           |
 | Conv1d                | ✅       | ✅        |
 | Conv2d                | ✅       | ✅        |
 | ConvTranspose1d       | ✅       | 🚫        |
@@ -492,182 +491,6 @@ python -m mytorch.distributed.launch --num_gpus 2--master_addr 127.0.0.1 --maste
 <br>
 
 
-## Train GPT2:
-
-Although this repo is educational, it also can be used for some serious training tasks! My GPT2 Implementation here is intended to be closely matched to [NanoGPT](https://github.com/karpathy/nanoGPT)
-
-### Train Tiny Shakespeare (10M Parameters)
-
-First we have to prepare the data
-
-```bash
-python prepare_data/prepare_shakespeare.py --path_to_save "data/shakespeare"
-```
-
-And from there you can launch your training!
-```
-bash gpt2_trainer/train_gpt2.sh shakespeare
-```
-
-Optionally you can add the following tags:
-
-```
-bash gpt2_trainer/train_gpt2.sh shakespeare --mixed_precision --fused --num_gpus 2 --log_wandb
-```
-
-This should only take a few minutes and create a final checkpoint in ```work_dir/gpt2-small-shakespeare```
-
-<details>
-<summary>Using MyTorch Launcher</summary>
-
-You will see ```train_gpt2.sh``` uses ```mytorch.distributed.launch```. But if you setup
-the ```mytorchrun config``` then you can equivalently use the following launch code:
-
-```bash
-mytorchrun launch train_gpt2.py \
-    --project_name gpt2-small-shakespeare \
-    --working_directory work_dir \
-    --context_length 256 \
-    --model_size small \
-    --dropout_p 0.0 \
-    --path_to_data data/shakespeare \
-    --train_iterations 2500 \
-    --eval_interval 1000 \
-    --eval_iterations 200 \
-    --batch_size 32 \
-    --gradient_accumulation_steps 1 \
-    --max_lr 1e-3 \
-    --min_lr 1e-4 \
-    --warmup_steps 500 \
-    --weight_decay 0.1 \
-    --max_grad_norm 1.0 \
-    --beta1 0.9 \
-    --beta2 0.95 \
-    --log_iter 25 \
-    --fused \
-    --mixed_precision \
-    --log_wandb
-```
-
-</details>
-
-### Inference Tiny Shakespeare
-
-We can also go ahead and inference this model with:
-
-```
-python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-small-shakespeare/ --device cuda
-```
-
-Optionally you can add the following options:
-
-```
-python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-small-shakespeare/ --device cuda --temperature 0.8 --topk 15
-```
-
-Sample Output:
-
-```
-KING RICHARD III:
-Alas! how my children!
-Whom I descend is hardly and for words?
-How far breath, he might have lost it call'd
-Our late's morning: if all confess excellens,
-Or in a safe brave falsehood, he's gone, to signify
-You take induce conferemonities.
-
-Think Waewarwick was with find fellow youse.
-
-WARWICK:
-Why then, the king is dead; whom we will obey.
-
-Messenger:
-My Lord of Norfolk, he urged in his soldier,
-He troubled with all frost.
-
-HENRY BOLINGBROKE:
-Welcome, my lord.
-```
-
-### Pre-Train GPT2 (124M Parameters) on OpenWebText
-
-Training a tiny GPT model isn't too much of a problem. What about training a GPT2-Base model?
-
-### Prepare OpenWebText Dataset
-
-```bash
-# HF_HOME="<CACHE_DIR>" optionally set if you want to change default HF Cache directory
-python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
-```
-
-### Pre-Train on OpenWebText
-
-```python
-bash gpt2_trainer/train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --triton_autotune --log_wandb
-```
-
-My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 250K steps! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)!
-
-<img src="https://github.com/priyammaz/MyTorch/blob/main/src/gpt2_owt_curve.png?raw=true" alt="drawing" width="600"/>
-
-### Finetune GPT2 On Shakespeare
-
-Now that you have a model that is pretrained, we can finetune it on Shakespeare!
-
-#### Prepare Shakespeare Data for GPT2
-
-The following command will create a new ```train.bin``` and ```val.bin``` inside ```data/shakespeare_gpt2```.
-
-```bash
-python prepare_data/prepare_shakespeare_gpt2.py
-```
-
-#### Start Training
-
-By default we freeze the everything but the last 3 layers of the Transformer! This expects that your pretrained checkpoint is inside ```work_dir/gpt2-base-owt``` which is where the pre-training should have saved it by default. It will also use the most recent checkpoint available automatically, but you can point to different checkpoints as well. Just take a look at ```gpt2_trainer/finetune_gpt2_base_shakespeare.sh``` to make any changes you need! This only takes a few minutes (and will probably heavily overfit!)
-
-```bash
-bash gpt2_trainer/finetune_gpt2_base_shakespeare.sh --fused --mixed_precision --triton_autotune
-```
-#### Inference 
-
-This will have produced a new checkpoint (for finetuning) to ```work_dir/gpt2-base-ft-shakespeare```. So we can then go ahead and inference it!
-
-```bash
-python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-base-ft-shakespeare --device "cuda"
-```
-
-Here is an example of a generation! Not too bad!
-```
-MENENIUS:
-Once more, I have taken him on
-
-HASTINGS:
-Conspirators are limit'd by force,
-Which if privilege be the best remedy of their illegality.
-The consuls, and here 'gainst this father's life,
-The enslaved by the state, chew and shake of the state's state!
-You nobler attainder'd you;
-Your children user.
-
-BRUTUS:
-What is the presence of this fellow that we will to palliance
-And wish at once:
-If you appeal unto him, froward, see where all this was stirred;
-His woes of your constructions
-Are not fixed gasping to hear how flatter'd your sweet blood,
-At your broils bidding and bids these to repeat.
-The man that all husband and then all his children
-
-Were not born normal:
-Did never, so he knew he meant to wage a traitor
-He had, that tramples the jungle
-Which then in hazel kind natures first their root.
-For they say, he did disobedient unto them:
-But where did these hapless saplings
-
-```
-
 ### How does AutoGrad work?
 
 ### Computational Graph
@@ -763,6 +586,188 @@ Fused operations follow a simple idea, why not copy all the data once, do all th
 
 Triton is not too challenging to learn, it just needs some practice! I think my fused softmax at [```mytorch/nn/fused_ops/softmax.py```](mytorch/nn/fused_ops/softmax.py) is a great place to start, as you will see the differences immediately!
 
+# Train GPT2:
+
+Although this repo is educational, it also can be used for some serious training tasks! My GPT2 Implementation here is intended to be closely matched to [NanoGPT](https://github.com/karpathy/nanoGPT)
+
+### Train Tiny Shakespeare (10M Parameters)
+
+First we have to prepare the data
+
+```bash
+python prepare_data/prepare_shakespeare.py --path_to_save "data/shakespeare"
+```
+
+And from there you can launch your training!
+```
+bash gpt2_trainer/train_gpt2.sh shakespeare
+```
+
+Optionally you can add the following tags:
+
+```
+bash gpt2_trainer/train_gpt2.sh shakespeare --mixed_precision --fused --num_gpus 2 --log_wandb
+```
+
+This should only take a few minutes and create a final checkpoint in ```work_dir/gpt2-small-shakespeare```
+
+<details>
+<summary>Using MyTorch Launcher</summary>
+
+You will see ```train_gpt2.sh``` uses ```mytorch.distributed.launch```. But if you setup
+the ```mytorchrun config``` then you can equivalently use the following launch code:
+
+```bash
+bash gpt_trainer/train_gpt2_launcher.sh shakespeare
+```
+And inside the script it runs:
+
+```bash
+mytorchrun launch gpt2_trainer/train_gpt2.py \
+    --project_name gpt2-small-shakespeare \
+    --working_directory work_dir \
+    --context_length 256 \
+    --model_size small \
+    --dropout_p 0.0 \
+    --path_to_data data/shakespeare \
+    --train_iterations 2500 \
+    --eval_interval 1000 \
+    --eval_iterations 200 \
+    --batch_size_per_gpu 32 \
+    --gradient_accumulation_steps 1 \
+    --max_lr 1e-3 \
+    --min_lr 1e-4 \
+    --warmup_steps 500 \
+    --weight_decay 0.1 \
+    --max_grad_norm 1.0 \
+    --beta1 0.9 \
+    --beta2 0.95 \
+    --log_iter 25 \
+    --log_wandb
+```
+
+The command above if run directly it will throw an error about no module named ```models```. This is just a path issue, this is why you see at the top of the bash script I have an ```export PYTHONPATH="$(pwd):$PYTHONPATH"``` to ensure the root dir is in the python path. But hack it to however is easiest! Most likely just updating the bash scripts with your config is sufficient!
+
+</details>
+
+### Inference Tiny Shakespeare
+
+We can also go ahead and inference this model with:
+
+```
+python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-small-shakespeare/ --device cuda --fused
+```
+
+Optionally you can add the following options:
+
+```
+python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-small-shakespeare/ --device cuda --temperature 0.8 --topk 15 --fused
+```
+
+Sample Output:
+
+```
+KING RICHARD III:
+Alas! how my children!
+Whom I descend is hardly and for words?
+How far breath, he might have lost it call'd
+Our late's morning: if all confess excellens,
+Or in a safe brave falsehood, he's gone, to signify
+You take induce conferemonities.
+
+Think Waewarwick was with find fellow youse.
+
+WARWICK:
+Why then, the king is dead; whom we will obey.
+
+Messenger:
+My Lord of Norfolk, he urged in his soldier,
+He troubled with all frost.
+
+HENRY BOLINGBROKE:
+Welcome, my lord.
+```
+
+### Pre-Train GPT2 (124M Parameters) on OpenWebText
+
+Training a tiny GPT model isn't too much of a problem. What about training a GPT2-Base model?
+
+### Prepare OpenWebText Dataset
+
+```bash
+# HF_HOME="<CACHE_DIR>" optionally set if you want to change default HF Cache directory
+python prepare_data/prepare_owt.py --num_proc 8 --path_to_save data/openwebtext
+```
+
+### Pre-Train on OpenWebText
+
+```python
+bash gpt2_trainer/train_gpt2.sh owt --mixed_precision --fused --num_gpus 4 --triton_autotune --log_wandb
+```
+
+My experiment was on a 4xGH100 Node training for about 4 days, reaching a roughly 2.95 loss  in about 250K steps with roughly batche sizes of 0.5M! This is pretty close to my reference implementation from [NanoGPT](https://github.com/karpathy/nanoGPT)! According to [Chinchilla](https://arxiv.org/abs/2203.15556) though
+this is a bit of a waste. I would have been better off training a larger model for the same amount of time (on more tokens) instead of training this smaller model for longer! But thats fine!
+
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/gpt2_owt_curve.png?raw=true" alt="drawing" width="600"/>
+
+### Finetune GPT2 (124M Parameters) On Shakespeare
+
+Now that you have a model that is pretrained, we can finetune it on Shakespeare!
+
+#### Prepare Shakespeare Data for GPT2
+
+The following command will create a new ```train.bin``` and ```val.bin``` inside ```data/shakespeare_gpt2```.
+
+```bash
+python prepare_data/prepare_shakespeare_gpt2.py
+```
+
+#### Start Finetuning
+
+By default we freeze the everything but the last 6 layers of the Transformer! This expects that your pretrained checkpoint is inside ```work_dir/gpt2-base-owt``` which is where the pre-training should have saved it by default. It will also use the most recent checkpoint available automatically, but you can point to different checkpoints as well. Just take a look at ```gpt2_trainer/finetune_gpt2_base_shakespeare.sh``` to make any changes you need! This only takes a few minutes (and will probably heavily overfit!)
+
+```bash
+bash gpt2_trainer/finetune_gpt2_base_shakespeare.sh --fused --mixed_precision --triton_autotune
+```
+#### Inference 
+
+This will have produced a new checkpoint (for finetuning) to ```work_dir/gpt2-base-ft-shakespeare```. So we can then go ahead and inference it!
+
+```bash
+python -m gpt2_trainer.inference_gpt2 work_dir/gpt2-base-ft-shakespeare --device "cuda" --fused
+```
+
+Here is an example of a generation! Not too bad!
+```
+MENENIUS:
+Once more, I have taken him on
+
+HASTINGS:
+Conspirators are limit'd by force,
+Which if privilege be the best remedy of their illegality.
+The consuls, and here 'gainst this father's life,
+The enslaved by the state, chew and shake of the state's state!
+You nobler attainder'd you;
+Your children user.
+
+BRUTUS:
+What is the presence of this fellow that we will to palliance
+And wish at once:
+If you appeal unto him, froward, see where all this was stirred;
+His woes of your constructions
+Are not fixed gasping to hear how flatter'd your sweet blood,
+At your broils bidding and bids these to repeat.
+The man that all husband and then all his children
+
+Were not born normal:
+Did never, so he knew he meant to wage a traitor
+He had, that tramples the jungle
+Which then in hazel kind natures first their root.
+For they say, he did disobedient unto them:
+But where did these hapless saplings
+
+```
+
 ### Plans for this Repo
 
 I am not even close to done! Here are some of the stuff I want to work on next to keep this going (on top of finishing all the unfinished ops from above)!
@@ -777,12 +782,14 @@ I am not even close to done! Here are some of the stuff I want to work on next t
   - [x] Add custom attention masks
   - [ ] Add Sliding Window Attention
   - [x] Add Grouped Query Attention
-- [ ] KV Cache for Inference
+- [x] KV Cache for Inference
 - [ ] Reimplement and Reproduce (something like) Llama, closer to nanoChat
-  - [ ] Rotary Embeddings
+  - [ ] Rotary Embeddings (kernel)
   - [ ] Repeat
   - [ ] Optimizer Groups
   - [ ] Better inference wrapper
+  - [ ] Swiglu Kernel
+  - [ ] RMSNorm (kernel)
 - [ ] GRPO Trainer for post-training
 - [ ] Mixture of Experts
 - [x] Benchmark Scripts to scope gains from Fused Ops
