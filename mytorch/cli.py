@@ -20,7 +20,8 @@ DEFAULT_CONFIG_ENV = {
     "master_addr": "127.0.0.1", 
     "master_port": "13333",
     "use_fused": "False",
-    "triton_autotune": "none"
+    "triton_autotune": "none",
+    "mixed_precision": "No"
 }
 
 terminal_width = shutil.get_terminal_size().columns
@@ -264,9 +265,10 @@ def launch():
         print(f"Error: {e}")
         sys.exit(1)
     
-    # Set Environment Variables 
+    # Set Environment Variables so our Accelerator can load them! ###
     os.environ["TRITON_AUTOTUNE_MODE"] = str(config.get("triton_autotune", "none"))
     os.environ["USE_FUSED_OPS"] = str(config.get("use_fused", "False"))
+    os.environ["MYTORCHRUN_MIXED_PRECISION"] = str(config.get("mixed_precision", "No"))
     gpu_indices = str(config.get("gpu_indices"))
     if gpu_indices != "all":
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_indices
