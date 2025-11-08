@@ -82,7 +82,7 @@ $CMD gpt2_trainer/finetune_gpt2_base_shakespeare.py \
     --load_from_experiment "gpt2-base-owt" \
     --dropout_p 0.1 \
     --path_to_data data/shakespeare_gpt2 \
-    --num_layers_train 3 \
+    --num_layers_train 6 \
     --train_iterations 500 \
     --eval_interval 100 \
     --eval_iterations 10 \
