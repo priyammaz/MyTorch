@@ -6,6 +6,7 @@ if we are doing Mixed/Full precision training! If everything is disabled
 its just a fancy way to log and checkpoint essentially!
 """
 import os
+import shutil
 import cupy as cp
 import numpy as np
 from cupyx.distributed import NCCLBackend
@@ -25,6 +26,8 @@ try:
     WANDB_AVAILABLE = True
 except:
     WANDB_AVAILABLE = False
+
+terminal_width = shutil.get_terminal_size().columns
 
 class GradScaler:
     def __init__(self, 
@@ -180,6 +183,28 @@ class Accelerator:
     def is_main_process(self):
         return self.rank == 0
     
+    def env(self):
+
+        gpu_indices = os.environ.get("CUDA_VISIBLE_DEVICES", "all")
+        if gpu_indices == "all":
+            gpu_indices = ",".join(str(x) for x in list(range(0, self.world_size)))
+     
+        config = {
+            "distributed": "Multi-GPU Training" if self.comm is not None else False, 
+            "num_gpus": self.world_size, 
+            "gpu_indices": gpu_indices,
+            "master_addr": self.master_addr, 
+            "master_port": self.master_port
+        }
+
+        if self.is_main_process():
+            print("\n" + "-" * terminal_width)
+            print("Launch Configuration:")
+            print("-" * terminal_width)
+            for key, value in config.items():
+                print(f"  {key}: {value}")
+            print("-" * terminal_width)
+
     @property
     def device(self):
         return f"cuda:{self.rank}"
