@@ -26,11 +26,9 @@ try:
     from . import fused_ops as FO
     FUSED_AVAIL = True
 except Exception as e:
-
     warnings.warn(e)
     FUSED_AVAIL = False
     FLAG_ONCE = False
-
 
 ### Check ENV Flag for Fused Ops ###
 ### So this forces Fused Ops Always ###
