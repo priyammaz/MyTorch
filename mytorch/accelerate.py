@@ -162,8 +162,12 @@ class Accelerator:
         ### Random Seed per Rank ###
         cp.random.seed(seed=42 + self.rank)
 
-        ### Mixed Precision ###
-        self.mixed_precision = mixed_precision
+        ### Mixed Precision ### 
+        env_val = os.environ.get("MYTORCHRUN_MIXED_PRECISION", False)
+        if env_val is False:
+            self.mixed_precision = mixed_precision
+        else:
+            self.mixed_precision = False if env_val == "No" else True
         self.skip_optimizer_step = False
         if self.mixed_precision:
             self.scaler = GradScaler()
@@ -192,6 +196,7 @@ class Accelerator:
         config = {
             "distributed": "Multi-GPU Training" if self.comm is not None else False, 
             "num_gpus": self.world_size, 
+            "mixed_precision": self.mixed_precision,
             "gpu_indices": gpu_indices,
             "master_addr": self.master_addr, 
             "master_port": self.master_port
