@@ -9,8 +9,6 @@ import triton
 import triton.language as tl
 from .utils import calc_num_warps
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
-# DLPACK_DISABLE = False
-# AUTOTUNE_MODE="none"
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
