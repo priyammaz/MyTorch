@@ -64,6 +64,9 @@ args = parse_args()
 accelerator = Accelerator(mixed_precision=args.mixed_precision,
                           log_wandb=args.log_wandb)
 
+accelerator.print(mytorch.banner)
+accelerator.env()
+
 ### Load Model Variant ###
 if args.model_size == "small":
     embed_dim = 384
@@ -323,15 +326,17 @@ while train:
                 ### Grab our stored grad_norm for checking on model health ###
                 lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
                 log_parts = [
-                    f"Iter:{completed_steps}",
-                    f"Loss:{loss:7.4f}",
-                    f"LR:{lr:9.2e}",
+                    f"Iter: {completed_steps:6d}",
+                    f"Loss: {loss:7.4f}",
+                    f"LR: {lr:9.2e}"
                 ]
                 if accelerator.grad_norm is not None:
-                    log_parts.append(f"GradNorm:{accelerator.grad_norm:7.3f}")
-                log_parts.append(f"Toks/Sec:{int(toks_per_batch / dt):6d}")
+                    log_parts.append(f"GradNorm: {accelerator.grad_norm:7.3f}")
+                log_parts.append(f"Toks/Sec: {int(toks_per_batch / dt):6d}")
                 log_statement = " | ".join(log_parts)
-                accelerator.print(log_statement)
+
+                if accelerator.is_main_process():
+                    tqdm.write(log_statement)
 
                 ### Log with Wandb if enabled ###
                 if args.log_wandb:  
@@ -339,7 +344,7 @@ while train:
                     if accelerator.grad_norm is not None:
                         logging_dict["grad_norm"] = accelerator.grad_norm 
                     accelerator.log(logging_dict, step=completed_steps)
-
+                
             if completed_steps % args.checkpoint_iterations == 0 and args.always_save_checkpoint:
                 accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
 
