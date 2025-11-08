@@ -1,3 +1,27 @@
+"""
+Basic Training script that can be launched in a few ways:
+
+Existing Bash Script: `gpt2_trainer/train_gpt2.py`
+
+To run on single GPU (shakespeare): 
+$ bash gpt2_trainer/train_gpt2.sh shakespeare
+
+To enable Fused Ops/Mixed Precision
+$ bash gpt2_trainer/train_gpt2.sh shakespeare --fused --mixed_precision
+
+To train on multiple GPUs
+$ bash gpt2_trainer/train_gpt2.sh shakespeare --fused --mixed_precision --num_gpus 4
+
+Use mytorchrun launcher instead (requires mytorch-core install and `mytorchrun config` setup!)
+$ bash gpt_trainer/train_gpt2_launcher.sh shakespeare
+
+To reproduce GPT2 (124M) on OpenWebText:
+$ bash gpt2_trainer/train_gpt2.sh owt --fused --mixed_precision --num_gpus 4
+or assuming your `mytorchrun config` is setup:
+$ bash gpt_trainer/train_gpt2_launcher.sh owt
+
+"""
+
 import os
 import argparse
 import numpy as np
@@ -54,6 +78,9 @@ def parse_args():
     parser.add_argument("--log_iter", type=int, default=100)
     parser.add_argument("--log_wandb", action="store_true")
 
+    ### Extra ###
+    parser.add_argument("--print_banner", action="store_true")
+
     args = parser.parse_args()
 
     return args
@@ -64,8 +91,9 @@ args = parse_args()
 accelerator = Accelerator(mixed_precision=args.mixed_precision,
                           log_wandb=args.log_wandb)
 
-accelerator.print(mytorch.banner)
-accelerator.env()
+if args.print_banner: # <- mytorchrun launch will print its own banner!
+    accelerator.print(mytorch.banner)
+    accelerator.env()
 
 ### Load Model Variant ###
 if args.model_size == "small":
@@ -205,8 +233,11 @@ gpt2config = GPT2Config(
     mlp_dropout_p=args.dropout_p, 
     mlp_ratio=mlp_ratio, 
     use_bias=args.use_bias, 
-    use_fused_ops=args.fused
-)
+    use_fused_ops=(args.fused or (True if os.environ.get("USE_FUSED_OPS", "False") == "True" else False)) # <- mytorchrun can force all other ops to be 
+)                                                                                                         #    but flash_attn needs this flag inside the        
+                                                                                                          #    model to trigger, otherwise it will use naive
+                                                                                                          #    a little messy but i want both mytorchrun and 
+                                                                                                          #    normal distributed launch to work!
 model = GPT2(gpt2config)
 
 total_params = 0
