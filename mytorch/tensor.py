@@ -1598,6 +1598,71 @@ class Tensor:
 
         return out_tensors
 
+    def repeat_interleave(self, repeats, dim):
+        """
+        This method repeats a dimension however many times you want!
+        For simplicity we dont support any fancy repeat patterns, you can 
+        simply provide a dimension and repeat it some number of times!
+
+        If we have data 
+
+        [1,2]
+        [3,4]
+
+        and we repeat twice along dim=1 we get:
+
+        [1,1,2,2]
+        [3,3,4,4]
+
+        So in the backward pass we just need to sum up all the grads
+        that contributed to each output.
+
+        """
+        
+        if dim is None:
+            raise ValueError("dim must be specified for repeat_interleave")
+        if not isinstance(repeats, int) or repeats <= 0:
+            raise ValueError("repeats must be a positive integer")
+
+        shape = self.shape
+        out_data = np.repeat(self.data, repeats, axis=dim)
+    
+        def _repeat_interleave_backward(input_grad):
+            
+            if self.requires_grad:
+                # Reshape to separate the repeated dimension
+                # Shape along dim becomes: original_size * repeats
+                grad_shape = list(input_grad.shape)
+                original_size = shape[dim]
+                
+                # Reshape: move the repeated elements into a new dimension and sum
+                # New shape: [..., original_size, repeats, ...]
+                new_shape = grad_shape[:dim] + [original_size, repeats] + grad_shape[dim+1:]
+                grad_reshaped = input_grad.reshape(new_shape)
+                
+                # Sum over the repeats dimension (which is now at position dim+1)
+                grad_summed = grad_reshaped.sum(axis=dim+1)
+                
+                if self.grad is None:
+                    self.grad = grad_summed
+                else:
+                    self.grad += grad_summed
+    
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+
+        out = Tensor(
+            out_data,
+            requires_grad=requires_grad,
+            grad_fn=_repeat_interleave_backward if requires_grad else None,
+            grad_fn_name="<RepeatInterleaveBackward>" if requires_grad else None,
+            device=self.device,
+        )
+
+        if requires_grad:
+            out._add_parents(self)
+
+        return out
+
     ############################
     ### REDUCTION OPERATIONS ###
     ############################
