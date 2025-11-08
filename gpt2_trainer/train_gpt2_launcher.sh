@@ -1,6 +1,7 @@
 #!/bin/bash
 
 TARGET=""
+PER_GPU_BATCH_SIZE=32
 TRITON_AUTOTUNE=false
 DLPACK_DISABLE=false
 LOG_WANDB=false
@@ -15,6 +16,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --num_gpus)
             NUM_GPUS="$2"
+            shift
+            ;;
+        --batch_size)
+            PER_GPU_BATCH_SIZE="$2"
             shift
             ;;
         --disable_dlpack)
@@ -60,7 +65,7 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu 16 \
+            --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --tokens_per_batch 491520  \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
@@ -83,7 +88,7 @@ case "$TARGET" in
             --train_iterations 2500 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu 32 \
+            --batch_size_per_gpu $PER_GPU_BATCH_SIZE  \
             --gradient_accumulation_steps 1 \
             --max_lr 1e-3 \
             --min_lr 1e-4 \
