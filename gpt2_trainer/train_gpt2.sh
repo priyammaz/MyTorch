@@ -1,6 +1,7 @@
 #!/bin/bash
 
 NUM_GPUS=1
+PER_GPU_BATCH_SIZE=32
 TARGET=""
 TRITON_AUTOTUNE=false
 CUPYX_DISTRIBUTED_HOST="127.0.0.1"
@@ -20,6 +21,10 @@ while [[ $# -gt 0 ]]; do
             ;;
         --num_gpus)
             NUM_GPUS="$2"
+            shift
+            ;;
+        --batch_size)
+            PER_GPU_BATCH_SIZE="$2"
             shift
             ;;
         --host)
@@ -87,9 +92,9 @@ fi
 case "$TARGET" in
     owt)
         $CMD gpt2_trainer/train_gpt2.py  \
-            --project_name gpt2-large-owt \
+            --project_name gpt2-base-owt-testing \
             --working_directory work_dir \
-            --checkpoint_iterations 10000 \
+            --checkpoint_iterations 1000 \
             --always_save_checkpoint \
             --context_length 1024 \
             --model_size base \
@@ -98,8 +103,10 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu 32 \
+            --batch_size_per_gpu 16 \
+            --gradient_accumulation_steps 4 \
             --tokens_per_batch 491520  \
+            --use_chinchilla \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
@@ -115,14 +122,15 @@ case "$TARGET" in
         $CMD gpt2_trainer/train_gpt2.py \
             --project_name gpt2-small-shakespeare \
             --working_directory work_dir \
+            --checkpoint_iterations 100 \
             --context_length 256 \
             --model_size small \
             --dropout_p 0.0 \
             --path_to_data data/shakespeare \
-            --train_iterations 2500 \
+            --train_iterations 5000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu 32 \
+            --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --gradient_accumulation_steps 1 \
             --max_lr 1e-3 \
             --min_lr 1e-4 \
