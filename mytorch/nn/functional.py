@@ -1598,7 +1598,7 @@ def dropout(input, dropout_p, training=True, auto=False):
         return input
 
     ### Sample Mask ###
-    mask = (input.xp.random.random_sample(input.data.shape) >= dropout_p).astype(input.dtype)
+    mask = (input.xp.random.random_sample(input.data.shape) >= dropout_p).astype(input.dtype, copy=False)
     ratio = 1 / (1 - dropout_p)
     mask *= ratio
 
@@ -1995,7 +1995,7 @@ def sigmoid(x, auto=False):
 def relu(input, auto=False):
 
     if auto:
-        mask = Tensor(np.where(input.data < 0, 0, 1).astype(input.dtype))
+        mask = Tensor(np.where(input.data < 0, 0, 1).astype(input.dtype, copy=False))
         return input * mask
     else:
   
@@ -2227,7 +2227,7 @@ def softmax(x, dim=-1, auto=False, fused=False):
 def leaky_relu(input, negative_slope=0.1, auto=False):
 
     if auto:
-        mask_pos = Tensor(np.where(input.data > 0, 1, 0).astype(input.dtype))
+        mask_pos = Tensor(np.where(input.data > 0, 1, 0).astype(input.dtype, copy=False))
         mask_neg = 1 - mask_pos
         return input * mask_pos + input * mask_neg * negative_slope
     
@@ -2311,7 +2311,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
     flattened_dim = np.prod(other_dims)
 
     ### Make sure targets are always int32 ###
-    targets = targets.astype("int32")
+    targets = targets.astype("int32", copy=False)
     
     if auto:
         
@@ -2367,7 +2367,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
             # So lets just write a kernel that processes one row at a time. We will grab the 
             # NUM_CLASSES length vector of logits and the single label 
             
-            logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32")
+            logits_data = logits.data.reshape(flattened_dim, num_classes).astype("float32", copy=False)
             targets_data = targets.data.reshape(flattened_dim)
 
             # logits_data = logits.xp.ascontiguousarray(logits_data, dtype=logits.dtype)
@@ -2383,7 +2383,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
             nll = (logsumexp.flatten() - logits_data[np.arange(flattened_dim), targets_data]) * mask
             loss_value = np.sum(nll) / valid_counts
 
-            loss_value = loss_value.astype(logits.dtype)
+            loss_value = loss_value.astype(logits.dtype, copy=False)
             
             def _cross_entropy_backward(grad_output):
 
@@ -2403,7 +2403,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
                     grad_input *= mask.reshape(-1,1)
 
                     # Reshape back to original logits shape and dtype
-                    grad_input = grad_input.reshape(logits.shape).astype(logits.dtype)
+                    grad_input = grad_input.reshape(logits.shape).astype(logits.dtype, copy=False)
 
                     if logits.grad is None:
                         logits.grad = grad_input
@@ -2417,7 +2417,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
             logits_data = logits.data.reshape(flattened_dim, num_classes)
             
             ### Triton kernel expects long tensors (int32) labels ###
-            targets_data = targets.data.reshape(flattened_dim).astype("int32")
+            targets_data = targets.data.reshape(flattened_dim).astype("int32", copy=False)
        
             targets_flat = targets_data
             mask = (targets_flat != ignore_index)
@@ -2428,7 +2428,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
 
             loss_value = loss_cp.sum() / valid_counts
 
-            loss_value = loss_value.astype(logits.dtype)
+            loss_value = loss_value.astype(logits.dtype, copy=False)
 
             def _cross_entropy_backward(grad_output):
               
@@ -2440,7 +2440,7 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
                         logits_data,
                         targets_data,
                         logsumexp_cp
-                    ).reshape(*logits.shape).astype(logits.dtype)
+                    ).reshape(*logits.shape).astype(logits.dtype, copy=False)
            
                     grad_cp *= (grad_output / valid_counts) 
 

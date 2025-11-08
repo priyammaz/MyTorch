@@ -185,14 +185,14 @@ class Array:
     def T(self):
         return Array(self._array.T, device=self._device)
     
-    def astype(self, dtype):
+    def astype(self, dtype, copy=False):
         if self.dtype == dtype:
             return self
         if self._xp is np:
-            self._array = self._array.astype(dtype)
+            self._array = self._array.astype(dtype, copy=copy)
         else:
             with cp.cuda.Device(self._dev_id):
-                self._array = self._array.astype(dtype)
+                self._array = self._array.astype(dtype, copy=copy)
 
         return self
     

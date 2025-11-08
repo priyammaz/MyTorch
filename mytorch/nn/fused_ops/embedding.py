@@ -108,7 +108,7 @@ def embedding_backward_kernel(
 def fused_embedding_forward(embeddings, indices, use_dlpack=True):
     
     ### Only support int32 indexes ###
-    indices = indices.astype("int32")
+    indices = indices.astype("int32", copy=False)
 
     assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
     assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
@@ -219,7 +219,7 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
 def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
 
     ### Only support int32 indexes ###
-    indices = indices.astype("int32")
+    indices = indices.astype("int32", copy=False)
 
     assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
     assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"

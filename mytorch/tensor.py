@@ -1965,10 +1965,10 @@ class Tensor:
         else:
             return self.data.flatten()[0].item()
 
-    def astype(self, dtype):
+    def astype(self, dtype, copy=False):
 
         ### Update the Tensors Dtype using setter ###
-        self.data = self._data.astype(dtype)
+        self.data = self._data.astype(dtype, copy=copy)
 
         return self
         
@@ -2002,6 +2002,7 @@ class Tensor:
 ##################################################################
 
 def _tensor_from_array(func, device="cpu", dtype=None, requires_grad=False):
+
     arr = func() 
     return Tensor(arr, device=device, dtype=dtype or str(arr.dtype), requires_grad=requires_grad)
 
