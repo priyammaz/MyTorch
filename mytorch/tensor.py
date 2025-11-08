@@ -2020,7 +2020,7 @@ class Tensor:
 
         if not isinstance(parents, (list, tuple)):
             parents = (parents)
-        self._parents = tuple(weakref.ref(p) for p in parents if p is not None)
+        self._parents = self._parents + tuple(weakref.ref(p) for p in parents if p is not None)
 
     def item(self):
         if self.data.size != 1:
