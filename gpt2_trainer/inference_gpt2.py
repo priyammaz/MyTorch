@@ -1,6 +1,6 @@
 import os
 import mytorch
-from models.gpt2 import GPT2, GPT2Config
+from models.gpt2 import GPT2, GPT2Config, Cache
 import argparse
 import pickle
 import time
@@ -13,6 +13,8 @@ def parse_args():
     parser.add_argument("path_to_project_dir", type=str, help="Path to project directory")
     parser.add_argument("--checkpoint_dir", type=str)
     parser.add_argument("--fused", action="store_true")
+    parser.add_argument("--fp16", action="store_true")
+    parser.add_argument("--disable_cache", action="store_true")
     parser.add_argument("--max_tokens_gen", type=int)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -56,6 +58,10 @@ gpt2_config = GPT2Config(
     use_fused_ops=args.fused
 )
 model = GPT2(gpt2_config)
+if args.disable_cache:
+    cache = None
+else:
+    cache = Cache(gpt2_config)
 
 ### Get Weights ###
 if os.path.exists(os.path.join(args.path_to_project_dir, "final_checkpoint")):
@@ -78,6 +84,10 @@ state_dict = mytorch.load(path_to_model_weights)
 model.load_state_dict(state_dict)
 model = model.to(args.device)
 
+if args.fp16:
+    for name, param in model.named_parameters():
+        param.astype(mytorch.float16)
+
 ### Get starting tokens for model ###
 if not USE_TIKTOKEN:
     generated = [tokenizer_char2idx[c] for c in args.start]
@@ -88,8 +98,6 @@ seed = mytorch.Tensor(generated, dtype=mytorch.int32).unsqueeze(0).to(args.devic
 context = seed
 
 # Generation loop
-### Get Start time ###
-
 if args.compute_tok_per_sec:
     start_time = time.time()
     num_tokens_to_generate = args.max_tokens_gen if args.max_tokens_gen is not None else model_config["context_length"]
@@ -97,12 +105,27 @@ if args.compute_tok_per_sec:
 ### Start the print off with whatever our input was!
 print(args.start, end="", flush=True)
 for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model_config["context_length"]):
+    
     seed = mytorch.Tensor(
         generated[-model_config["context_length"]:], dtype=mytorch.int32
     ).unsqueeze(0).to(args.device)
+    
+    ### If we are using cache and the cache is not empty, the first forward pass ###
+    ### has already occured. This means we only need to pass in the last token in our ### 
+    ### seed as the keys/values already are inside cache to attend to ###
+    if not args.disable_cache and (cache.get_seq_len != 0):
+        seed = seed[:, -1:]
 
     with mytorch.no_grad():
-        pred = model(seed)
+        output = model(seed, cache=cache)
+
+    ### If we arent using cache the model will just return our logits ###
+    if args.disable_cache:
+        pred = output
+    ### If we are using the cache our model will return logits and cache, we can 
+    ### just replace our cache variable here to use in the next decoding step
+    else:
+        pred, cache = output    
 
     # Get logits for last position
     last_logits = pred[:, -1, :]
@@ -120,7 +143,8 @@ for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model
         mask[:, topk_idx] = last_logits[:, topk_idx]
         last_logits = mask
 
-    # Random sample
+    # Random sample (cast so we dont have precision errors) 
+    last_logits = last_logits.astype(mytorch.float32)
     exp_logits = mytorch.exp(last_logits - mytorch.max(last_logits))
     probs = exp_logits / mytorch.sum(exp_logits)
     next_id = mytorch.multinomial(probs, num_samples=1)[0].numpy().item()

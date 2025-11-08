@@ -1,3 +1,9 @@
+"""
+A nothing fancy GPT2 with a KV Cache integrated in for Inference Time!
+
+The gpt2-base model has only a sequence length of 1024 so you cant really appreciate
+the KV cache, but its there anyway! 
+"""
 import numpy as np
 import mytorch
 import mytorch.nn as nn
@@ -19,6 +25,65 @@ class GPT2Config:
     use_full_auto: bool = False
     use_fused_ops: bool = False
 
+class Cache:
+
+    """
+    Barebones KV Cache that stores Keys/Values in the [B x Heads x Seq Len x Head Dim] shape!
+    """
+    def __init__(self, config):
+
+        ### Counter for Number of Tokens in Cache ###
+        self._seen_tokens = 0
+
+        ### Key/Value Cache (List of Tensor, where list is over model layers) ###
+        ### We use these empty tensors as a placeholder ###
+        self.key_cache = [mytorch.Tensor([]) for _ in range(config.num_blocks)]
+        self.value_cache = [mytorch.Tensor([]) for _ in range(config.num_blocks)]
+
+    def __repr__(self):        
+
+        ### If Cache is Empty ###
+        if self.key_cache[0].shape == (0,):
+            cached_tokens = 0
+        else:
+            cached_tokens = self.key_cache[0].shape[-2]
+
+        return f"DyanmicCache(Num_Layers: {len(self.key_cache)} | Cached Tokens: {cached_tokens})"
+        
+    def update(self, key_states, value_states, layer_idx):
+        
+        ### Only iterate num tokens seen on the first layer ###
+        ### key_states (B x H x L x E)
+        ### value_states (B x H x L x E)
+
+        if layer_idx == 0:  
+            self._seen_tokens += key_states.shape[-2]
+
+      
+        ### Append New key/Value states to key/value cache ###
+        ### If we are starting then there is nothing so just fill it in ###
+        if self.get_seq_len(layer_idx) == 0:
+            self.key_cache[layer_idx] = key_states
+            self.value_cache[layer_idx] = value_states
+        
+        ### Otherwise we can concatenate the new key/value onto the old ones ###
+        else:
+            self.key_cache[layer_idx] = mytorch.concatenate([self.key_cache[layer_idx], key_states], dim=-2)
+            self.value_cache[layer_idx] = mytorch.concatenate([self.value_cache[layer_idx], value_states], dim=-2)
+   
+        return self.key_cache[layer_idx], self.value_cache[layer_idx]
+    
+    def get_seq_len(self, layer_idx=0):
+        
+        ### If Cache is Empty ###
+        if self.key_cache[layer_idx].shape == (0,):
+            cached_tokens = 0
+        else:
+            cached_tokens = self.key_cache[layer_idx].shape[-2]
+
+        return cached_tokens
+
+
 class Embeddings(nn.Module):
 
     def __init__(self, vocab_size, embed_dim, context_length, fused):
@@ -34,15 +99,17 @@ class Embeddings(nn.Module):
         ### Positional Embeddings ###
         self.position_embeddings = nn.Embedding(context_length, embed_dim, fused=self.fused)
 
-    def forward(self, input_ids):
+    def forward(self, 
+                input_ids, 
+                past_length=0):
 
         batch_size, seq_length = input_ids.shape
 
         ### Convert Tokens to Embeddings ###
         x = self.char_embeddings(input_ids)
-
+      
         ### Add Positional Information ###
-        avail_idx = mytorch.arange(start=0, end=seq_length).to(input_ids.device)
+        avail_idx = mytorch.arange(start=0, end=seq_length).to(input_ids.device) + past_length
         pos_embed = self.position_embeddings(avail_idx).reshape(1, seq_length, self.embed_dim)
         x = x + pos_embed
 
@@ -76,10 +143,10 @@ class Attention(nn.Module):
         ### Post Attention Projection ###
         self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto)
         self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
-
+  
         if not self.fused:
             self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p) # Currently only support attn dropout in non-fused
-            self.softmax = nn.Softmax(auto=auto, fused=fused)
+            self.softmax = nn.Softmax(auto=auto, fused=True)
 
             ### If we are not using fused attention we need to manually pass in our 
             ### attention mask! So lets just save it as a buffer right here!
@@ -87,7 +154,7 @@ class Attention(nn.Module):
             causal_mask = mytorch.masked_fill(mytorch.zeros((1,1,context_length, context_length)), causal_positions, value=float("-inf"))  
             self.register_buffer("causal_mask", causal_mask)
 
-    def forward(self, x):
+    def forward(self, x, cache=None, layer_idx=None):
   
         batch, seq_len, embed_dim = x.shape
 
@@ -102,23 +169,55 @@ class Attention(nn.Module):
 
         # Chunk last dim into q, k, v
         q, k, v = mytorch.chunk(qkv, 3, dim=-1)  # each [batch, num_heads, seq_len, head_dim]
-
+        
+        if cache is not None and layer_idx is not None:
+            k, v = cache.update(k, v, layer_idx)
+   
+        ### This branch ends up being about half as fast as fused (flash) attention. The main bottle neck is the 
+        ### softmax operation over long sequences. Naive softmax is pretty expensive! You can test this by
+        ### changing the softmax above to use fused softmax BUT you may as well just use flash attention if 
+        ### fused is available!
         if not self.fused:
-
+    
             # Compute attention scores
             scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
-     
-            masked_scores = scores + self.causal_mask[:, :, :seq_len, :seq_len].astype(scores.data.dtype)
 
-            softmax_attention = self.softmax(masked_scores, dim=-1)
+            # If our queries are a single input and we are doing attention with our k/v cache 
+            # which is by definition before the queries, then we dont really need a causal mask!
+            # thus we only need our masking when the cache is empty 
+            if (cache is not None) and (cache.get_seq_len == 0):
+                kv_seq_len = k.shape[-2]
+                scores = scores + self.causal_mask[:, :, :seq_len, :kv_seq_len].astype(scores.data.dtype)
+
+            softmax_attention = self.softmax(scores, dim=-1)
             dropped_attention = self.attn_drop(softmax_attention)
 
             # Attention output
             output = dropped_attention @ v
 
         else:
-   
-            output = F.scaled_dot_product_attention(q, k, v, is_causal=True)
+
+            ### We only need causal attention at the beginning, but after we are just passing in a single query ###
+            ### at a time, so causal no longer matters! So we check, if we pass in a cache AND the cache is not ###
+            ### empty then we know we are decoding with a single query token. If the cache is empty (but we do  ###
+            ### pass it in) then that is our first step that will fill the cache, use causal ###
+            is_causal = True
+            if (cache is not None) and (cache.get_seq_len() != 0):        
+                is_causal = False
+            
+            ### CAVEAT. Our flash attention isnt as flexible as the actual torch.nn.functional.sdpa. The thing is that 
+            ### if our queries are a different length from the keys and values (which it will be if using cache) then
+            ### then two thigns happen:
+
+            ### 1) This will actually trigger our cross attention branch (even though we arent doing cross attention its in
+            ###    same spirit of things). But remember that  our cross attention doesnt support causal 
+            ###    masking. This is OK though as when we are doing KV Cache, our query need to attend to ALL the keys/values
+            ###    as we are at the end of the sequence attending backwards, so no causality mask is needed
+
+            ### 2) In the very first forward pass with our input, we may have multiple tokens. This needs to be processed like 
+            ###    normal with a causal mask. Thus we had the check earlier, if our cache is empty use causal mask. The Q,K,V
+            ###    in the first forward pass will all have the same sequence length so this will trigger normal self attention
+            output = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
             
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
 
@@ -141,15 +240,14 @@ class FeedForward(nn.Module):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
 
-        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto)
+        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=True)
         self.activation = nn.GELU()
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
 
-        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto)
+        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=True)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
     def forward(self, x):
-
         x = self.intermediate_dense(x)
         x = self.activation(x)
         x = self.intermediate_dropout(x)
@@ -184,9 +282,8 @@ class TransformerBlock(nn.Module):
         self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto)
         self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
 
-    def forward(self, x):
-        
-        attn_out = self.attention(self.layernorm1(x))
+    def forward(self, x, cache=None, layer_idx=None):
+        attn_out = self.attention(self.layernorm1(x), cache=cache, layer_idx=layer_idx)
         x = x + attn_out
         mlp_out = self.feedforward(self.layernorm2(x))
         x = x + mlp_out
@@ -203,7 +300,7 @@ class GPT2(nn.Module):
         self.embeddings = Embeddings(vocab_size=config.vocab_size, 
                                      embed_dim=config.embed_dim, 
                                      context_length=config.max_seq_len,
-                                     fused=config.use_fused_ops)
+                                     fused=True)
         
         self.blocks = nn.ModuleList([
             TransformerBlock(embed_dim=config.embed_dim, 
@@ -235,15 +332,24 @@ class GPT2(nn.Module):
         ### Weight tying ###
         self.lm_head.weight = self.embeddings.char_embeddings.weight
 
-    def forward(self, x):
+    def forward(self, x, cache=None):
 
-        x = self.embeddings(x)
+        ### How many tokens have we processed already? 
+        past_length = cache.get_seq_len() if cache is not None else 0
+      
+        ### Get our embeddings ###
+        x = self.embeddings(x, past_length)
 
-        for block in self.blocks:
-            x = block(x)
+        for layer_idx, block in enumerate(self.blocks):
+            x = block(x, cache=cache, layer_idx=layer_idx)
+            
 
         x = self.final_layer_norm(x)    
         x = self.lm_head(x)
+        
+        ### Return the KV Cache if we want to use it again (dont really care durning training) ###
+        if cache is not None:
+            return x, cache
         
         return x
     
