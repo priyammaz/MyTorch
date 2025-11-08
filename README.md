@@ -386,6 +386,8 @@ Run the following and answer the questions!
 mytorchrun config
 ```
 
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/mytorchrun_config.png?raw=true" alt="drawing" width="600"/>
+
 ### Verify Environment 
 
 To make sure your environment is properly configured you can run the following and check for errors
@@ -785,8 +787,8 @@ I am not even close to done! Here are some of the stuff I want to work on next t
 - [x] KV Cache for Inference
 - [ ] Reimplement and Reproduce (something like) Llama, closer to nanoChat
   - [ ] Rotary Embeddings (kernel)
-  - [ ] Repeat
-  - [ ] Optimizer Groups
+  - [x] Repeat
+  - [x] Optimizer Groups
   - [ ] Better inference wrapper
   - [ ] Swiglu Kernel
   - [ ] RMSNorm (kernel)
