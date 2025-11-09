@@ -548,7 +548,6 @@ class Accelerator:
             if self.comm is not None:
                 for param in self.model.parameters():
                     if hasattr(param, "grad") and param.grad is not None:
-                        out = cp.empty_like(param.grad)
 
                         ### Quick check. In our backward pass there are two options:
                         ### - Auto backward which will use our Array type
@@ -558,9 +557,10 @@ class Accelerator:
                         ### This means if we have an Array type we need to get the "_array" that hold the 
                         ### actual underlying data in Cupy for NCCL all_reduce. But if its already a 
                         ### cp.ndarray theres nothing to get, so we just have a quick sanity check here
-                        self.comm.all_reduce(param.grad._array if hasattr(param.grad, "_array") else param.grad, out, op="sum")
-                        param.grad[:] = out / self.world_size
-
+                        self.comm.all_reduce(param.grad._array/self.world_size if hasattr(param.grad, "_array") else param.grad/self.world_size, # <- in_array
+                                             param.grad._array/self.world_size if hasattr(param.grad, "_array") else param.grad/self.world_size, # <- out_array
+                                             op="sum")
+                        
             ### Cast Grads back to FP32 to Update our FP32 Copy of Weights ###
             if self.mixed_precision and not skip_step:
         
