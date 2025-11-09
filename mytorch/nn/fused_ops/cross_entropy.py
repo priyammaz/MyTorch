@@ -1,7 +1,7 @@
 """
 Inspired by Unsloth: https://github.com/unslothai/unsloth/blob/main/unsloth/kernels/cross_entropy_loss.py
 
-Also, CrossEntropy is typically unsafe at float16, so these modules expect float32 inputs always!
+Also, CrossEntropy is typically unsafe at float16, so all intermediate vars are computed/stored in fp32
 """
 import torch
 import cupy as cp
@@ -118,7 +118,8 @@ def cross_entropy_backward(
     logits_ptr,            # Original logits for loading (N x NUM_CLASSES)
     logits_row_stride,     # Element stride for rows
     logsumexp_ptr,         # (N,) precomputed logsumexp
-    labels_ptr,            # (N,) labels (int64)
+    labels_ptr,            # (N,) labels (int32)
+    scale,                 # scaler
     NUM_CLASSES: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
     DTYPE_FLAG: tl.constexpr
@@ -175,6 +176,9 @@ def cross_entropy_backward(
     # Zero out ignored labels
     y = tl.where(label_idx != -100, y, 0.0)
     
+    # Scale grads 
+    y = y * scale
+
     # Store to correct location
     tl.store(logits_ptr + col_offsets, y, mask=mask)
 
@@ -236,17 +240,19 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
         return loss, logsumexp
 
 def fused_cross_entropy_backward(
-        logits, labels, logsumexp, use_dlpack=True
+        logits, labels, logsumexp, scale, use_dlpack=True
 ):
     
     """
     We will chunk our NUM_CLASSES len vector into chunks of BLOCK_SIZE
 
     Also, this is the last thing in our model. There is no more
-    ops after Cross Entropy. So our dloss is just a bunch of ones!
-    We can create that in here manually as our "upstream" grad. We 
-    already do this in our .backward() in our tensor, but that only
-    returns a single 1
+    ops after Cross Entropy.
+
+    The grad output is just a single value. It will be 1 for fp32 training but some scale in 
+    fp16 training (dynamic grad scaling!) Our valid_Counts is also just some constant so 
+    instead of multiplying the output of grad_cp by this scale, we pass it into our kernel to
+    just do it all at once! 
     """
     N, C = logits.shape
 
@@ -265,7 +271,8 @@ def fused_cross_entropy_backward(
             logits,
             logits.stride(0),
             logsumexp, 
-            labels, 
+            labels,
+            scale, 
             C, 
             DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1
         )
@@ -279,6 +286,7 @@ def fused_cross_entropy_backward(
             logits.strides[0] // logits.itemsize,
             logsumexp.data.ptr, 
             labels.data.ptr, 
+            scale,
             C, 
             DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1
         )
