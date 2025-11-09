@@ -10,6 +10,8 @@ can manually define them as well which is auto=False
 Although we use np, they get piped through our Array ops
 so they remain cpu/gpu agnostic 
 
+
+
 """
 import os
 import numpy as np
@@ -51,7 +53,8 @@ def linear(input, weight, bias=None, auto=False, fused=False, fused_bwd=False):
 
     ### Set Fused Ops Based on Environment Variable ###
     fused = fused or ALWAYS_USE_FUSED
-
+    fused_bwd = fused or ALWAYS_USE_FUSED
+    fused_bwd = True
     ### Normally data is in the shape of (N x I)
     reshaped = False
     *dims, in_features = input.shape
@@ -67,6 +70,9 @@ def linear(input, weight, bias=None, auto=False, fused=False, fused_bwd=False):
     if len(dims) > 1:
         reshaped = True
     
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto: # We can only use methods defined in our Tensor class
         
         ### Flatten Data Dimensions to (*, in_features) ###
@@ -83,7 +89,11 @@ def linear(input, weight, bias=None, auto=False, fused=False, fused_bwd=False):
         return output
 
     else: # Manual forward and backward
-        
+
+        ###################
+        ### MANUAL GRAD ###
+        ###################
+
         if (fused and not FUSED_AVAIL) or (fused_bwd and not FUSED_AVAIL):
             if not FLAG_ONCE:
                 warnings.warn("Fused Ops not available, defaulting to normal ops, install Triton for Fused Operations!")
@@ -102,6 +112,9 @@ def linear(input, weight, bias=None, auto=False, fused=False, fused_bwd=False):
         if reshaped:
             input_xp = input_xp.reshape(-1, in_features)
 
+        #########################
+        ### FUSED MANUAL GRAD ###
+        #########################
         if fused:
             
             ### This is a fused kernel to just do the bias and matmul ###
@@ -269,6 +282,9 @@ def conv2d(input, weight, bias=None, stride=1, padding=0, dilation=1, fused=Fals
     H_out = (H + 2*P - K)//S + 1
     W_out = (H + 2*P - K)//S + 1
     
+    ###################
+    ### MANUAL GRAD ###
+    ###################
     if not fused:
 
         ### Get Backend ###
@@ -770,6 +786,9 @@ def conv1d(input, weight, bias=None, stride=1, padding=0, dilation=1, fused=Fals
     if not fused and dilation != 1:
         raise ValueError("Non-Fused Conv2d, Only Supports Dilation of 1")
     
+    ###################
+    ### MANUAL GRAD ###
+    ###################
     if not fused:
         ### Get Backend ###
         xp = input.xp
@@ -961,6 +980,10 @@ def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_paddi
     so just accumulate all those contributions up and send them back! 
 
     """
+    ###################
+    ### MANUAL GRAD ###
+    ###################
+
     ### Set Backend ###
     xp = input.xp
     input_cp = input.data
@@ -1116,6 +1139,10 @@ def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_paddi
     """
     Exactly the same as the conv_transpose2d, just with less dimensions!
     """
+    
+    ###################
+    ### MANUAL GRAD ###
+    ###################
 
     xp = input.xp
     input_cp = input.data
@@ -1231,6 +1258,10 @@ def maxpool2d(input, kernel_size, stride=None, padding=0):
     stride: int or tuple
     padding: int
     """
+
+    ###################
+    ### MANUAL GRAD ###
+    ###################
 
     ### Get Backend ###
     xp = input.xp
@@ -1424,6 +1455,10 @@ def averagepool2d(input, kernel_size, stride=None, padding=0):
         padding: int
     """
 
+    ###################
+    ### MANUAL GRAD ###
+    ###################
+
     ### Get Backend ###
     xp = input.xp
 
@@ -1546,12 +1581,18 @@ def embedding(indices, weight, fused=False):
 
     No need for "auto" here, __getitem__ implemented in Tensor class
     """
-
+    
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if not fused:
         return weight[indices]
     
     else:
 
+        #########################
+        ### FUSED MANUAL GRAD ###
+        #########################
         if hasattr(indices.data, "_array"):
             indices = indices.data._array
         else:
@@ -1589,7 +1630,6 @@ def embedding(indices, weight, fused=False):
 
         return output
 
-
 def dropout(input, dropout_p, training=True, auto=False):
 
     if not training or dropout_p == 0.0:
@@ -1600,10 +1640,17 @@ def dropout(input, dropout_p, training=True, auto=False):
     ratio = 1 / (1 - dropout_p)
     mask *= ratio
 
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
         return input * mask
 
     else:
+
+        ###################
+        ### MANUAL GRAD ###
+        ###################
 
         out_data = input.data * mask
         
@@ -1666,6 +1713,9 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Fa
     if len(dims) > 1:
         reshaped = True
 
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
         
         if reshaped:
@@ -1691,6 +1741,9 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Fa
                 FLAG_ONCE = True
             fused = False
 
+        ###################
+        ### MANUAL GRAD ###
+        ###################
         if not fused:
             input_cp = input.data
             gamma_cp = weight.data
@@ -1766,6 +1819,10 @@ def layernorm(input, weight, bias, eps=1e-5, training=True, auto=False, fused=Fa
                         input.grad += grad_input
 
         else:
+            
+            #########################
+            ### FUSED MANUAL GRAD ###
+            #########################
 
             assert "cuda" in input.device, "Fused Operations can only be performed on Cuda Tensors!"
             
@@ -1869,6 +1926,10 @@ def batchnorm(input, weight, bias,
     running_var: (C,)
     """
     
+    ###################
+    ### MANUAL GRAD ###
+    ###################
+
     ### Get Backend ###
     xp = input.xp 
 
@@ -1964,6 +2025,9 @@ def rmsnorm():
 ###################
 def sigmoid(x, auto=False):
 
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
         return 1 / (1 + (-x).exp())
     else:
@@ -1990,23 +2054,39 @@ def sigmoid(x, auto=False):
 
         return out
 
-def relu(input, auto=False):
+def relu(input, auto=False, fused=False):
+    # fused = True
 
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
         mask = Tensor(np.where(input.data < 0, 0, 1).astype(input.dtype, copy=False))
         return input * mask
     else:
-  
-        input.data[input.data < 0] = 0
+        
+        if not fused:
+            mask = (input.data < 0)
+            input.data[mask] = 0
 
-        def _relu_backward(input_grad):
-            if input.requires_grad:
-                grad_input = input_grad * (input.data > 0)
+            def _relu_backward(output_grad):
+                if input.requires_grad:
+                    # grad_input = input_grad * (input.data > 0)
+                    output_grad[mask] = 0
+
+                    if input.grad is None:
+                        input.grad = output_grad
+                    else:
+                        input.grad += output_grad
+        else:
+            input.data = FO.fused_activation_forward(input.data, act_func="relu")
+            def _relu_backward(output_grad):
+                output_grad = FO.fused_activation_backward(input.data, output_grad, act_func="relu")
 
                 if input.grad is None:
-                    input.grad = grad_input
+                        input.grad = output_grad
                 else:
-                    input.grad += grad_input
+                    input.grad += output_grad
 
         requires_grad = input.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(
@@ -2029,7 +2109,7 @@ def gelu(x):
     gelu as described in https://arxiv.org/pdf/2305.12073
 
     Forward method is Equation 24
-    Backward methdo is Equation 42-43
+    Backward methdod is Equation 42-43
     """
 
     data = x.data
@@ -2083,8 +2163,10 @@ def softmax(x, dim=-1, auto=False, fused=False):
     ### Set Fused Ops Based on Environment Variable ###
     fused = fused or ALWAYS_USE_FUSED
 
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
-
         max_x = x.max(dim=dim, keepdims=True)
         x_shifted = x - max_x
         exp_x = x_shifted.exp()
@@ -2224,6 +2306,9 @@ def softmax(x, dim=-1, auto=False, fused=False):
 
 def leaky_relu(input, negative_slope=0.1, auto=False):
 
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
         mask_pos = Tensor(np.where(input.data > 0, 1, 0).astype(input.dtype, copy=False))
         mask_neg = 1 - mask_pos
@@ -2311,6 +2396,9 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
     ### Make sure targets are always int32 ###
     targets = targets.astype("int32", copy=False)
     
+    #########################
+    ##### FULL AUTOGRAD #####
+    #########################
     if auto:
         
         ### Flatten Logits ###
@@ -2352,6 +2440,9 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
                 FLAG_ONCE = True
             fused = False
 
+        ###################
+        ### MANUAL GRAD ###
+        ###################
         if not fused:
             # Our Logits will be some (N x NUM_CLASSES)
             # Our Targets will be some (N, ) where each value in the target 
@@ -2410,16 +2501,19 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
         
         else:
             
+            #########################
+            ### FUSED MANUAL GRAD ###
+            #########################
             assert "cuda" in logits.device, "Fused Operations can only be performed on Cuda Tensors!"
 
             logits_data = logits.data.reshape(flattened_dim, num_classes)
-            
+
             ### Triton kernel expects long tensors (int32) labels ###
             targets_data = targets.data.reshape(flattened_dim).astype("int32", copy=False)
        
             targets_flat = targets_data
             mask = (targets_flat != ignore_index)
-            valid_counts = mask.sum()
+            valid_counts = mask.sum().get().item()
             
             # Triton kernel forward
             loss_cp, logsumexp_cp = FO.fused_cross_entropy_forward(logits_data, targets_data)
@@ -2429,18 +2523,19 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
             loss_value = loss_value.astype(logits.dtype, copy=False)
 
             def _cross_entropy_backward(grad_output):
-              
-                ### The loss is the last thing in our model ###
-                ### so our upstream grad is just a bunch of ones so nothing ###
-                ### to really use here! ###
+                
+                ### The grad output is just a single value. It will be 1 for fp32 training but some scale in ###
+                ### fp16 training (dynamic grad scaling!) Our valid_Counts is also just some constant so ###
+                ### instead of multiplying the output of grad_cp by this scale, we pass it into our kernel to ###
+                ### just do it all at once! ###
                 if logits.requires_grad:
+
                     grad_cp = FO.fused_cross_entropy_backward(
                         logits_data,
                         targets_data,
-                        logsumexp_cp
+                        logsumexp_cp,
+                        scale=(grad_output.get().item() / valid_counts)
                     ).reshape(*logits.shape).astype(logits.dtype, copy=False)
-           
-                    grad_cp *= (grad_output / valid_counts) 
 
                     if logits.grad is None:
                         logits.grad = grad_cp
@@ -2461,12 +2556,19 @@ def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
 
         return out
 
-def mse_loss(pred, labels, auto=False):
-
+def mse_loss(pred, labels, auto=False):##
+    
+    #####################
+    ### FULL AUTOGRAD ###
+    #####################
     if auto:
         return ((pred - labels)**2).mean()
 
-    else:
+    else:   
+
+        ###################
+        ### MANUAL GRAD ###
+        ###################
 
         diff = pred.data - labels.data
         out_data = (diff**2).mean()
