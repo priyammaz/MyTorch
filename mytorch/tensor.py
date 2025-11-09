@@ -1,3 +1,4 @@
+import cupy as cp
 import numpy as np
 import weakref
 from functools import wraps
@@ -185,7 +186,7 @@ class Tensor:
                  retain_graph=False, 
                  time_backward=False,
                  num_ops_to_show=-1): # -1 will show all of them!
-        
+        # time_backward=True
         if retain_graph:
             if not self._warn_retain_grad:
                 warnings.warn(
@@ -219,7 +220,6 @@ class Tensor:
         build_topo(self)
 
         # Iterate in reverse topological order
-
         if time_backward:
             timings = defaultdict(float) 
 
@@ -229,13 +229,20 @@ class Tensor:
                 grad_fn_name = getattr(t, "grad_fn_name", grad_fn.__class__.__name__)
 
                 if time_backward:
-                    start_time = time.perf_counter()
+                    start_gpu = cp.cuda.Event()
+                    end_gpu = cp.cuda.Event()
+                    start_gpu.record()
 
                 t.grad_fn(t.grad)  # accumulate into parents
                 
                 if time_backward:
-                    end_time = time.perf_counter()
-                    timings[grad_fn_name] += (end_time - start_time)
+                    end_gpu.record()
+                    end_gpu.synchronize()
+                    t_gpu = cp.cuda.get_elapsed_time(start_gpu, end_gpu)
+                    # This will rewrite the op if it occurs multiple times, 
+                    # but thats ok its just to get a general idea for the ops
+                    # backward past cost
+                    timings[grad_fn_name] = t_gpu
 
                 ### Drop references immediately ###
                 retain_this = getattr(t, "_retain_grad", False) or retain_graph
@@ -253,7 +260,7 @@ class Tensor:
             print(f"\nTop {num_ops_to_show} most time-consuming backward functions:")
             sorted_timings = sorted(timings.items(), key=lambda x: x[1], reverse=True)[:num_ops_to_show]
             for name, total_time in sorted_timings:
-                print(f"{name:<30s} {total_time * 1000:.3f} ms total")
+                print(f"{name:<30s} {total_time:.3f} ms total")
 
     ###################################
     ######## BINARY OPERATIONS ########
