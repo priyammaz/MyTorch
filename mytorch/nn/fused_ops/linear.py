@@ -128,6 +128,13 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
         w_torch = torch.utils.dlpack.from_dlpack(w)
         b_torch = torch.utils.dlpack.from_dlpack(b) if b is not None else None
 
+        if not a_torch.is_contiguous():
+            a_torch = a_torch.contiguous()
+        if not w_torch.is_contiguous():
+            w_torch = w_torch.contiguous()
+        if b is not None and not b.is_contiguous():
+            b = b.contiguous()
+            
         # Allocate output
         y_torch = torch.empty((B, O), device=a_torch.device, dtype=a_torch.dtype)
 
@@ -150,6 +157,14 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
         return cp.from_dlpack(y_torch)
 
     else:
+
+        if not a.flags.c_contiguous:
+            a = cp.ascontiguousarray(a)
+        if not w.is_contiguous():
+            w = cp.ascontiguousarray(w)
+        if b is not None and not b.is_contiguous():
+            b = cp.ascontiguousarray(b)
+
         with cp.cuda.Device(a.device.id):
             y = cp.empty((B, O), dtype=a.dtype)
 
