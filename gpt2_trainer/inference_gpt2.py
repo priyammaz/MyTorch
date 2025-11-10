@@ -30,6 +30,13 @@ def parse_args():
 
 args = parse_args()
 
+### Fused Ops need GPUs ###
+if args.fused and args.device == "cpu":
+    print("Fused Ops Need GPUS! Setting to `cuda:0`")
+    device = "cuda:0"
+else:
+    device = args.device
+
 ### Parse our Config File ###
 path_to_model_config = os.path.join(args.path_to_project_dir, "model_meta.pkl")
 with open(path_to_model_config, "rb") as f:
@@ -82,7 +89,7 @@ else:
         
 state_dict = mytorch.load(path_to_model_weights)
 model.load_state_dict(state_dict)
-model = model.to(args.device)
+model = model.to(device)
 
 if args.fp16:
     for name, param in model.named_parameters():
@@ -94,7 +101,7 @@ if not USE_TIKTOKEN:
 else:
     generated = tokenizer.encode(args.start)
 
-seed = mytorch.Tensor(generated, dtype=mytorch.int32).unsqueeze(0).to(args.device)
+seed = mytorch.Tensor(generated, dtype=mytorch.int32).unsqueeze(0).to(device)
 context = seed
 
 # Generation loop
@@ -108,8 +115,8 @@ for _ in range(args.max_tokens_gen if args.max_tokens_gen is not None else model
     
     seed = mytorch.Tensor(
         generated[-model_config["context_length"]:], dtype=mytorch.int32
-    ).unsqueeze(0).to(args.device)
-    
+    ).unsqueeze(0).to(device)
+
     ### If we are using cache and the cache is not empty, the first forward pass ###
     ### has already occured. This means we only need to pass in the last token in our ### 
     ### seed as the keys/values already are inside cache to attend to ###
