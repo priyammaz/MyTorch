@@ -177,6 +177,7 @@ class Attention(nn.Module):
         ### softmax operation over long sequences. Naive softmax is pretty expensive! You can test this by
         ### changing the softmax above to use fused softmax BUT you may as well just use flash attention if 
         ### fused is available!
+       
         if not self.fused:
     
             # Compute attention scores
@@ -220,11 +221,11 @@ class Attention(nn.Module):
             output = F.scaled_dot_product_attention(q, k, v, is_causal=is_causal)
             
         output = output.transpose(1, 2).reshape(batch, seq_len, embed_dim)
-
+  
         # Output projection
         output = self.out_proj(output)
         output = self.proj_drop(output)
-
+        
         return output
     
 class FeedForward(nn.Module):
@@ -240,11 +241,9 @@ class FeedForward(nn.Module):
                  fused=False):
         super().__init__()
         hidden_size = embed_dim * mlp_ratio
-
         self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=fused)
-        self.activation = nn.GELU()
+        self.activation = nn.GELU(fused=fused)
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
-
         self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=fused)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
@@ -252,7 +251,6 @@ class FeedForward(nn.Module):
         x = self.intermediate_dense(x)
         x = self.activation(x)
         x = self.intermediate_dropout(x)
-
         x = self.out_proj(x)
         x = self.output_dropout(x)
 
