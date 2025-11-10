@@ -27,7 +27,7 @@ class DataLoader:
 
     def __init__(self, dataset, batch_size=4, shuffle=True, 
                  num_workers=0, prefetch_factor=2, collate_fn=None,
-                 timeout=1):
+                 timeout=30):
 
         """
         Args:
@@ -48,7 +48,6 @@ class DataLoader:
         self.prefetch = prefetch_factor  # number of batches to prefetch
         self.collate_fn = collate_fn if collate_fn is not None else self.default_collate
         self.timeout = timeout
-
         self.indices = arange(len(dataset))
         
         if self.num_workers > 0:
@@ -60,6 +59,7 @@ class DataLoader:
         self.lock = threading.Lock() # Can use to makes sure before a thread can access a shared resource it must aquire a lock
         self.stop_signal = threading.Event() # enables inter-thread comm. Initialized as true, can be toggled
         self.current_idx = 0
+        self.worker_finished_count = 0
 
     def default_collate(self, batch):
         """
@@ -85,9 +85,10 @@ class DataLoader:
             if self.current_idx >= len(self.dataset):
                 raise StopIteration
             
-            batch_indices = self.indices[self.current_idx:self.current_idx + self.batch_size]
-            self.current_idx += self.batch_size
-
+            end_idx = min(self.current_idx + self.batch_size, len(self.dataset))
+            batch_indices = self.indices[self.current_idx:end_idx]
+            self.current_idx = end_idx
+            
         return batch_indices
 
     def _worker_loop(self):
@@ -95,25 +96,38 @@ class DataLoader:
         ### While there is data keep storing in the queue ###
         try:
             while not self.stop_signal.is_set():
-                batch_indices = self._get_next_batch_indices()
-                batch = [self.dataset[i] for i in batch_indices]
-                batch_array = self.collate_fn(batch)
-                self.queue.put(batch_array)
+
+                try:
+                    batch_indices = self._get_next_batch_indices()
+                    batch = [self.dataset[i] for i in batch_indices]
+                    batch_array = self.collate_fn(batch)
+
+                    ### Check stop signal before putting ###
+                    if not self.stop_signal.is_set():
+                        self.queue.put(batch_array)
+                except StopIteration:
+                    break
         
-        ### once the _get_next_batch_indices() raises StopIteration ###
-        except StopIteration:
-            pass
+        ### Put exception in queue so the main thread can get it ###
+        except Exception as e:
+            self.queue.put(e)
 
         ### If we are done, just add a None to our Queue so we can ###
         ### identify later that this is over and we should exit ###
         finally:
-            self.queue.put(None)
+
+            ### Track worker completion ###
+            with self.lock:
+                self.worker_finished_count += 1
+                if self.worker_finished_count == self.num_workers:
+                    self.queue.put(None)
 
     def __iter__(self):
 
         ### __iter__ starts the iteration of our object. Go ahead and ###
         ### restart the index and stop_signal flag should be False ###
         self.current_idx = 0
+        self.worker_finished_count = 0
         self.stop_signal.clear()
         
         ### Random shuffle ###
@@ -132,12 +146,13 @@ class DataLoader:
                     break
 
         ### Spawn workers to start filling queue asynchronously ###
-        self.workers = []
-        for _ in range(self.num_workers):
-            t = threading.Thread(target=self._worker_loop, daemon=True)
-            t.start()
-            self.workers.append(t)
-
+        if self.num_workers > 0:
+            self.workers = []
+            for _ in range(self.num_workers):
+                t = threading.Thread(target=self._worker_loop, daemon=True)
+                t.start()
+                self.workers.append(t)
+        
         return self
 
     def __next__(self):
@@ -148,24 +163,60 @@ class DataLoader:
             batch = [self.dataset[i] for i in batch_indices]
             return self.collate_fn(batch)
 
-        ### Otherwise keep grabbing batches until StopIteration ###
-        while True:
+        try:
+
             batch = self.queue.get(timeout=self.timeout)
-            if batch is None: # this is the None we inserted earlier
-                # Re-insert the None again so the other workers can see this None 
-                # as well. Otherwise we would just remove the None and the other 
-                # workers could just keep going
-                self.queue.put(None)
+
+            if isinstance(batch, Exception):
+                raise batch
+            
+            if batch is None:
                 raise StopIteration
+            
             return batch
+        
+        except queue.Empty:
+            # If queue is empty after timeout, check if workers are still alive
+            alive_workers = [w for w in self.workers if w.is_alive()]
+            if not alive_workers:
+                raise StopIteration
+            else:
+                raise RuntimeError(
+                    f"DataLoader timeout after {self.timeout}s. "
+                    f"Workers may be blocked or dataset loading is too slow. "
+                    f"Try increasing timeout or reducing num_workers."
+                )
+
+        # ### Otherwise keep grabbing batches until StopIteration ###
+        # while True:
+        #     batch = self.queue.get(timeout=self.timeout)
+        #     if batch is None: # this is the None we inserted earlier
+        #         # Re-insert the None again so the other workers can see this None 
+        #         # as well. Otherwise we would just remove the None and the other 
+        #         # workers could just keep going
+        #         self.queue.put(None)
+        #         raise StopIteration
+        #     return batch
     
     def shutdown(self):
         
         ### Sets stop_signal to True telling all workers to stop collecting ###
-        self.stop_signal.set()
-        for t in self.workers:
-            t.join(timeout=1)
-        self.workers.clear()
+
+        if self.num_workers > 0:
+            self.stop_signal.set()
+
+            if self.queue is not None:
+                while not self.queue.empty():
+                    try:
+                        self.queue.get_nowait()
+                    except queue.Empty:
+                        break
+        
+        
+            for t in self.workers:
+                t.join(timeout=5)
+                
+            self.workers.clear()
     
     def __del__(self):
         """
