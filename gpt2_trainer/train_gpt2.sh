@@ -1,5 +1,4 @@
 #!/bin/bash
-
 NUM_GPUS=1
 PER_GPU_BATCH_SIZE=32
 TARGET=""
@@ -103,10 +102,8 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu 16 \
-            --gradient_accumulation_steps 4 \
+            --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --tokens_per_batch 491520  \
-            --use_chinchilla \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
@@ -128,8 +125,8 @@ case "$TARGET" in
             --dropout_p 0.0 \
             --path_to_data data/shakespeare \
             --train_iterations 5000 \
-            --eval_interval 1000 \
-            --eval_iterations 200 \
+            --eval_interval 100 \
+            --eval_iterations 50 \
             --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --gradient_accumulation_steps 1 \
             --max_lr 1e-3 \
