@@ -321,15 +321,12 @@ pbar = tqdm(range(train_iterations),
             disable=not accelerator.is_main_process(),
             initial=completed_steps)
 
-t0 = None
+
+t0 = time.time()
 train = True
 while train:
 
-    for inputs, targets in trainloader:
-        
-        # Time Batch 
-        if t0 is None:
-            t0 = time.time()
+    for idx, (inputs, targets) in enumerate(trainloader):
 
         # Move to correct device 
         inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
@@ -350,12 +347,12 @@ while train:
 
         ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
         if accelerator.sync_grad:
-            
+    
             ### Get Time and reset start time ###
             t1 = time.time()
             dt = t1 - t0
-            t0 = None
-            
+            t0 = t1
+       
             ### Iter ###
             completed_steps += 1
             pbar.update(1)
