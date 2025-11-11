@@ -11,7 +11,8 @@ class Linear(Module):
                  out_features, 
                  bias=True, 
                  auto=False, 
-                 fused=False):
+                 fused=False,
+                 act_func=None):
         
         super().__init__()
         self.in_features = in_features
@@ -19,6 +20,7 @@ class Linear(Module):
         self.bias = bias
         self.auto = auto
         self.fused = fused
+        self.act_func = act_func
         
         self.weight = mytorch.zeros((out_features, in_features), requires_grad=True)
         k = math.sqrt(1 / in_features)
@@ -42,6 +44,6 @@ class Linear(Module):
         return f"in_features={self.in_features}, out_features={self.out_features}, bias={self.use_bias}"
     
     def forward(self, x):
-        output = F.linear(x, weight=self.weight, bias=self.bias, auto=self.auto, fused=self.fused)
+        output = F.linear(x, weight=self.weight, bias=self.bias, auto=self.auto, fused=self.fused, act_func=self.act_func)
         return output
     

@@ -25,7 +25,7 @@ from mytorch import Tensor
 from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
 from mytorch.nn.functional.utils import get_inner_array, get_inner_inner_array
-from ..fused_ops import fused_linear_forward, fused_grouped_matmul
+from ..fused_ops import fused_linear_forward, fused_grouped_matmul, fused_activation_backward
 
 def reshape_for_linear(x):
 
@@ -47,7 +47,7 @@ def reshape_for_linear(x):
    
     return x, dims, reshaped
 
-def auto_linear(input, weight, bias=None):
+def auto_linear(input, weight, bias=None, *args):
 
     """
     auto_linear will leverage our autograd system
@@ -66,7 +66,7 @@ def auto_linear(input, weight, bias=None):
 
     return output
 
-def manual_linear(input, weight, bias=None):
+def manual_linear(input, weight, bias=None, *args):
 
     """
     manual_linear will manually pass the gradients 
@@ -146,7 +146,7 @@ def manual_linear(input, weight, bias=None):
         
     return output
 
-def fused_linear(input, weight, bias=None):
+def fused_linear(input, weight, bias=None, act_func=None):
 
     """
     fused_linear will use triton kernels to do 
@@ -162,16 +162,27 @@ def fused_linear(input, weight, bias=None):
         bias_arr = get_inner_inner_array(bias)
     
     ### Perform the Fused Forward Pass ###
-    output = fused_linear_forward(
-        input_arr, weight_arr, bias_arr if bias is not None else None
+    outputs = fused_linear_forward(
+        input_arr, weight_arr, bias_arr if bias is not None else None, act_func=act_func
     )
 
+    ### If we use an activation function we get both the pre/post activation for backprop ###
+    if act_func is not None:
+        preact_output, output = outputs
+    else:
+        output, _ = outputs
+ 
     if reshaped_flag:
         output = output.reshape(*dims, out_features)
 
     ### We will capture our variables as a closure ###
     def _linear_backward(grad_output):
-            
+
+        ### If we had an activation func in the forward pass, we first need to backprop
+        ### Through it in the backward pass ###
+        if act_func is not None: 
+            grad_output = fused_activation_backward(preact_output, grad_output, act_func=act_func)
+
         ### Our gradients are coming in the shape of (*, O) ###
         ### But our operation happened in the shape of (N x O) ###
         ### So change our grad_output shape to that by flattening ###
@@ -224,17 +235,22 @@ def fused_linear(input, weight, bias=None):
         
     return output 
 
-def linear(input, weight, bias=None, auto=False, fused=False):
+def linear(input, weight, bias=None, auto=False, fused=False, act_func=None):
 
     """
     This toggles between the different methods implemented!
     """
-
+    _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
+    if not _use_fused and act_func is not None:
+        raise Exception("linear layer act_func only supported for fused operations!")
     if auto:
+        if fused:
+            raise Exception("Auto methods cannot use fused activations")
+        if act_func is not None:
+            raise Exception("Auto methods cannot fuse activation functions")
         return auto_linear(input, weight, bias)
     else:
-        _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
         op = fused_linear if _use_fused else manual_linear
         if fused and op is manual_linear:
             CHECKS.warn_triton_missing()
-        return op(input, weight, bias) 
+        return op(input, weight, bias, act_func) 

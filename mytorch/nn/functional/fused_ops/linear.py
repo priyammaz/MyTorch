@@ -19,6 +19,7 @@ import cupy as cp
 import torch
 import triton
 import triton.language as tl
+from .activations import activation_switcher_forward, _avail_activations
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 
 def get_cuda_autotune_config():
@@ -41,16 +42,31 @@ def get_cuda_autotune_config():
 @triton.autotune(configs=get_cuda_autotune_config(), key=['M', 'N', 'K'])
 @triton.jit
 def fused_linear_forward_kernel(
-    input_ptr, weight_ptr, out_ptr, bias_ptr,
+    input_ptr, 
+    weight_ptr, 
+    postact_ptr, 
+    preact_ptr, 
+    bias_ptr,
     M, N, K,
-    stride_am, stride_ak, stride_bk, stride_bn, stride_cm, stride_cn,
-    BLOCK_SIZE_M: tl.constexpr, BLOCK_SIZE_N: tl.constexpr, BLOCK_SIZE_K: tl.constexpr,
-    GROUP_SIZE_M: tl.constexpr, DTYPE_FLAG: tl.constexpr
+    stride_am, 
+    stride_ak, 
+    stride_bk, 
+    stride_bn, 
+    stride_cm, 
+    stride_cn, 
+    act_func: tl.constexpr,
+    BLOCK_SIZE_M: tl.constexpr, 
+    BLOCK_SIZE_N: tl.constexpr, 
+    BLOCK_SIZE_K: tl.constexpr,
+    GROUP_SIZE_M: tl.constexpr, 
+    DTYPE_FLAG: tl.constexpr
 ):
     pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
     weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
-    out_ptr = tl.cast(out_ptr, tl.pointer_type(pointer_type))
+    preact_ptr = tl.cast(preact_ptr, tl.pointer_type(pointer_type))
+    if postact_ptr is not None:
+        postact_ptr = tl.cast(postact_ptr, tl.pointer_type(pointer_type))
     if bias_ptr is not None:
         bias_ptr = tl.cast(bias_ptr, tl.pointer_type(pointer_type))
 
@@ -84,7 +100,6 @@ def fused_linear_forward_kernel(
 
     c = accumulator.to(input_ptr.dtype.element_ty)
 
-
     ### Main Difference Here where we fuse the bias into our single kernel ###
     if bias_ptr is not None:
         bias = tl.load(bias_ptr + offs_n, mask=(offs_n < N))
@@ -93,10 +108,14 @@ def fused_linear_forward_kernel(
 
     c_offsets = stride_cm * offs_m[:, None] + stride_cn * offs_n[None, :]
     c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
-    tl.store(out_ptr + c_offsets, c, mask=c_mask)
+    tl.store(preact_ptr + c_offsets, c, mask=c_mask)
 
+    ### If activation function is provided then use it! ###
+    if act_func is not None:
+        c = activation_switcher_forward(act_func, c)
+        tl.store(postact_ptr + c_offsets, c, mask=c_mask)
 
-def fused_linear_forward(a, w, b=None, use_dlpack=True):
+def fused_linear_forward(a, w, b=None, act_func="relu", use_dlpack=True):
     """
     Fused Linear Forward Pass using Triton kernel.
     Computes: y = a @ w + b
@@ -122,6 +141,10 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
         w = cp.ascontiguousarray(w)
     if b is not None and not b.flags.c_contiguous:
         b = cp.ascontiguousarray(b)
+
+    ### Verify activtion function if provided ###
+    if act_func is not None:
+        assert act_func in _avail_activations, f"Fused activations must be selected from {_avail_activations}, got {act_func}"
    
     if not DLPACK_DISABLE and use_dlpack:
         a_torch = torch.utils.dlpack.from_dlpack(a)
@@ -136,7 +159,8 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
             b_torch = b_torch.contiguous()
             
         # Allocate output
-        y_torch = torch.empty((B, O), device=a_torch.device, dtype=a_torch.dtype)
+        preact_torch = torch.empty((B, O), device=a_torch.device, dtype=a_torch.dtype)
+        postact_torch = torch.empty_like(preact_torch) if act_func is not None else None
 
         # Define grid for Triton launch
         grid = lambda meta: (
@@ -145,16 +169,30 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
         )
 
         fused_linear_forward_kernel[grid](
-            a_torch, w_torch, y_torch, b_torch,
-            B, O, I,
-            a_torch.stride(0), a_torch.stride(1),
-            w_torch.stride(0), w_torch.stride(1),
-            y_torch.stride(0), y_torch.stride(1),
+            a_torch, 
+            w_torch, 
+            postact_torch,
+            preact_torch, 
+            b_torch,
+            B, 
+            O, 
+            I,
+            a_torch.stride(0), 
+            a_torch.stride(1),
+            w_torch.stride(0), 
+            w_torch.stride(1),
+            preact_torch.stride(0), 
+            preact_torch.stride(1),
+            act_func,
             DTYPE_FLAG=0 if a_torch.dtype == torch.float32 else 1
         )
 
+
         # Return CuPy tensor via DLPack
-        return cp.from_dlpack(y_torch)
+        if act_func is not None:
+            return cp.from_dlpack(preact_torch), cp.from_dlpack(postact_torch)
+        else:
+            return cp.from_dlpack(preact_torch), None
 
     else:
 
@@ -166,7 +204,8 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
             b = cp.ascontiguousarray(b)
 
         with cp.cuda.Device(a.device.id):
-            y = cp.empty((B, O), dtype=a.dtype)
+            preact_cp = cp.empty((B, O), dtype=a.dtype)
+            postact_cp = cp.empty_like(preact_cp) if act_func is not None else None
 
         grid = lambda meta: (
             triton.cdiv(B, meta['BLOCK_SIZE_M']) *
@@ -176,16 +215,17 @@ def fused_linear_forward(a, w, b=None, use_dlpack=True):
         fused_linear_forward_kernel[grid](
             a.data.ptr,
             w.data.ptr,
-            y.data.ptr,
+            preact_cp.data.ptr,
+            postact_cp.data.ptr,
             b.data.ptr if b is not None else None,
             B, O, I,
             a.strides[0] // a.itemsize,
             a.strides[1] // a.itemsize,
             w.strides[0] // w.itemsize,
             w.strides[1] // w.itemsize,
-            y.strides[0] // y.itemsize,
-            y.strides[1] // y.itemsize,
+            preact_cp.strides[0] // preact_cp.itemsize,
+            preact_cp.strides[1] // preact_cp.itemsize,
             DTYPE_FLAG=0 if a.dtype == cp.float32 else 1
         )
 
-        return y
+        return preact_cp
