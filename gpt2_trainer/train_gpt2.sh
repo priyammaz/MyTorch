@@ -91,19 +91,20 @@ fi
 case "$TARGET" in
     owt)
         $CMD gpt2_trainer/train_gpt2.py  \
-            --project_name gpt2-base-owt \
+            --project_name gpt2-large-owt \
             --working_directory work_dir \
             --checkpoint_iterations 1000 \
             --always_save_checkpoint \
             --context_length 1024 \
-            --model_size base \
+            --model_size large \
             --dropout_p 0.0 \
             --path_to_data data/openwebtext \
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu 32 \
+            --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --tokens_per_batch 491520  \
+            --use_chinchilla \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
