@@ -22,6 +22,7 @@ class GPT2Config:
     mlp_dropout_p: float = 0.0
     attn_dropout_p: float = 0.0 # Currently not supported for our flash attn
     use_bias: bool = False
+    use_layernorm_weight: bool = True
     use_full_auto: bool = False
     use_fused_ops: bool = False
 
@@ -86,19 +87,20 @@ class Cache:
 
 class Embeddings(nn.Module):
 
-    def __init__(self, vocab_size, embed_dim, context_length, fused):
+    def __init__(self, config):
         super().__init__()
 
-        self.vocab_size = vocab_size
-        self.embed_dim = embed_dim
-        self.context_length = context_length
-        self.fused = fused
+        self.config = config
 
         ### Embeddings for Tokens ###
-        self.char_embeddings = nn.Embedding(vocab_size, embed_dim, fused=self.fused)
+        self.char_embeddings = nn.Embedding(config.vocab_size, 
+                                            config.embed_dim, 
+                                            fused=config.use_fused_ops)
 
         ### Positional Embeddings ###
-        self.position_embeddings = nn.Embedding(context_length, embed_dim, fused=self.fused)
+        self.position_embeddings = nn.Embedding(config.max_seq_len, 
+                                                config.embed_dim, 
+                                                fused=config.use_fused_ops)
 
     def forward(self, 
                 input_ids, 
@@ -111,7 +113,7 @@ class Embeddings(nn.Module):
       
         ### Add Positional Information ###
         avail_idx = mytorch.arange(start=0, end=seq_length).to(input_ids.device) + past_length
-        pos_embed = self.position_embeddings(avail_idx).reshape(1, seq_length, self.embed_dim)
+        pos_embed = self.position_embeddings(avail_idx).reshape(1, seq_length, self.config.embed_dim)
         x = x + pos_embed
 
         return x
@@ -119,40 +121,43 @@ class Embeddings(nn.Module):
 class Attention(nn.Module):
 
     def __init__(self, 
-                 embed_dim, 
-                 num_heads, 
-                 attn_dropout_p=0.1, 
-                 context_length=1024,
-                 use_bias=True,
-                 auto=False, 
-                 fused=False):
+                 config):
         
         super().__init__()
 
+        self.config = config
+
         ### Sanity Checks ###
-        assert embed_dim % num_heads == 0, "Double check embedding dim divisible by number of heads"
+        assert config.embed_dim % config.num_heads == 0, "Double check embedding dim divisible by number of heads"
 
         ### Attention Head Dim ###
-        self.embed_dim = embed_dim
-        self.num_heads = num_heads
-        self.head_dim = embed_dim // num_heads
-        self.fused = fused
+        self.embed_dim = config.embed_dim
+        self.num_heads = config.num_heads
+        self.head_dim = config.embed_dim // config.num_heads
+        self.fused = config.use_fused_ops
 
         ### Attention Projections ###
-        self.qkv_proj = nn.Linear(embed_dim, 3 * embed_dim, bias=use_bias, auto=auto, fused=self.fused)
+        self.qkv_proj = nn.Linear(self.embed_dim, 3 * self.embed_dim, 
+                                  bias=config.use_bias, 
+                                  auto=config.use_full_auto, 
+                                  fused=self.fused)
 
         ### Post Attention Projection ###
-        self.out_proj = nn.Linear(embed_dim, embed_dim, bias=use_bias, auto=auto, fused=self.fused)
-        self.proj_drop = nn.Dropout(dropout_p=attn_dropout_p)
+        self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, 
+                                  bias=config.use_bias, 
+                                  auto=config.use_full_auto,
+                                  fused=self.fused)
+        
+        self.proj_drop = nn.Dropout(dropout_p=config.attn_dropout_p)
 
         if not self.fused:
-            self.attn_drop = nn.Dropout(dropout_p=attn_dropout_p) # Currently only support attn dropout in non-fused
-            self.softmax = nn.Softmax(auto=auto, fused=self.fused)
+            self.attn_drop = nn.Dropout(dropout_p=config.attn_dropout_p) # Currently only support attn dropout in non-fused
+            self.softmax = nn.Softmax(auto=config.use_full_auto) # We technically have fused softmax, but flash attn is better
 
             ### If we are not using fused attention we need to manually pass in our 
             ### attention mask! So lets just save it as a buffer right here!
-            causal_positions = (mytorch.tril(mytorch.ones((1,1,context_length,context_length))) == 0)
-            causal_mask = mytorch.masked_fill(mytorch.zeros((1,1,context_length, context_length)), causal_positions, value=float("-inf"))  
+            causal_positions = (mytorch.tril(mytorch.ones((1,1,config.max_seq_len,config.max_seq_len))) == 0)
+            causal_mask = mytorch.masked_fill(mytorch.zeros((1,1,config.max_seq_len, config.max_seq_len)), causal_positions, value=float("-inf"))  
             self.register_buffer("causal_mask", causal_mask)
 
     def forward(self, x, cache=None, layer_idx=None):
@@ -234,32 +239,39 @@ class FeedForward(nn.Module):
     Regular MLP module after our attention computation. 
     """
     def __init__(self, 
-                 embed_dim, 
-                 mlp_ratio=4, 
-                 mlp_dropout_p=0.1,
-                 use_bias=True,
-                 auto=False,
-                 fused=False):
+                 config):
         
         super().__init__()
 
-        hidden_size = embed_dim * mlp_ratio
-        self.fused = fused 
+        self.config = config
+
+        hidden_size = config.embed_dim * config.mlp_ratio
+        self.fused = config.use_fused_ops 
 
         if self.fused:
             ## If using fused ops we can fuse the GELU activation right into forward pass ###
-            self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=self.fused, act_func="gelu")
+            self.intermediate_dense = nn.Linear(config.embed_dim, hidden_size, 
+                                                bias=config.use_bias,
+                                                auto=config.use_full_auto,
+                                                fused=self.fused, 
+                                                act_func="gelu")
         
         else:
             ### Otherwise we do them sequentially like normal! (This will be slower/use more memory!)
             ### technically we can use the fused linear/fused gelu here too, but thats ok, we prefer
             ### to fuse the activation straight in!
-            self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto)
+            self.intermediate_dense = nn.Linear(config.embed_dim, hidden_size, 
+                                                bias=config.use_bias,
+                                                auto=config.use_full_auto)
             self.activation = nn.GELU()
 
-        self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
-        self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=fused)
-        self.output_dropout = nn.Dropout(mlp_dropout_p)
+        self.intermediate_dropout = nn.Dropout(config.mlp_dropout_p)
+
+        self.out_proj = nn.Linear(hidden_size, config.embed_dim, 
+                                  bias=config.use_bias, 
+                                  auto=config.use_full_auto,
+                                  fused=self.fused)
+        self.output_dropout = nn.Dropout(config.mlp_dropout_p)
 
     def forward(self, x):
         x = self.intermediate_dense(x)
@@ -272,29 +284,26 @@ class FeedForward(nn.Module):
     
 class TransformerBlock(nn.Module):
     def __init__(self, 
-                 embed_dim, 
-                 num_heads, 
-                 dropout_p, 
-                 mlp_ratio=4,
-                 context_length=1024,
-                 use_bias=True,
-                 auto=False,
-                 fused=False):
+                 config):
         
         super().__init__()      
-    
-        self.embed_dim = embed_dim
-        self.attention = Attention(embed_dim=embed_dim, 
-                                   num_heads=num_heads, 
-                                   attn_dropout_p=dropout_p, 
-                                   context_length=context_length,
-                                   use_bias=use_bias,
-                                   auto=auto, 
-                                   fused=fused)
+
+        self.config = config
+        self.embed_dim = config.embed_dim
+        self.attention = Attention(config)
         
-        self.layernorm1 = nn.LayerNorm(embed_dim, bias=use_bias, auto=auto, fused=fused)
-        self.feedforward = FeedForward(embed_dim, mlp_ratio, dropout_p, use_bias, auto=auto, fused=fused)
-        self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
+        self.layernorm1 = nn.LayerNorm(config.embed_dim, 
+                                       weight=config.use_layernorm_weight,
+                                       bias=config.use_bias,
+                                       auto=config.use_full_auto,
+                                       fused=config.use_fused_ops)
+        
+        self.feedforward = FeedForward(config)
+        self.layernorm2 = nn.LayerNorm(config.embed_dim, 
+                                       weight=config.use_layernorm_weight,
+                                       bias=config.use_bias,
+                                       auto=config.use_full_auto,
+                                       fused=config.use_fused_ops)
 
     def forward(self, x, cache=None, layer_idx=None):
         x = x + self.attention(self.layernorm1(x), cache=cache, layer_idx=layer_idx)
@@ -307,27 +316,19 @@ class GPT2(nn.Module):
         super().__init__()
 
         self.config = config
-        self.embeddings = Embeddings(vocab_size=config.vocab_size, 
-                                     embed_dim=config.embed_dim, 
-                                     context_length=config.max_seq_len,
-                                     fused=config.use_fused_ops)
+        self.embeddings = Embeddings(config)
         
         self.blocks = nn.ModuleList([
-            TransformerBlock(embed_dim=config.embed_dim, 
-                             num_heads=config.num_heads, 
-                             dropout_p=config.mlp_dropout_p, 
-                             mlp_ratio=config.mlp_ratio,
-                             context_length=config.max_seq_len,
-                             use_bias=config.use_bias, 
-                             fused=config.use_fused_ops, 
-                             auto=config.use_full_auto)
+            TransformerBlock(config)
 
             for _ in range(config.num_blocks)
         ])
 
-        self.final_layer_norm = nn.LayerNorm(config.embed_dim, 
+        self.final_layer_norm = nn.LayerNorm(config.embed_dim,
+                                             weight=config.use_layernorm_weight,
                                              auto=config.use_full_auto, 
                                              fused=config.use_fused_ops)
+        
         self.lm_head = nn.Linear(config.embed_dim, 
                                  config.vocab_size, 
                                  bias=config.use_bias,
@@ -375,6 +376,7 @@ def _init_weights(module):
         mytorch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
     elif isinstance(module, nn.LayerNorm):
-        mytorch.nn.init.ones_(module.weight)
+        if module.weight is not None:
+            mytorch.nn.init.ones_(module.weight)
         if module.bias is not None:
             mytorch.nn.init.zeros_(module.bias)
