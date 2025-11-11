@@ -4,7 +4,7 @@ import mytorch.nn.functional as F
 import numpy as np
 
 class LayerNorm(Module):
-    def __init__(self, normalized_shape, bias=True, eps=1e-5, auto=False, fused=False):
+    def __init__(self, normalized_shape, weight=True, bias=True, eps=1e-5, auto=False, fused=False):
         super().__init__()
 
         if isinstance(normalized_shape, int):
@@ -17,7 +17,7 @@ class LayerNorm(Module):
         self.eps = eps
 
         # Learnable parameters: always 1D over the *product* of normalized dims
-        self.weight = mytorch.ones((self.embed_dim,), requires_grad=True)
+        self.weight = mytorch.ones((self.embed_dim,), requires_grad=True) if weight else None
         self.bias = mytorch.zeros((self.embed_dim,), requires_grad=True) if bias else None
 
     def __call__(self, x):

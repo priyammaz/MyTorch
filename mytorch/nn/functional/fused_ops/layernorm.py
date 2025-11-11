@@ -45,7 +45,7 @@ def layernorm_kernel_forward_training(
     inv_var_ptr, # Need for Backward Pass (N,) # can be None during inference
     x_hat_ptr, # Need for Backward Pass (N x E) # can be none during inference
     input_ptr, 
-    gamma_ptr,  # 1D vector shared across all samples (E, )
+    gamma_ptr,  # 1D vector shared across all samples (E, ) can be None if no weight
     beta_ptr,   # 1D vector shared across all samples (E, ) can be None if no bias
     input_row_stride, 
     output_row_stride, 
@@ -77,8 +77,9 @@ def layernorm_kernel_forward_training(
     ### Map ptrs to correct dtype ###
     pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
-    gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(pointer_dtype))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
+    if gamma_ptr is not None:
+        gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(pointer_dtype))
     if x_hat_ptr is not None:
         x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(pointer_dtype))
     if inv_var_ptr is not None:
@@ -97,16 +98,19 @@ def layernorm_kernel_forward_training(
     
     ### Get All Indexes ###
     input_ptrs = row_start_ptr + col_offsets
-    gamma_ptrs = gamma_ptr + col_offsets
+
+    ### Load Weights if they exist ###
+    if gamma_ptr is not None:
+        gamma_ptrs = gamma_ptr + col_offsets
+        gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
+
     if beta_ptr is not None:
         beta_ptrs = beta_ptr + col_offsets
+        betas = tl.load(beta_ptrs, mask=mask, other=0.)
 
     ### Load Row and Gamma ###
     row = tl.load(input_ptrs, mask=mask, other=0.) # Invalid row values can just be 0
-    gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
-    if beta_ptr is not None:
-        betas = tl.load(beta_ptrs, mask=mask, other=0.)
-
+    
     ### Compute row mean and var w/ reduction ops ###
     row_mean = tl.sum(row, axis=0) / n_cols
 
@@ -119,7 +123,11 @@ def layernorm_kernel_forward_training(
     normed = row_mean_centered * inv_var
 
     ### Compute final output ###
-    output = normed * gammas
+    if gamma_ptr is not None:
+        output = normed * gammas
+    else:
+        output = normed
+
     if beta_ptr is not None:
         output += betas
 
@@ -460,7 +468,7 @@ def layernorm_kernel_backward(
     dx_ptrs = dx_row_start_ptr + col_offsets
     tl.store(dx_ptrs, dx, mask=mask)
 
-def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=True):
+def fused_layernorm_forward(x, gamma=None, beta=None, eps=1e-5, training=True, use_dlpack=True):
 
     """
     x: Input (N, E)
@@ -479,7 +487,8 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
     if not DLPACK_DISABLE and use_dlpack:
 
         x = torch.utils.dlpack.from_dlpack(x)
-        gamma = torch.utils.dlpack.from_dlpack(gamma)
+        if gamma is not None:
+            gamma = torch.utils.dlpack.from_dlpack(gamma)
         if beta is not None:
             beta = torch.utils.dlpack.from_dlpack(beta)
 
@@ -546,7 +555,7 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
             inv_var.data.ptr if inv_var is not None else None,    # inv_var_ptr
             x_hat.data.ptr if x_hat is not None else None,        # x_hat_ptr
             x.data.ptr,                                           # input_ptr
-            gamma.data.ptr,                                       # gamma_ptr
+            gamma.data.ptr if gamma is not None else None,        # gamma_ptr
             beta.data.ptr if beta is not None else None,          # beta_ptr
             x_row_stride,                                         # input_row_stride
             y_row_stride,                                         # output_row_stride
@@ -561,7 +570,7 @@ def fused_layernorm_forward(x, gamma, beta, eps=1e-5, training=True, use_dlpack=
             return y, x_hat, inv_var
         return y
         
-def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True, use_dlpack=True):
+def fused_layernorm_backward(x_hat, inv_var, dy, gamma=None, bias=None, use_dlpack=True):
 
     """
     x_hat: normalized input from forward (N, E)
@@ -589,7 +598,7 @@ def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True, use_dlpack=Tr
         x_hat = torch.utils.dlpack.from_dlpack(x_hat)
         inv_var = torch.utils.dlpack.from_dlpack(inv_var)
         dy = torch.utils.dlpack.from_dlpack(dy)
-        gamma = torch.utils.dlpack.from_dlpack(gamma)
+        gamma = torch.utils.dlpack.from_dlpack(gamma) if gamma is not None else None
     
         ### Lets just hardcode our tile size with something reasonable ###
         GAMMA_BLOCK_SIZE = 64
@@ -607,7 +616,7 @@ def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True, use_dlpack=Tr
         
         layernorm_kernel_backward[grid](
             dx,
-            dy * gamma,  # dx_hat = dy * gamma
+            dy * gamma if gamma is not None else dy,  # dx_hat = dy * gamma
             x_hat,
             inv_var,
             dx_row_stride,
@@ -619,28 +628,33 @@ def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True, use_dlpack=Tr
         )
         
         ### COMPUTE DGAMMA ###
-        num_col_programs = triton.cdiv(n_cols, GAMMA_BLOCK_SIZE)
-        num_row_programs = triton.cdiv(n_rows, GAMMA_ROW_BLOCK_SIZE)
-        dgamma = torch.empty(num_row_programs, n_cols, dtype=dy.dtype, device=dy.device)
-        grid = (num_col_programs, num_row_programs)
-        
-        layernorm_gamma_kernel_backward[grid](
-            dgamma,
-            x_hat,
-            dy,  # for dgamma, upstream is dy*gamma
-            x_hat.stride(0),
-            dy.stride(0),
-            dgamma.stride(0),
-            dtype_flag,
-            n_rows,
-            n_cols,
-            GAMMA_BLOCK_SIZE,
-            GAMMA_ROW_BLOCK_SIZE, 
-        )
+        if gamma is not None:
+            num_col_programs = triton.cdiv(n_cols, GAMMA_BLOCK_SIZE)
+            num_row_programs = triton.cdiv(n_rows, GAMMA_ROW_BLOCK_SIZE)
+            dgamma = torch.empty(num_row_programs, n_cols, dtype=dy.dtype, device=dy.device)
+            grid = (num_col_programs, num_row_programs)
+            
+            layernorm_gamma_kernel_backward[grid](
+                dgamma,
+                x_hat,
+                dy,  # for dgamma, upstream is dy*gamma
+                x_hat.stride(0),
+                dy.stride(0),
+                dgamma.stride(0),
+                dtype_flag,
+                n_rows,
+                n_cols,
+                GAMMA_BLOCK_SIZE,
+                GAMMA_ROW_BLOCK_SIZE, 
+            )
+
+            ### Sum up all contributions to Gamma ###
+            dgamma = cp.from_dlpack(dgamma).sum(axis=0)
+        else:
+            dgamma = None
 
         ### Convert back to cupy ###
         dx = cp.from_dlpack(dx)
-        dgamma = cp.from_dlpack(dgamma)
         dy = cp.from_dlpack(dy)
         
     else:
@@ -667,32 +681,35 @@ def fused_layernorm_backward(x_hat, inv_var, dy, gamma, bias=True, use_dlpack=Tr
             dx_BLOCK_SIZE
         )
 
-        ### COMPUTE DGAMMA ###
-        num_col_programs = triton.cdiv(n_cols, GAMMA_BLOCK_SIZE)
-        num_row_programs = triton.cdiv(n_rows, GAMMA_ROW_BLOCK_SIZE)
-        dgamma = cp.empty((num_row_programs, n_cols), dtype=dy.dtype)
+        if gamma is not None:
+            ### COMPUTE DGAMMA ###
+            num_col_programs = triton.cdiv(n_cols, GAMMA_BLOCK_SIZE)
+            num_row_programs = triton.cdiv(n_rows, GAMMA_ROW_BLOCK_SIZE)
+            dgamma = cp.empty((num_row_programs, n_cols), dtype=dy.dtype)
 
-        grid = (num_col_programs, num_row_programs)
-        layernorm_gamma_kernel_backward[grid](
-            dgamma.data.ptr,
-            x_hat.data.ptr,
-            dy.data.ptr,  # for dgamma, upstream is dy*gamma
-            x_hat.strides[0] // x_hat.itemsize,
-            dy.strides[0] // dy.itemsize,
-            dgamma.strides[0] // dgamma.itemsize,
-            dtype_flag,
-            n_rows,
-            n_cols,
-            GAMMA_BLOCK_SIZE,
-            GAMMA_ROW_BLOCK_SIZE, 
-        )
-
-    ### Sum up all contributions to Gamma ###
-    dgamma = dgamma.sum(axis=0)
+            grid = (num_col_programs, num_row_programs)
+            layernorm_gamma_kernel_backward[grid](
+                dgamma.data.ptr,
+                x_hat.data.ptr,
+                dy.data.ptr,  # for dgamma, upstream is dy*gamma
+                x_hat.strides[0] // x_hat.itemsize,
+                dy.strides[0] // dy.itemsize,
+                dgamma.strides[0] // dgamma.itemsize,
+                dtype_flag,
+                n_rows,
+                n_cols,
+                GAMMA_BLOCK_SIZE,
+                GAMMA_ROW_BLOCK_SIZE, 
+            )
+            ### Sum up all contributions to Gamma ###
+            dgamma = cp.from_dlpack(dgamma).sum(axis=0)
+        else:
+            dgamma = None
 
     ### COMPUTE DBETA ###
-    if bias:
+    if bias is not None:
         dbeta = dy.sum(axis=0)
-        return dx, dgamma, dbeta
-    else:
-        return dx, dgamma
+    else: 
+        dbeta = None
+
+    return dx, dgamma, dbeta
