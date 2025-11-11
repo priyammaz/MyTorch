@@ -11,14 +11,14 @@ def manual_gelu(x):
     gelu as described in https://arxiv.org/pdf/2305.12073
 
     Forward method is Equation 24
-    Backward methdod is Equation 42-43
+    Backward method is Equation 42-43
     """
 
     data = x.data
 
     # Constants
-    sqrt_2_over_pi = 0.7978845 # xp.sqrt(2 / xp.pi).astype(x.data.dtype)
-    coeff = 0.44715
+    sqrt_2_over_pi = 0.7978845608 # xp.sqrt(2 / xp.pi).astype(x.data.dtype)
+    coeff = 0.044715
 
     #inner = sqrt_2_over_pi * (x + coeff * x^3)
     x_squared = np.power(data, 2)
