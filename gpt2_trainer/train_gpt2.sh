@@ -96,7 +96,7 @@ case "$TARGET" in
             --checkpoint_iterations 1000 \
             --always_save_checkpoint \
             --context_length 1024 \
-            --model_size large \
+            --model_size base \
             --dropout_p 0.0 \
             --path_to_data data/openwebtext \
             --train_iterations 600000 \
@@ -104,7 +104,6 @@ case "$TARGET" in
             --eval_iterations 200 \
             --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --tokens_per_batch 491520  \
-            --use_chinchilla \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
             --warmup_steps 2000 \
