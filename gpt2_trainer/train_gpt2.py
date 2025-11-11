@@ -384,7 +384,7 @@ while train:
 
                 ### Log with Wandb if enabled ###
                 if args.log_wandb:  
-                    logging_dict = {"loss": loss, "lr": scheduler.get_last_lr()}
+                    logging_dict = {"loss": loss, "lr": lr}
                     if accelerator.grad_norm is not None:
                         logging_dict["grad_norm"] = accelerator.grad_norm 
                     accelerator.log(logging_dict, step=completed_steps)
