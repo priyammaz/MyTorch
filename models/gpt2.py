@@ -88,6 +88,7 @@ class Embeddings(nn.Module):
 
     def __init__(self, vocab_size, embed_dim, context_length, fused):
         super().__init__()
+
         self.vocab_size = vocab_size
         self.embed_dim = embed_dim
         self.context_length = context_length
@@ -179,7 +180,7 @@ class Attention(nn.Module):
         ### fused is available!
        
         if not self.fused:
-    
+
             # Compute attention scores
             scores = (q @ k.transpose(-2, -1)) / (self.head_dim ** 0.5)
 
@@ -239,21 +240,34 @@ class FeedForward(nn.Module):
                  use_bias=True,
                  auto=False,
                  fused=False):
+        
         super().__init__()
+
         hidden_size = embed_dim * mlp_ratio
-        self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=fused)
-        self.activation = nn.GELU(fused=fused)
+        self.fused = fused 
+
+        if self.fused:
+            ## If using fused ops we can fuse the GELU activation right into forward pass ###
+            self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto, fused=self.fused, act_func="gelu")
+        
+        else:
+            ### Otherwise we do them sequentially like normal! (This will be slower/use more memory!)
+            ### technically we can use the fused linear/fused gelu here too, but thats ok, we prefer
+            ### to fuse the activation straight in!
+            self.intermediate_dense = nn.Linear(embed_dim, hidden_size, bias=use_bias, auto=auto)
+            self.activation = nn.GELU()
+
         self.intermediate_dropout = nn.Dropout(mlp_dropout_p)
         self.out_proj = nn.Linear(hidden_size, embed_dim, bias=use_bias, auto=auto, fused=fused)
         self.output_dropout = nn.Dropout(mlp_dropout_p)
 
     def forward(self, x):
         x = self.intermediate_dense(x)
-        x = self.activation(x)
+        if not self.fused:
+            x = self.activation(x)
         x = self.intermediate_dropout(x)
         x = self.out_proj(x)
         x = self.output_dropout(x)
-
         return x
     
 class TransformerBlock(nn.Module):
@@ -267,8 +281,9 @@ class TransformerBlock(nn.Module):
                  auto=False,
                  fused=False):
         
-        super().__init__()
-
+        super().__init__()      
+    
+        self.embed_dim = embed_dim
         self.attention = Attention(embed_dim=embed_dim, 
                                    num_heads=num_heads, 
                                    attn_dropout_p=dropout_p, 
@@ -282,11 +297,8 @@ class TransformerBlock(nn.Module):
         self.layernorm2 = nn.LayerNorm(embed_dim, bias=use_bias, fused=fused)
 
     def forward(self, x, cache=None, layer_idx=None):
-        attn_out = self.attention(self.layernorm1(x), cache=cache, layer_idx=layer_idx)
-        x = x + attn_out
-        mlp_out = self.feedforward(self.layernorm2(x))
-        x = x + mlp_out
-     
+        x = x + self.attention(self.layernorm1(x), cache=cache, layer_idx=layer_idx)
+        x = x + self.feedforward(self.layernorm2(x))
         return x
 
 class GPT2(nn.Module):
