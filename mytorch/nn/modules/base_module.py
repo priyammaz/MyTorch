@@ -240,7 +240,11 @@ class Module:
         # Load parameters recursively
         for name, param in self._named_parameters_no_dedup():
             if name in state_dict:
-                param.data[:] = to_device(state_dict[name])
+                try:
+                    param.data[:] = to_device(state_dict[name])
+                except:
+                    print(f"Failed to load {name}. Expected {param.shape}, got {state_dict[name].shape}")
+                    continue
                 unexpected_keys.remove(name)
             else:
                 missing_keys.append(name)
@@ -249,6 +253,11 @@ class Module:
         for name, buf in self._named_buffers_no_dedup():
             if name in state_dict:
                 buf.data[:] = to_device(state_dict[name])
+                try:
+                    buf.data[:][:] = to_device(state_dict[name])
+                except:
+                    print(f"Failed to load {name}. Expected {param.shape}, got {state_dict[name].shape}")
+                    continue
                 if name in unexpected_keys:
                     unexpected_keys.remove(name)
             else:
