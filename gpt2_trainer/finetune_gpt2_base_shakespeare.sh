@@ -80,17 +80,17 @@ $CMD gpt2_trainer/finetune_gpt2_base_shakespeare.py \
     --project_name gpt2-base-ft-shakespeare \
     --working_directory work_dir \
     --load_from_experiment "gpt2-base-owt" \
-    --dropout_p 0.1 \
+    --dropout_p 0.2 \
     --path_to_data data/shakespeare_gpt2 \
     --num_layers_train 6 \
     --train_iterations 500 \
     --eval_interval 100 \
     --eval_iterations 10 \
-    --batch_size 32 \
-    --gradient_accumulation_steps 2 \
-    --max_lr 5e-4 \
+    --batch_size 16 \
+    --gradient_accumulation_steps 1 \
+    --max_lr 1e-3 \
     --min_lr 1e-4 \
-    --warmup_steps 50 \
+    --warmup_steps 100 \
     --weight_decay 0.1 \
     --max_grad_norm 1.0 \
     --beta1 0.9 \

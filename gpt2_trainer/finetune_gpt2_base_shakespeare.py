@@ -272,16 +272,23 @@ while train:
                 loss = accelerator.gather_for_metrics(loss)
 
                 ### Grab our stored grad_norm for checking on model health ###
-                log_statement = f"Iter {completed_steps}, Loss: {loss:.4f}, LR: {scheduler.get_last_lr():.2e}"
+                lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
+                log_parts = [
+                    f"Iter: {completed_steps:6d}",
+                    f"Loss: {loss:7.4f}",
+                    f"LR: {lr:9.2e}"
+                ]
                 if accelerator.grad_norm is not None:
-                    log_statement += f" Grad Norm: {accelerator.grad_norm:.3f}"
-
+                    log_parts.append(f"GradNorm: {accelerator.grad_norm:7.3f}")
+                
                 ### Print to Console ###
-                accelerator.print(log_statement)
+                log_statement = " | ".join(log_parts)
+                if accelerator.is_main_process():
+                    tqdm.write(log_statement)
 
                 ### Log with Wandb if enabled ###
                 if args.log_wandb:  
-                    logging_dict = {"loss": loss, "lr": scheduler.get_last_lr()}
+                    logging_dict = {"loss": loss, "lr": lr}
                     if accelerator.grad_norm is not None:
                         logging_dict["grad_norm"] = accelerator.grad_norm 
                     accelerator.log(logging_dict, step=completed_steps)
