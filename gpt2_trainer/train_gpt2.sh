@@ -91,7 +91,7 @@ fi
 case "$TARGET" in
     owt)
         $CMD gpt2_trainer/train_gpt2.py  \
-            --project_name gpt2-base-owt-testing \
+            --project_name gpt2-base-owt \
             --working_directory work_dir \
             --checkpoint_iterations 1000 \
             --always_save_checkpoint \
@@ -102,7 +102,7 @@ case "$TARGET" in
             --train_iterations 600000 \
             --eval_interval 1000 \
             --eval_iterations 200 \
-            --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
+            --batch_size_per_gpu 32 \
             --tokens_per_batch 491520  \
             --max_lr 6e-4 \
             --min_lr 6e-5 \
@@ -124,7 +124,7 @@ case "$TARGET" in
             --model_size small \
             --dropout_p 0.0 \
             --path_to_data data/shakespeare \
-            --train_iterations 5000 \
+            --train_iterations 2500 \
             --eval_interval 100 \
             --eval_iterations 50 \
             --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
