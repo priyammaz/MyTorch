@@ -185,10 +185,17 @@ def generic_activation_kernel_backward(
     input_grad_ptr,
     output_grad_ptr, 
     n_elements, 
-    BLOCK_SIZE: tl.constexpr    
+    BLOCK_SIZE: tl.constexpr,
+    DTYPE_FLAG: tl.constexpr,
+    INPUT_GRAD_DTYPE_FLAG: tl.constexpr
 ):
     
     pid = tl.program_id(axis=0)
+
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    input_grad_ptr = tl.cast(input_grad_ptr, tl.pointer_type(tl.float32 if INPUT_GRAD_DTYPE_FLAG == 0 else tl.float16))
+    output_grad_ptr = tl.cast(output_grad_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+
     offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offset < n_elements
 
@@ -263,10 +270,9 @@ def fused_activation_forward(input, act_func, use_dlpack=True):
 
         return output.reshape(orig_shape)
 
-
 def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
     
-    assert act_func in _avail_activations, f"Select an activation from {_avail_activations}"
+    assert act_func in _avail_activations, f"Select an activation from {_avail_activations}, got {act_func}"
 
     ### Flatten (it is element wise so we will process a long vector) ###
     orig_shape = input.shape
@@ -301,8 +307,10 @@ def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
             input_grad_ptr=input_grad,
             output_grad_ptr=output_grad, 
             n_elements=n_elements,
+            DTYPE_FLAG= 0 if output_grad.dtype == torch.float32 else 1,
+            INPUT_GRAD_DTYPE_FLAG = 0 if input_grad.dtype == torch.float32 else 1
         )
-
+  
         return cp.from_dlpack(input_grad.reshape(orig_shape))
 
     else:
@@ -327,10 +335,11 @@ def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
             input_grad_ptr=input_grad.data.ptr,
             output_grad_ptr=output_grad.data.ptr, 
             n_elements=n_elements,
+            DTYPE_FLAG= 0 if output_grad.dtype == cp.float32 else 1,
+            INPUT_GRAD_DTYPE_FLAG = 0 if input_grad.dtype == cp.float32 else 1
         )
 
         return input_grad.reshape(orig_shape)
-
 
 if __name__ == "__main__":
 
@@ -340,7 +349,7 @@ if __name__ == "__main__":
     print(test_input_gelu)
 
     # Forward pass with custom kernel
-    output_custom_gelu = fused_activation_forward(test_input_gelu_cp, "gelu", use_dlpack=True)
+    output_custom_gelu = fused_activation_forward(test_input_gelu_cp, "gelu", use_dlpack=False)
     print("\nCustom GELU Forward:")
     print(output_custom_gelu)
 
@@ -357,7 +366,7 @@ if __name__ == "__main__":
     print(upstream_grad_gelu)
 
     # Backward pass with custom kernel
-    input_grad_custom_gelu = fused_activation_backward(test_input_gelu_cp, upstream_grad_gelu_cp, "gelu", use_dlpack=True)
+    input_grad_custom_gelu = fused_activation_backward(test_input_gelu_cp, upstream_grad_gelu_cp, "gelu", use_dlpack=False)
     print("\nCustom GELU Backward:")
     print(input_grad_custom_gelu)
 
