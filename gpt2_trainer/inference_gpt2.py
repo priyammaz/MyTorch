@@ -13,8 +13,9 @@ def parse_args():
     parser.add_argument("path_to_project_dir", type=str, help="Path to project directory")
     parser.add_argument("--checkpoint_dir", type=str)
     parser.add_argument("--fused", action="store_true")
-    parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--disable_cache", action="store_true")
+    parser.add_argument("--fp32", action="store_true")
+    parser.add_argument("--fp16", action="store_true")
     parser.add_argument("--max_tokens_gen", type=int)
     parser.add_argument("--device", type=str, default="cpu")
     parser.add_argument("--temperature", type=float, default=1.0)
@@ -91,7 +92,23 @@ state_dict = mytorch.load(path_to_model_weights)
 model.load_state_dict(state_dict)
 model = model.to(device)
 
-if args.fp16:
+### Fused Ops work fastest in float16, so we can cast it! ###
+### Interesting Note: We have a training/inference numerical sensitivity issue. 
+
+### For example, I trained my GPT2 Model with fused kernels in fp16. So when I inference
+### in fp16 with fused kernels, no issues. If I leave it as fp32, there is also no issues. 
+### but if i inference with non-fused kernels in fp16, there are slight precision differences
+### between the fused and non fused kernels (max diff < 0.003 ish). This is to be expected as 
+### we are using the lower precision fp16. This leads to extremly poor inference though! As our
+### model has adapted to the precision of our fused kernel in this case, it will do poorly
+### if the precision errors have changed due to using non-fused ops:
+
+### TLDR: Float32 Always safe. Float16 match to the fused/nonfused you trained with to begin with. 
+### this is why BFLOAT16 is awesome! we have less of these types of issues, but Cupy doesnt support 
+### bloat16 so we have to use fp16 instead!
+if args.fp32: assert not args.fp16
+if args.fp16: assert not args.fp32
+if (args.fused and not args.fp32) or args.fp16:
     for name, param in model.named_parameters():
         param.astype(mytorch.float16)
 
