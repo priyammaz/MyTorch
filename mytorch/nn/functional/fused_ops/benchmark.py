@@ -493,14 +493,14 @@ def test_layernorm(M, N, use_dlpack):
     y_triton = fused_layernorm_forward(x_cp, weight_cp, bias_cp, eps, use_dlpack=use_dlpack)
     
     if isinstance(y_triton, tuple):
-        y_triton, x_hat, inv_var = y_triton
+        y_triton, mean, inv_var = y_triton
     
     y_torch = torch.nn.functional.layer_norm(x_torch, (N,), weight_torch, bias_torch, eps)
 
     cp.testing.assert_allclose(cp.asarray(y_torch.detach().cpu().numpy()), y_triton, rtol=1e-1, atol=1e-1)
     print(f"Forward pass OK: M={M}, N={N}, DLPACK={use_dlpack}")
 
-    grads_cp = fused_layernorm_backward(x_hat, inv_var, dy_cp, weight_cp, eps, use_dlpack=use_dlpack)
+    grads_cp = fused_layernorm_backward(x_torch, mean, inv_var, dy_cp, weight_cp, use_dlpack=use_dlpack)
     dx_triton, dweight_triton, dbias_triton = grads_cp
  
     y_torch.backward(dy, retain_graph=True)

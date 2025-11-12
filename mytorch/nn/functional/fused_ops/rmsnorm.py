@@ -10,19 +10,19 @@ import triton.language as tl
 from .utils import calc_num_warps
 from .flags import DLPACK_DISABLE
 
-# Your Triton kernels here
+@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def rms_norm_forward_kernel(
     output_ptr, 
     output_stride,
-    rstd_ptr,
+    rstd_ptr, # store for backward pass
     input_ptr, 
     input_stride, 
     gamma_ptr, 
     DTYPE_FLAG: tl.constexpr, 
     eps: tl.constexpr, 
     n_cols: tl.constexpr,
-    BLOCK_SIZE: tl.constexpr
+    BLOCK_SIZE: tl.constexpr,
 ):  
     row_idx = tl.program_id(0)
 
@@ -30,7 +30,8 @@ def rms_norm_forward_kernel(
     pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
-    rstd_ptr = tl.cast(rstd_ptr, tl.pointer_type(pointer_dtype))
+    if rstd_ptr is not None:
+        rstd_ptr = tl.cast(rstd_ptr, tl.pointer_type(pointer_dtype))
     
     ### If Gamma exists then we will also use it ###
     if gamma_ptr is not None:
@@ -42,7 +43,9 @@ def rms_norm_forward_kernel(
     ### Advance all our pointers ###
     output_ptr += row_idx * output_stride
     input_ptr += row_idx * input_stride
-    rstd_ptr += row_idx
+
+    if rstd_ptr is not None:
+        rstd_ptr += row_idx
     
     ### Load our Data ###
     input_row = tl.load(input_ptr + col_offsets, mask=mask, other=0.)
@@ -52,64 +55,19 @@ def rms_norm_forward_kernel(
     ### Compute RMS ###
     mean_square = tl.sum(input_row * input_row, axis=0) / n_cols
     inv_root_mean_square = tl.rsqrt(mean_square + eps)
-    tl.store(rstd_ptr, inv_root_mean_square)
     
     ### Store our output ###
-    input_row *= inv_root_mean_square
+    normed = input_row * inv_root_mean_square
     if gamma_ptr is not None:
-        output = input_row * gamma
+        output = normed * gamma
     else:
-        output = input_row
+        output = normed
     tl.store(output_ptr + col_offsets, output, mask=mask)
 
-@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"]*args["ROW_BLOCK_SIZE"])})
-@triton.jit
-def rmsnorm_gamma_kernel_backward(
-    dgamma_ptr, 
-    x_hat_ptr, 
-    dy_ptr,
-    x_hat_stride, 
-    dy_stride,
-    d_gamma_row_stride, 
-    DTYPE_FLAG: tl.constexpr,
-    n_rows: tl.constexpr, 
-    n_cols: tl.constexpr, 
-    BLOCK_SIZE: tl.constexpr, 
-    ROW_BLOCK_SIZE: tl.constexpr
-):
+    ### Store our rstd if we are training ###
+    if rstd_ptr is not None:
+        tl.store(rstd_ptr, inv_root_mean_square)
     
-    """
-    y = x_hat * gamma
-
-    Then dgamma = (dL/dy) * x_hat
-    """
-    col_idx = tl.program_id(0)
-    row_idx = tl.program_id(1)
-    
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
-    dgamma_ptr = tl.cast(dgamma_ptr, tl.pointer_type(pointer_type))
-    x_hat_ptr = tl.cast(x_hat_ptr, tl.pointer_type(pointer_type))
-    dy_ptr = tl.cast(dy_ptr, tl.pointer_type(pointer_type))
-    
-    col_offsets = tl.arange(0, BLOCK_SIZE)
-    row_offsets = tl.arange(0, ROW_BLOCK_SIZE)
-    col_range = col_idx * BLOCK_SIZE + col_offsets
-    row_range = row_idx * ROW_BLOCK_SIZE + row_offsets
-    
-    col_mask = col_range < n_cols
-    row_mask = row_range < n_rows
-    mask = row_mask[:, None] & col_mask[None, :]
-    
-    dy_ptr += row_range[:, None] * dy_stride + col_range[None, :]
-    x_hat_ptr += row_range[:, None] * x_hat_stride + col_range[None, :]
-    
-    dy = tl.load(dy_ptr, mask=mask, other=0.)
-    x_hat = tl.load(x_hat_ptr, mask=mask, other=0.)
-    dgamma = tl.sum(dy * x_hat, axis=0)
-    
-    dgamma_offsets = row_idx * d_gamma_row_stride + col_range
-    tl.store(dgamma_ptr + dgamma_offsets, dgamma, mask=col_mask)
-
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def rmsnorm_kernel_backward(
@@ -151,11 +109,16 @@ def rmsnorm_kernel_backward(
     
     if gamma_ptr is not None:
         gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(pointer_type))
+        gamma_ptrs = gamma_ptr + col_offsets
+        gamma = tl.load(gamma_ptrs, mask=mask, other=0.0).to(tl.float32)
+    else:
+        gamma = 1.0
     
     # dgamma is ALWAYS fp32 for atomic accumulation
     if dgamma_ptr is not None:
         dgamma_ptr = tl.cast(dgamma_ptr, tl.pointer_type(tl.float32))
-    
+        
+
     ### Get correct row pointers ###
     dy_row_start_ptr = dy_ptr + row_idx * dy_row_stride
     x_row_start_ptr = x_ptr + row_idx * x_row_stride
@@ -170,12 +133,6 @@ def rmsnorm_kernel_backward(
     dy = tl.load(dy_ptrs, mask=mask, other=0.0).to(tl.float32)
     x = tl.load(x_ptrs, mask=mask, other=0.0).to(tl.float32)
     rstd = tl.load(rstd_ptr + row_idx).to(tl.float32)
-    
-    if gamma_ptr is not None:
-        gamma_ptrs = gamma_ptr + col_offsets
-        gamma = tl.load(gamma_ptrs, mask=mask, other=0.0).to(tl.float32)
-    else:
-        gamma = 1.0
     
     ### Compute normalized input ###
     x_hat = x * rstd
@@ -200,37 +157,97 @@ def rmsnorm_kernel_backward(
         tl.atomic_add(dgamma_ptr + col_offsets, dgamma, mask=mask)  # Keep in FP32!
 
 def fused_rmsnorm_forward(x, gamma, eps=1e-5, training=True, use_dlpack=True):
+    """
+    RMSNorm forward pass using Triton kernel.
     
+    Args:
+        x: Input tensor (N, E)
+        gamma: Scale parameter (E,)
+        eps: Epsilon for numerical stability
+        training: Whether in training mode (unused, kept for API compatibility)
+        use_dlpack: Whether to use DLPack for interop
+    
+    Returns:
+        y: Output (N, E)
+        rstd: Reciprocal RMS per row (N,)
+    """
     n_rows, n_cols = x.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    if use_dlpack:
-
+    if not DLPACK_DISABLE and use_dlpack:
+ 
         x = torch.utils.dlpack.from_dlpack(x)
         if gamma is not None:
             gamma = torch.utils.dlpack.from_dlpack(gamma)
 
+        # Allocate outputs
         y = torch.empty_like(x)
-        rstd = torch.empty(n_rows, dtype=x.dtype, device=x.device)
+        rstd = torch.empty(n_rows, dtype=x.dtype, device=x.device) if training else None
         
-        rms_norm_forward_kernel[(n_rows,)](
+        # Compute strides
+        x_row_stride = x.stride(0)
+        y_row_stride = y.stride(0)
+        
+        # Map dtype to Triton flag
+        dtype_flag = 0 if x.dtype == torch.float32 else 1
+        
+        # Launch kernel
+        grid = (n_rows,)
+        rms_norm_forward_kernel[grid](
             y, 
-            y.stride(0),
+            y_row_stride,
             rstd,
             x, 
-            x.stride(0),
+            x_row_stride,
             gamma,
-            DTYPE_FLAG=0 if x.dtype == torch.float32 else 1,
+            DTYPE_FLAG=dtype_flag,
             eps=eps,
             n_cols=n_cols,
             BLOCK_SIZE=BLOCK_SIZE
         )
 
+        # Convert back to CuPy
         y = cp.from_dlpack(y)
-        rstd = cp.from_dlpack(rstd)
 
-        return y, rstd
+        if training:
+            rstd = cp.from_dlpack(rstd)
+            return y, rstd
+        
+        return y
+    
+    else:
+       
+        y = cp.empty_like(x)
 
+        with cp.cuda.Device(x.device):
+            rstd = cp.empty((n_rows,), dtype=x.dtype)
+        
+        # Compute strides in elements
+        x_row_stride = x.strides[0] // x.itemsize
+        y_row_stride = y.strides[0] // y.itemsize
+        
+        # Map dtype to Triton flag
+        dtype_flag = 0 if x.dtype == cp.float32 else 1
+        
+        # Launch kernel
+        grid = (n_rows,)
+        rms_norm_forward_kernel[grid](
+            y.data.ptr,
+            y_row_stride,
+            rstd.data.ptr if rstd is not None else None,  
+            x.data.ptr,
+            x_row_stride,
+            gamma.data.ptr if gamma is not None else None,
+            DTYPE_FLAG=dtype_flag,
+            eps=eps,
+            n_cols=n_cols,
+            BLOCK_SIZE=BLOCK_SIZE
+        )
+        
+        if training:
+            return y, rstd
+        return y
+        
 def fused_rmsnorm_backward(x, rstd, dy, gamma=None, use_dlpack=True):
     """
     Backward pass for fused RMSNorm using Triton kernel.
@@ -317,9 +334,8 @@ def fused_rmsnorm_backward(x, rstd, dy, gamma=None, use_dlpack=True):
         # Convert back to original dtype
         if gamma is not None:
             dgamma = dgamma.astype(gamma.dtype)
-
+   
     return dx, dgamma
-
 
 if __name__ == "__main__":
     import numpy as np
