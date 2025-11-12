@@ -152,7 +152,7 @@ def fused_layernorm(input, weight, bias, eps=1e-5, training=True):
 
     ### during training we return intermediate tensors ###
     if training:
-        output, x_hat, inv_var = outputs
+        output, mean, inv_var = outputs
     else:
         output = outputs
 
@@ -165,11 +165,12 @@ def fused_layernorm(input, weight, bias, eps=1e-5, training=True):
         ### Reshape grad back to (*xE) ###
         grad_flat = grad_output.reshape(-1, embed_dim)
 
-        grads = fused_layernorm_backward(x_hat=x_hat,
+        grads = fused_layernorm_backward(x=input_arr,
+                                         mean=mean,
                                          inv_var=inv_var,
                                          dy=grad_flat,
                                          gamma=weight_arr, 
-                                         bias=bias_arr)
+                                         beta=bias_arr)
 
         dx, dgamma, dbeta = grads
 
