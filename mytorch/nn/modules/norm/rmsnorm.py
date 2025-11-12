@@ -1,4 +1,3 @@
-# mytorch/nn/modules/rmsnorm.py
 import mytorch
 from ..base_module import Module
 import mytorch.nn.functional as F
