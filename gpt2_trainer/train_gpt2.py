@@ -150,12 +150,17 @@ class TokenLoader(Dataset):
         self.num_tokens = self.arr.shape[0]
     
     def __len__(self):
+
         """
-        We dont really have the number of "samples" in our data as we just
-        grab random sets of consecutive tokens of size context_length. Lets just
-        give a good guess!
+        We dont really have a len here as we will just be randomly sampling slices
+        from out dataset. We only are doing this so our dataloader can prefetch data
+        for us as the model is doing its thing. 
+
+        So lets just set our len as an even multiple of the batch size, the multiple
+        doenst really matter as we are training in steps and not epochs and the dataloader
+        will just continue to cycle. 
         """
-        return self.num_tokens // self.context_length
+        return args.batch_size_per_gpu * 100
 
     def __getitem__(self, idx):
 
