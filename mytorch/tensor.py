@@ -924,6 +924,32 @@ class Tensor:
 
         return self
 
+    def __floordiv__(self, val):
+        """
+        Element-wise Floor Division of two tensors.
+
+        O = A // B
+        Non-differentiable — gradients are zero.
+        """
+
+        if isinstance(val, Tensor):
+            self._check_broadcast(self, val)
+            val_data = val.data
+        else:
+            val_data = ap.Array(val, dtype=self.dtype, device=self.device)
+
+        output = self.data // val_data
+
+        output = Tensor(
+            output,
+            requires_grad=False,
+            grad_fn=None,
+            grad_fn_name=None,
+            device=self.device,
+        )
+
+        return output
+
     ########################
     ### UNARY OPERATIONS ###
     ########################
@@ -959,6 +985,36 @@ class Tensor:
                         grad_fn_name="<PowBackward>" if requires_grad else None,
                         device=self.device)
         
+        if requires_grad:
+            output._add_parents(self)
+
+        return output
+
+    def __rpow__(self, base):
+        """
+        Element-wise exponentiation with reversed operands:
+        O = base^A
+        dO/dA = base^A * ln(base)
+        """
+
+        output = base ** self.data
+
+        def _rpow_backward(input_grad):
+            # derivative wrt A: d(base^A)/dA = base^A * ln(base)
+            self_grad = input_grad * output * np.log(base)
+
+            if self.grad is None:
+                self.grad = self_grad
+            else:
+                self.grad += self_grad
+
+        requires_grad = self.requires_grad and Tensor.build_graph_enabled()
+        output = Tensor(output,
+                        requires_grad=requires_grad,
+                        grad_fn=_rpow_backward if requires_grad else None,
+                        grad_fn_name="<RPowBackward>" if requires_grad else None,
+                        device=self.device)
+
         if requires_grad:
             output._add_parents(self)
 
