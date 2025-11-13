@@ -8,6 +8,7 @@ class Module:
         self._parameters = {}
         self._modules = {}
         self._buffers = {}
+        self._non_persistent_buffers = set()
         self.training = True
 
     def __setattr__(self, name, value):
@@ -97,16 +98,20 @@ class Module:
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from module._named_parameters_no_dedup(sub_prefix)
             
-    def register_buffer(self, name, tensor):
+    def register_buffer(self, name, tensor, persistent=True):
         """
         Add buffers (non learnable params) to the module
         """
         if not isinstance(tensor, Tensor):
             raise TypeError("Buffers must be Tensors")
         self._buffers[name] = tensor
+
+        if not persistent:
+            self._non_persistent_buffers.add(name)
+
         object.__setattr__(self, name, tensor)
 
-    def named_buffers(self, prefix="", memo=None):
+    def named_buffers(self, prefix="", memo=None, persistent_only=False):
         """
         Get the buffer with its name
         """
@@ -114,6 +119,11 @@ class Module:
             memo = set()
         
         for name, buf in self._buffers.items():
+
+            ### Skip non persistent buffers if we only want persistent ###
+            if persistent_only and name in self._non_persistent_buffers:
+                continue
+
             if buf is not None:
                 # Use same deduplication logic as parameters
                 if "cuda" in buf.device:
@@ -129,16 +139,19 @@ class Module:
         # Recursively get buffers from submodules
         for name, m in self._modules.items():
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
-            yield from m.named_buffers(sub_prefix, memo)
+            yield from m.named_buffers(sub_prefix, memo, persistent_only)
     
-    def _named_buffers_no_dedup(self, prefix=""):
+    def _named_buffers_no_dedup(self, prefix="", persistent_only=False):
         """Yield all buffers with names, including duplicates"""
         for name, param in self._buffers.items():
+            if persistent_only and name in self._non_persistent_buffers:
+                continue
             full_name = f"{prefix}{name}" if prefix else name
             yield full_name, param
+
         for name, module in self._modules.items():
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
-            yield from module._named_parameters_no_dedup(sub_prefix)
+            yield from module._named_buffers_no_dedup(sub_prefix, persistent_only)
 
     def to(self, device):
         """
@@ -207,8 +220,8 @@ class Module:
             else:
                 state[name] = param.numpy()
         
-        # Save all buffers recursively
-        for name, buf in self._named_buffers_no_dedup():
+        # Save all buffers recursively (only want to save persistent buffers)
+        for name, buf in self._named_buffers_no_dedup(persistent_only=True):
             if buf is not None:
                 if "cuda" in buf.device:
                     state[name] = buf.numpy()
@@ -250,7 +263,7 @@ class Module:
                 missing_keys.append(name)
         
         # Load buffers recursively
-        for name, buf in self._named_buffers_no_dedup():
+        for name, buf in self._named_buffers_no_dedup(persistent_only=True):
             if name in state_dict:
                 buf.data[:] = to_device(state_dict[name])
                 try:
