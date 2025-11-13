@@ -7,7 +7,7 @@ import time
 import argparse
 import mytorch
 import matplotlib.pyplot as plt
-from models.gpt2 import GPT2, GPT2Config, Cache
+from gpt2 import GPT2, GPT2Config, Cache
 
 
 def parse_args():
@@ -65,7 +65,7 @@ def benchmark(model, config, device, num_tokens=100, use_cache=False):
         if use_cache:
             cache = out[1]
 
-        probs = mytorch.softmax(logits[:, -1, :], dim=-1)
+        probs = mytorch.nn.functional.softmax(logits[:, -1, :], dim=-1, fused=True)
         next_id = mytorch.multinomial(probs, num_samples=1)[0, 0]
         generated = mytorch.concatenate([generated, next_id.unsqueeze(0).unsqueeze(0)], dim=1)
 

@@ -1,6 +1,6 @@
 import os
 import mytorch
-from models.gpt2 import GPT2, GPT2Config, Cache
+from gpt2 import GPT2, GPT2Config, Cache
 import argparse
 import pickle
 import time

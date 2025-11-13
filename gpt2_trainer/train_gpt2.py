@@ -32,7 +32,7 @@ import mytorch
 import mytorch.nn as nn
 import mytorch.optim as optim
 from mytorch.utils.data import Dataset, DataLoader
-from models.gpt2 import GPT2, GPT2Config
+from gpt2 import GPT2, GPT2Config
 from mytorch import Accelerator
 from tqdm import tqdm
 import pickle
