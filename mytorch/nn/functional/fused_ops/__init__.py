@@ -10,3 +10,4 @@ from .linear import fused_linear_forward
 from .matmul import fused_grouped_matmul
 from .embedding import fused_embedding_forward, fused_embedding_backward
 from .activations import fused_activation_forward, fused_activation_backward
+from .rope import fused_rope_forward, fused_rope_backward
