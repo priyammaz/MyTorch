@@ -22,9 +22,10 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 There were a ton of really helpful resources that I used to make MyTorch! There are too many to include all of them here, so I have placed links at the top of every file with the resources you should definitely explore! But the main inspirations were:
 
 - Awesome implementation at [Autograd-from-Scratch](https://github.com/eduardoleao052/Autograd-from-scratch/tree/main) repository by [eduardoleao052](https://github.com/eduardoleao052)!
-- [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!'
+- [MicroGrad](https://github.com/karpathy/micrograd) is a great place to get started!
 - [nanoGPT](https://github.com/karpathy/nanoGPT/blob/master/train.py) is what much of the GPT2 scripts are based on!
-
+- [nanoChat](https://github.com/karpathy/nanochat) is what much of the bigger models we train are based off of
+- [LigerKernels](https://github.com/linkedin/Liger-Kernel/tree/main) and [Unsloth](https://github.com/unslothai/unsloth) are awesome repos to learn and explore Triton Kernels, and the kernels you find here will be largely based off of these!
 
 ### Installation
 
