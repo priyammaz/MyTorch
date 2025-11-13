@@ -5,7 +5,7 @@ from mytorch.nn.functional import _flags as FLAGS
 from mytorch.nn.functional.utils import get_inner_array, get_inner_inner_array
 from ..fused_ops import fused_cross_entropy_forward, fused_cross_entropy_backward
 
-def auto_cross_entropy(logits, targets, ignore_index=-100):
+def auto_cross_entropy(logits, targets, ignore_index=-100, *args):
     
     *dims, num_classes = logits.shape
     flattened_dim = np.prod(dims)
@@ -42,7 +42,7 @@ def auto_cross_entropy(logits, targets, ignore_index=-100):
 
     return loss
 
-def manual_cross_entropy(logits, targets, ignore_index=-100):
+def manual_cross_entropy(logits, targets, ignore_index=-100, *args):
 
     *dims, num_classes = logits.shape
     flattened_dim = np.prod(dims)
@@ -104,7 +104,7 @@ def manual_cross_entropy(logits, targets, ignore_index=-100):
 
     return out
 
-def fused_cross_entropy(logits, targets, ignore_index=-100):
+def fused_cross_entropy(logits, targets, ignore_index=-100, softcap=None):
 
     assert (ignore_index == -100), "Fused Cross entorpy hardcoded ignore_index to -100, use the same here!"
 
@@ -120,7 +120,7 @@ def fused_cross_entropy(logits, targets, ignore_index=-100):
     valid_counts = mask.sum().get().item()
     
     # Triton kernel forward
-    loss_cp, logsumexp_cp = fused_cross_entropy_forward(logits_data, targets_data)
+    loss_cp, logsumexp_cp = fused_cross_entropy_forward(logits_data, targets_data, softcap)
     
     ### Average by the number of valid elements in the array ###
     loss_value = loss_cp.sum() / valid_counts
@@ -140,6 +140,7 @@ def fused_cross_entropy(logits, targets, ignore_index=-100):
                 logits_data,
                 targets_data,
                 logsumexp_cp,
+                softcap,
                 scale=(grad_output.get().item() / valid_counts)
             ).reshape(*logits.shape).astype(logits.dtype, copy=False)
 
@@ -162,11 +163,15 @@ def fused_cross_entropy(logits, targets, ignore_index=-100):
 
     return out
 
-def cross_entropy(logits, targets, ignore_index=-100, auto=False, fused=False):
+def cross_entropy(logits, targets, ignore_index=-100, softcap=None, auto=False, fused=False):
     if auto:
+        if softcap is not None:
+            raise Exception("Softcapping not supported in auto cross_entropy, apply manually to logits")
         return auto_cross_entropy(logits, targets, ignore_index)
     else:
         _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
+        if softcap is not None and not _use_fused:
+            raise Exception("Softcapping not supported in non_fused cross_entropy, apply manually to logits")
         op = fused_cross_entropy if _use_fused else manual_cross_entropy
         if fused and op is manual_cross_entropy:
             CHECKS.warn_triton_missing()

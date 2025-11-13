@@ -10,6 +10,13 @@ import triton.language as tl
 from .utils import calc_num_warps
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 
+@triton.jit
+def tanh(x):
+    """
+    tanh is just scaled sigmoid
+    """
+    return 2 * tl.sigmoid(2 * x) - 1
+
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def cross_entropy_forward(
@@ -20,7 +27,9 @@ def cross_entropy_forward(
     labels_ptr, 
     NUM_CLASSES: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr # 0 if float32, 1 if float16
+    DTYPE_FLAG: tl.constexpr, # 0 if float32, 1 if float16
+    SOFTCAP: tl.constexpr,
+    USE_SOFTCAP: tl.constexpr
 ):
     """
     Our Logits will be some (N x NUM_CLASSES)
@@ -29,7 +38,7 @@ def cross_entropy_forward(
 
     Cross Entropy Formula w. Softmax together was just:
 
-    CE = log(sum(e^x)) = x_{correct}
+    CE = -log(sum(e^x)) = x_{correct}
 
     And we know the index of correct, its just our label the cooresponding labels. 
     So lets just write a kernel that processes one row at a time. We will grab the 
@@ -42,6 +51,42 @@ def cross_entropy_forward(
     https://github.com/unslothai/unsloth/blob/67ea5e422d65b9afa15748e56d2b1495e5ac06e5/unsloth/kernels/cross_entropy_loss.py#L108
     
     Where they chunk over the NUM_CLASSES dimension. We will keep it simple!
+
+    ### Formulation ###
+    L = -log(p_y)
+
+    where:
+    p_y = exp(x_y) / Σ_i exp(x_i)
+
+    If we plug it in:
+
+    L = -log(p_y)
+      = -log(exp(x_y) / Σ_i exp(x_i))
+      = -log(exp(x_y)) + log(Σ_i exp(x_i))
+      = -x_y + log(Σ_i exp(x_i))
+
+    We compute a logsumexp as log(Σ_i exp(x_i))
+
+    and our final loss is then:
+
+    loss = logsumexp - x_y
+
+    ### Softcapping ###
+    As the magnitude of your logits grow, the softmax becomes sharper (as its exponential). And this typically an issue in large LLMs. So a 
+    trick used to cool the logits is to use softcapping. This comes in a few forms, but the standard one is tanh softcapping:
+
+    softcapped_logits = softcap_scale * tanh(logits / softcap_scale)
+
+    This is a transformation we apply before the softmax calculation, so now this changes to:
+
+    x̃_i = t * tanh(x_i / t)
+    
+    loss = logsumexp(x̃) - x̃_y
+         = log(Σ_i exp(x̃_i)) - x̃_y
+         = log(Σ_i exp(t * tanh(x_i / t))) - t * tanh(x_y / t)
+
+    So basically we need to apply this softcapping to our logits and x_y. 
+
     """
 
     row_idx = tl.program_id(0)
@@ -69,14 +114,18 @@ def cross_entropy_forward(
     ### Incase our block spills over the edge ###
     mask = col_offsets < NUM_CLASSES
 
+    ### Load Label Index ###
+    label_idx = tl.load(labels_ptr)
+
     ### Its pretty common to compute loss in 32 bit precision just incase ###
     ### We dont want any over/underflows at this stage ###
     ### also we are about to do a max as well as an exp, so -inf doesnt effect ###
     ### max and exponentiating it set it to zero ! ###
     logits = tl.load(logits_ptr + col_offsets, mask=mask, other=-float("inf"))
     
-    ### Load Label Index ###
-    label_idx = tl.load(labels_ptr)
+    ### Apply softcapping ###
+    if USE_SOFTCAP:
+        logits = SOFTCAP * tanh(logits / SOFTCAP)
 
     ### Compute the logsumexp (stable so subtract the max inside and add it back outside) ###
     c = tl.max(logits, axis=0)
@@ -87,6 +136,10 @@ def cross_entropy_forward(
 
         ### Load logit at the label idx ###
         x_label = tl.load(logits_ptr + label_idx)
+
+        if USE_SOFTCAP:
+            x_label = SOFTCAP * tanh(x_label / SOFTCAP)
+
         loss = logsumexp - x_label
 
     else:
@@ -122,7 +175,9 @@ def cross_entropy_backward(
     scale,                 # scaler
     NUM_CLASSES: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr
+    DTYPE_FLAG: tl.constexpr,
+    SOFTCAP: tl.constexpr,
+    USE_SOFTCAP: tl.constexpr
 ):  
     """
     The backward pass formula is Pj - yj, where yj is 1 for the correct
@@ -139,6 +194,17 @@ def cross_entropy_backward(
     matrix and use a 2d setup of blocks to be more efficient! Each threadblock doesnt need to
     load the entire row anymore, we will cut each row into some chunks and allow for more
     parallelism!
+
+    ### Softcap ###
+    we need to equivalently backprop through the softcap op as well, but this is easy! Remember that
+    our softcap was essentially:
+
+    softcap(logits) = A * tanh(logits/A)
+
+    The derivative of tanh is 1 - tanh^2
+
+    So then d/dlogits = A * (1 - tanh^2(logits/A)) * (1/A) = (1 - tanh^2(logits/A))
+
     """
 
     row_idx = tl.program_id(0)
@@ -163,7 +229,14 @@ def cross_entropy_backward(
     # Load logits
     x = tl.load(logits_ptr + col_offsets, mask=mask, other=-float("inf"))
     
-    # Compute softmax
+    # The derivative of tanh is (1 - tanh^2(logits/A)), we can precompute the tanh(logits/A) right here
+    # And we can update x with this as that is what is backproped through as our logits
+    partial = x
+    if USE_SOFTCAP:
+        partial = tanh(x / SOFTCAP) # keep this as we need it later
+        x = SOFTCAP * partial
+
+    # Compute softmax (logsumexp trick)
     y = tl.exp(x - logsumexp)
     
     # Subtract 1 for correct label
@@ -172,6 +245,11 @@ def cross_entropy_backward(
         y - 1.0,  # exp(x - logsumexp) - 1
         y,        # exp(x - logsumexp)
     )
+
+    ### Actually do our softcap backward pass ###
+    if USE_SOFTCAP:
+        # Chain grads for y with the grads through the tanh softcap op 
+        y = y * (1.0 - partial * partial)
     
     # Zero out ignored labels
     y = tl.where(label_idx != -100, y, 0.0)
@@ -182,7 +260,7 @@ def cross_entropy_backward(
     # Store to correct location
     tl.store(logits_ptr + col_offsets, y, mask=mask)
 
-def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
+def fused_cross_entropy_forward(logits, labels, softcap=None, use_dlpack=True):
     N, C = logits.shape
     BLOCK_SIZE = triton.next_power_of_2(C)
 
@@ -210,7 +288,9 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
             labels, 
             C, 
             BLOCK_SIZE,
-            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1,
+            SOFTCAP=softcap, 
+            USE_SOFTCAP=True if softcap is not None else False
         )
         
         # Convert back to CuPy
@@ -234,13 +314,15 @@ def fused_cross_entropy_forward(logits, labels, use_dlpack=True):
                 labels.data.ptr, 
                 C, 
                 BLOCK_SIZE,
-                DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1
+                DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1,
+                SOFTCAP=softcap, 
+                USE_SOFTCAP=True if softcap is not None else False
             )       
         
         return loss, logsumexp
 
 def fused_cross_entropy_backward(
-        logits, labels, logsumexp, scale, use_dlpack=True
+        logits, labels, logsumexp, softcap=None, scale=1.0, use_dlpack=True
 ):
     
     """
@@ -274,7 +356,9 @@ def fused_cross_entropy_backward(
             labels,
             scale, 
             C, 
-            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1
+            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1,
+            SOFTCAP=softcap, 
+            USE_SOFTCAP=True if softcap is not None else False
         )
       
         return cp.from_dlpack(logits) # <- our logits have been replaced with the grad here!
@@ -288,7 +372,9 @@ def fused_cross_entropy_backward(
             labels.data.ptr, 
             scale,
             C, 
-            DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1
+            DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1,
+            SOFTCAP=softcap, 
+            USE_SOFTCAP=True if softcap is not None else False
         )
 
         return logits
