@@ -387,9 +387,11 @@ class Accelerator:
 
         if self.world_size <= 1:
             return dataloader
+        
+        accelerator = self
 
         class ShardDataset:
-            def __init__(self, base_dataset, rank, world_size, shuffle=True):
+            def __init__(self, base_dataset, rank, world_size, shuffle=False):
                 self.base = base_dataset
                 self.rank = rank
                 self.world_size = world_size
@@ -399,21 +401,25 @@ class Accelerator:
                 ### Number of Samples per Rank ###
                 self.num_samples_per_rank = (len(self.base) + self.world_size - 1) // self.world_size
                 self.total_size = self.num_samples_per_rank * self.world_size
-
+             
                 ### Initialize Indices ###
+                ### This includes indexes for ALL samples ###
                 self.indices = np.arange(len(self.base))
+
+                ### Set Epoch ###
+                self.set_epoch(self.epoch)
 
             def set_epoch(self, epoch):
 
                 ### Per Epoch Reshuffle of Data Before Resharding ###
                 self.epoch = epoch
-                rand_gen = np.random.default_rng()
+                rand_gen = np.random.default_rng(seed=self.epoch)
                 indices = np.arange(len(self.base))
 
                 ### Random Shuffle Indices ###
                 if self.shuffle:
                     indices = rand_gen.permutation(indices)
-
+                    print(indices)
                 ### Pad to make Divisible by World Size * Samples Per Rank ###
                 ### This makes sure we have even number of batches every time ###
                 if len(indices) < self.total_size:
@@ -423,6 +429,9 @@ class Accelerator:
                 self.indices = indices
 
             def __len__(self):
+                """
+                Remember this dataset is sharded, so each will only see a portion of self.indices
+                """
                 return (len(self.base) + self.world_size - 1) // self.world_size
         
             def __getitem__(self, idx):
@@ -435,33 +444,232 @@ class Accelerator:
                 Rank 1 gets: 1, 5, 9, ...
                 Rank 2 gets: 2, 6, 10, ...
                 Rank 3 gets: 3, 7, 11, ...
+
+                our idx is determined by __len__ and we have made sure our __len__ is limited
+                to number of samples PER rank. So we need to just convert that to the actual
+                index in the dataset
                 """
+
                 real_idx = self.indices[idx*self.world_size + self.rank]
                 return self.base[real_idx]
-        
+
         ### Grab Old Dataset ###
-        shuffle_flag = getattr(dataloader, "shuffle", True)
-        base_dataset = dataloader.dataset
-        sharded_dataset = ShardDataset(base_dataset, world_size=self.world_size, rank=self.rank, shuffle=shuffle_flag)
+        shuffle_flag = getattr(dataloader, "shuffle", True) # Check if we were shuffling in the dataloader
+        base_dataset = dataloader.dataset # grab that dataset
+
+        ### Wrap the dataset with our sharded dataset ###
+        ### The sharded dataset will both handle the separation of samples
+        ### between ranks and also random shuffling (through set_epoch)
+        sharded_dataset = ShardDataset(base_dataset, 
+                                       world_size=self.world_size, 
+                                       rank=self.rank, 
+                                       shuffle=shuffle_flag)
+        
+        ### Replace our dataloaders dataset with this new sharded dataset 
         dataloader.dataset = sharded_dataset
+
+        ### Dataset is already shuffling internally, we can disable shuffle on the dataloader then
+        dataloader.shuffle = False
 
         ### Wrap Dataloader for Epoch Based Shuffling ###
         class EpochShuffledDataLoader:
-            def __init__(self, dataloader, sharded_dataset):
-                self.dataloader = dataloader
-                self.sharded_dataset = sharded_dataset
-                self.epoch = 0
+
+            """
+            This is a wrapper on our actual Dataloader that you can find in mytorch.utils.data::DataLoader
+
+            There are a few things of note to keep in mind here:
+
+            1: Dataset Indexes
+
+            Lets say our dataset has 10 samples, then we have indexes 0-9 to represent them. But we have already
+            wrapped our dataset above in a sharded dataset which splits the data by rank
+
+            So the len(dataset) = 10 but len(shard_dataset) = 5 assuming we have 2 GPUs. Now the len(shard_dataset)
+            may be 5, but we index back to the original 10 in our __getitem__. We store ahead of time some 
+            self.indices that have all indexes for each item of the dataset (this can be preshuffled)
+
+            ```
+            real_idx = self.indices[idx*self.world_size + self.rank]
+            return self.base[real_idx]
+            ```
+
+            Now this sharded_dataset is placed into our Dataloader
+
+            ```
+            dataloader.dataset = sharded_dataset
+            ```
+
+            But the dataloader uses len(self.dataset) to identify how many samples there are. So as far
+            as the Dataloader is concerned it only has 5 samples in it (with again the dataset __getitem__
+            containing the logic to return back to the original dataset index. 
+            
+            2. Two Sets of Indexes
+
+            So now we have two sets of indexes. Our Dataloader thinks there are only 5 samples so it has the 
+            indexes:
+
+            [0, 1, 2, 3, 4]
+
+            But our actual indexes (stored in self.sharded_dataset.indices) are
+
+            [0, 1, 2, 3, 4, 5, 6, 7, 8, 9]
+
+            So when the dataloader says, grab sample index 0 from [0, 1, 2, 3, 4], we do:
+
+            real_idx = self.indices[idx*self.world_size + self.rank]
+
+            so for GPU0: self.indices[0 * 2 + 0] = self.indices[0] = 0
+            and for GPU1: self.indices[0*2 + 1] = self.indices[1] = 1
+
+            So look! We have grabbed two samples (one per gpu) for every index in the DataLoader!
+
+            3. Shuffling
+
+            Shuffling is handled by the sharded dataset. So our self.sharded_dataset.indices could be:
+
+            [2, 9, 5, 6, 1, 7, 4, 0, 3, 8]
+
+            Now when we grab sample index 0 from [0, 1, 2, 3, 4], we do:
+
+            real_idx = self.indices[idx*self.world_size + self.rank]
+
+            so for GPU0: self.indices[0 * 2 + 0] = self.indices[0] = 1
+            and for GPU1: self.indices[0*2 + 1] = self.indices[1] = 9
+
+            For this to work two things needed to happen:
+
+            - Random shuffle is seeded, all ranks must have the same shuffle. This is done in set_epoch!
+            - our dataloader indexes [0, 1, 2, 3, 4] CANNOT be shuffled. These are basically an indicator
+              that tells us, at index 0, grab the first two samples of our data, at index 1, grab the next
+              two samples and so on. Shuffling is already done on the sharded_dataset indexes, no need to do it 
+              again!
+
+            4. Saving
+
+            We want to be able to resume training. This should give a perfect resume if we use 0 dataloader workers
+            but if we have multiple workers, then due to race conditions the order in which we load data into the 
+            queue may be slightly different. So then it will be an approximate, where we may redo or skip a few samples
+
+            This could probably be solved with a Priority queue but its probably not worth the effort!
+
+            To save we create a STATE DICT
+
+            return {
+                    'epoch': self.epoch,
+                    'batches_consumed': self.batches_consumed,
+                    'dataloader_state': self.dataloader.state_dict() if hasattr(self.dataloader, 'state_dict') else None,
+                    'sharded_dataset_epoch': self.sharded_dataset.epoch,
+                    'sharded_dataset_indices': self.sharded_dataset.indices.tolist(),
+                }
+
+            This stores:
+            - epoch: to reshuffle our indexes in set_epoch to exactly what it was when we stopped in this epoch
+            - batches_consumed: how many batches have we already done in this dataset? So we can start from the new batch after that
+            - dataloader_state: the internal dataloader state that has its own tracker. The main thing we care about here 
+              is that it stores the indices [0, 1, 2, 3, 4]. This will repeat some of the metadatas we have (epoch, batches_consumed)
+              but its fine, we can just leave it as is for simplicity as this doesnt take much space at all
+            - sharded_dataset_indices: 
+
+
+            """
+            def __init__(self, dataloader):
+                self.dataloader = dataloader # store dataloader inside 
+                self.sharded_dataset = self.dataloader.dataset # grab internal sharded dataset
+                self.epoch = 0 # how many epochs have we trained (for set_epoch)
+                self.batches_consumed = 0 # How many batches have we consumed inside this epoch (for resuming)
 
             def __iter__(self):
-                self.sharded_dataset.set_epoch(self.epoch)
-                self.epoch += 1
-                return iter(self.dataloader)
+                """
+                Set epoch for consistent shuffling across ranks and iterate.
+                If resuming mid-epoch, indices are already set from load_state_dict.
+                """
+
+                # Only regenerate indices if we're not resuming (indices already set)
+                # if batches consumed is 0, we are at the start of an epoch so set the 
+                # epoch for training. 
+                if self.batches_consumed == 0:
+                    self.sharded_dataset.set_epoch(self.epoch)
+                
+                # The underlying DataLoader's __iter__/__next__ will handle the skipping
+                # based on its batches_consumed value
+                return self._tracking_iterator(iter(self.dataloader))
+            
+            def _tracking_iterator(self, iterator):
+                """
+                Just a helper method that will catch StopIteration and 
+                reset the epoch here
+                """
+                try:
+                    while True:
+                        batch = next(iterator)
+                        self.batches_consumed += 1
+                        ### Key code: We will not return batch but yield them. Ths way 
+                        ### this loop will PAUSE until the next batch is requested
+                        ### as for loops will internally keep calling next()
+                        ### on this generator we just made
+                        yield batch
+
+                ### StopIteration is caught from the dataloader which means we finished, start a new epoch ###       
+                except StopIteration:
+                    self.reset_epoch()
+                    return
 
             def __len__(self):
+                """
+                This is how many samples in our dataloader (which wraps a dataset that only has a partial portion of the data)
+                thus this dataloader len will equivalently only see a part of the data
+                """
                 return len(self.dataloader)
             
-        return EpochShuffledDataLoader(dataloader, sharded_dataset)
-    
+            def state_dict(self):
+                # return {
+                #     'epoch': self.epoch,
+                #     'batches_consumed': self.batches_consumed,
+                #     'dataloader_state': self.dataloader.state_dict(),
+                #     'sharded_dataset_epoch': self.sharded_dataset.epoch,
+                #     'sharded_dataset_indices': self.sharded_dataset.indices.tolist(),
+                # }
+                return self.dataloader.state_dict()
+            
+            def load_state_dict(self, state_dict):
+                """
+                Resume from checkpoint.
+                
+                Args:
+                    state_dict (dict): State from state_dict()
+                """
+
+                ### Set variables from state_dict
+                self.epoch = state_dict['epoch']
+                self.batches_consumed = state_dict["batches_consumed"]
+                
+                # Restore the sharded dataset state FIRST before loading dataloader state
+                # self.sharded_dataset.epoch = state_dict.get('sharded_dataset_epoch', self.epoch)
+                # if 'sharded_dataset_indices' in state_dict:
+                #     self.sharded_dataset.indices = np.array(state_dict['sharded_dataset_indices'])
+
+                ### We can just use set_epoch and this will set the self.shared_dataset.indices ###
+                ### to exactly what it was for this epoch (seeded for random)
+                self.sharded_dataset.set_epoch(self.epoch)
+                
+                # if state_dict['dataloader_state'] is not None and hasattr(self.dataloader, 'load_state_dict'):
+                self.dataloader.load_state_dict(state_dict)
+
+            def reset_epoch(self):
+                self.epoch += 1
+                self.batches_consumed = 0
+                self.dataloader.reset_epoch()
+                    
+        new_loader = EpochShuffledDataLoader(dataloader)
+        
+        ### Create a list of all dataloaders to store in save_state
+        if not hasattr(self, "dataloaders"):
+            self.dataloaders = [new_loader]
+        else:
+            self.dataloaders.append(new_loader)
+
+        return new_loader
+
     def backward(self, loss):
 
         ### Sanity check to skip updated if we have a NAN Loss ###
@@ -713,24 +921,26 @@ class Accelerator:
 
             print(f"Saving Checkpoint to {path_to_checkpoint}")    
 
-            ### Create checkpoint directory
-            os.makedirs(path_to_checkpoint, exist_ok=True)
+            if hasattr(self, "model"):
 
-            ### Get Model Weights ###
-            model_state = {}
-  
-            for i, (name, param) in enumerate(self.model._named_parameters_no_dedup()):
-                
-                ### if in mixed precision we can grab our full precision parameters ###
-                ### from our stored internal buffer ###
-                if self.mixed_precision:
-                    fp32_param = self.fp32_params[i]
+                ### Create checkpoint directory
+                os.makedirs(path_to_checkpoint, exist_ok=True)
+
+                ### Get Model Weights ###
+                model_state = {}
+    
+                for i, (name, param) in enumerate(self.model._named_parameters_no_dedup()):
                     
-                    model_state[name] = cp.asnumpy(fp32_param.data._array)
-                else:
-                    model_state[name] = cp.asnumpy(param.data._array)
+                    ### if in mixed precision we can grab our full precision parameters ###
+                    ### from our stored internal buffer ###
+                    if self.mixed_precision:
+                        fp32_param = self.fp32_params[i]
+                        
+                        model_state[name] = cp.asnumpy(fp32_param.data._array)
+                    else:
+                        model_state[name] = cp.asnumpy(param.data._array)
 
-            save_file(model_state, os.path.join(path_to_checkpoint, "model.safetensors"))
+                save_file(model_state, os.path.join(path_to_checkpoint, "model.safetensors"))
 
             if not save_model_only:
                 
@@ -755,6 +965,14 @@ class Accelerator:
                     with open(mp_config_path, "wb") as f:
                         pickle.dump(mixed_precision_config, f)
 
+                if hasattr(self, "dataloaders"):
+                    assert isinstance(self.dataloaders, list)
+                    ### Loop through all prepped dataloaders and save state ###
+                    for idx, loader in enumerate(self.dataloaders):
+                        path_to_loader_save = os.path.join(path_to_checkpoint, f"dataloader_{idx}.bin")
+                        with open(path_to_loader_save, "wb") as f:
+                            pickle.dump(loader.state_dict(), f)
+
         self.wait_for_everyone()
     
     def load_state(self, path_to_checkpoint):
@@ -763,29 +981,30 @@ class Accelerator:
 
         ### Load model ###
         path_to_model = os.path.join(path_to_checkpoint, "model.safetensors")
-        model_state = load_file(path_to_model)
+        if os.path.exists(path_to_model):
+            model_state = load_file(path_to_model)
 
-        ### Copy Weights in ###
-        for i, (name, param) in enumerate(self.model._named_parameters_no_dedup()):
+            ### Copy Weights in ###
+            for i, (name, param) in enumerate(self.model._named_parameters_no_dedup()):
 
-            weights = model_state[name]
+                weights = model_state[name]
 
-            ### If we are in mixed precision we need to update both our model weights 
-            ### in fp16 and our fp32 buffer
-            if self.mixed_precision:
-                self.fp32_params[i].data._array[:] = cp.asarray(weights, dtype=cp.float32)
-                param.data._array[:] = self.fp32_params[i].data._array.astype(cp.float16)
-            
-            else:
-                param.data._array[:] = cp.asarray(weights, dtype=param.data._array.dtype)   
+                ### If we are in mixed precision we need to update both our model weights 
+                ### in fp16 and our fp32 buffer
+                if self.mixed_precision:
+                    self.fp32_params[i].data._array[:] = cp.asarray(weights, dtype=cp.float32)
+                    param.data._array[:] = self.fp32_params[i].data._array.astype(cp.float16)
+                
+                else:
+                    param.data._array[:] = cp.asarray(weights, dtype=param.data._array.dtype)   
 
-        ### Ensure all GPUs have same starting point ###
-        if self.comm is not None:
-            for param in self.model.parameters():
-                self.comm.broadcast(param.data._array, root=0)
-            if self.mixed_precision:
-                for fp32_param in self.fp32_params:
-                    self.comm.broadcast(fp32_param.data._array, root=0)
+            ### Ensure all GPUs have same starting point ###
+            if self.comm is not None:
+                for param in self.model.parameters():
+                    self.comm.broadcast(param.data._array, root=0)
+                if self.mixed_precision:
+                    for fp32_param in self.fp32_params:
+                        self.comm.broadcast(fp32_param.data._array, root=0)
 
         ### Load Optimizer ###
         path_to_optimizer = os.path.join(path_to_checkpoint, "optimizer.bin")
@@ -812,6 +1031,19 @@ class Accelerator:
 
             else:
                 warnings.warn("If you are resuming mixed precision training without its checkpointed config, you may have instability in training")
+
+        ### Load Dataloaders ###
+        if hasattr(self, "dataloaders"):
+            assert isinstance(self.dataloaders, list)
+
+            for idx, loader in enumerate(self.dataloaders):
+                path_to_loader_save = os.path.join(path_to_checkpoint, f"dataloader_{idx}.bin")
+                if os.path.exists(path_to_loader_save):
+                    with open(path_to_loader_save, "rb") as f:
+                        data_state_dict = pickle.load(f)
+                    loader.load_state_dict(data_state_dict)
+                else:
+                    warnings.warn(f"Couldn't find {path_to_loader_save}, cannot resume dataloader, starting from scratch!!")
 
     def __del__(self):
         if self.comm is not None:
