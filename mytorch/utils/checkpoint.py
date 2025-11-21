@@ -17,9 +17,18 @@ So what we do is add an extra Global variable _checkpoint_backward_count, and ev
 trigger a manual Garbage Collection. Calling GC every backward pass is prohibitively slow, so this is a reasonable
 balance to call it every 10 iterations (the default)
 
-GAINS: We get to train models with a 20-30% decrease in memory use but as expected training slows down due to the recompute
-of the forward pass (i measure about 20-40% slowdown in training speed of GPT2 when wrapping the entire transformer block in 
-checkpointing)
+GAINS: 
+
+When training a 124M parameter GPT2, I measured about a 50% reduction in memory applying gradient accumulation
+to entire transformer blocks (meaning the entire block had to be recomputed in the backward pass), with a slowdown of
+about 16%. Thats not too bad considering we can train giant models (given we have some extra patience!)
+
+When training a 500M parameters GPT2, I measured again around a 50% reduction in memory and again about a 16% slowdown!
+Again not a bad tradeoff!
+
+Percent slowdown is much higher in models that are not compute bound. If your model runs super fast already (like the tiny GPT2)
+then the overhead of the garbage collector slows things down quite a bit. On the other hand in large models, this is less of an 
+issue. Its not the best code but it works!
 
 """
 from .. import Tensor, no_grad
@@ -27,7 +36,7 @@ import gc
 
 _checkpoint_backward_count = 0
 
-def checkpoint(fn, *args, iter_gc=20):
+def checkpoint(fn, *args, iter_gc=10):
     """
     When checkpointing we do not store any of the intermediates
     in the forward pass (no_grad basically) and call forward again
@@ -107,6 +116,7 @@ def checkpoint(fn, *args, iter_gc=20):
         grad_fn_name=f"<Checkpoint{name}Backward>"
     )
 
-    out._add_parents(*args)
+    ### Args can be really anything, but parents can only be tensors ###
+    out._add_parents(*[a for a in args if isinstance(a, Tensor)])
     
     return out

@@ -76,6 +76,7 @@ def parse_args():
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
     parser.add_argument("--mixed_precision", action="store_true")
+    parser.add_argument("--enable_gradient_checkpointing", action="store_true")
 
     ### Logging Config ###
     parser.add_argument("--log_iter", type=int, default=100)
@@ -158,12 +159,11 @@ class TokenLoader(Dataset):
 
         So lets just set our len as an even multiple of the batch size, the multiple
         doenst really matter as we are training in steps and not epochs and the dataloader
-        will just continue to cycle. 
+        will just continue to cycle.
         """
-        return args.batch_size_per_gpu * 100
+        return args.batch_size_per_gpu * 9999
 
     def __getitem__(self, idx):
-
         start_idx = np.random.randint(low=0, high=self.num_tokens - self.context_length - 1)
         x = self.arr[start_idx:start_idx+self.context_length]
         y = self.arr[start_idx+1:start_idx+self.context_length+1]
@@ -248,6 +248,9 @@ gpt2config = GPT2Config(
                                                                                                           #    normal distributed launch to work, and i dont
                                                                                                           #    want to check env flags inside the model
 model = GPT2(gpt2config)
+if args.enable_gradient_checkpointing:
+    accelerator.print("Enabling Gradient Checkpointing!!")
+    model.enable_gradient_checkpointing()
 
 total_params = 0
 for param in model.parameters():
@@ -398,31 +401,29 @@ while train:
                 accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
 
             if completed_steps % args.eval_interval == 0:
-                
                 accelerator.print("Evaluating!")
                 model.eval()
-
                 val_losses = []
 
                 for val_iter, (inputs, targets) in enumerate(testloader):
-                    if val_iter >= args.eval_iterations:
-                        break  # stop after desired number of eval iterations
-
                     inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
-
+                
                     with mytorch.no_grad():
                         logits = model(inputs)
-
-                    loss = loss_fn(logits, targets)
+                        loss = loss_fn(logits, targets)
                     loss_val = accelerator.gather_for_metrics(loss)
                     val_losses.append(loss_val)
 
+                    if val_iter >= args.eval_iterations:
+                        break
+                  
                 ### Log Loss ###
-                val_losses = np.mean(val_losses)
-                accelerator.print("Validation Loss:", val_losses)
-                if args.log_wandb:
-                    logging_dict = {"val_loss": val_losses}
-                    accelerator.log(logging_dict, step=completed_steps)
+                if len(val_losses) > 0:  # Make sure we have some losses to compute
+                    val_losses = np.mean(val_losses)
+                    accelerator.print("Validation Loss:", val_losses)
+                    if args.log_wandb:
+                        logging_dict = {"val_loss": val_losses}
+                        accelerator.log(logging_dict, step=completed_steps)
 
                 ### Set back into Training Mode ###
                 model.train()

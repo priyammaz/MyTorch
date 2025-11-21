@@ -7,6 +7,7 @@ CUPYX_DISTRIBUTED_HOST="127.0.0.1"
 CUPYX_DISTRIBUTED_PORT="13333"
 FUSED=false
 MIXED_PRECISION=false
+GRADIENT_CHECKPOINTING=false
 DLPACK_DISABLE=false
 LOG_WANDB=false
 
@@ -42,6 +43,9 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mixed_precision)
             MIXED_PRECISION=true
+            ;;
+        --gradient_checkpointing)
+            GRADIENT_CHECKPOINTING=true
             ;;
         --disable_dlpack)
             DLPACK_DISABLE=true
@@ -84,17 +88,20 @@ fi
 if [[ "$MIXED_PRECISION" == true ]]; then
     EXTRA_ARGS+=" --mixed_precision"
 fi
+if [[ "$GRADIENT_CHECKPOINTING" == true ]]; then
+    EXTRA_ARGS+=" --enable_gradient_checkpointing"
+fi
 if [[ "$LOG_WANDB" == true ]]; then
     EXTRA_ARGS+=" --log_wandb"
 fi
 
+
 case "$TARGET" in
     owt)
         $CMD gpt2_trainer/train_gpt2.py  \
-            --project_name gpt2-large-owt \
+            --project_name gpt2-lage-owt \
             --working_directory work_dir \
             --checkpoint_iterations 1000 \
-            --always_save_checkpoint \
             --context_length 1024 \
             --model_size base \
             --dropout_p 0.0 \
@@ -119,14 +126,13 @@ case "$TARGET" in
         $CMD gpt2_trainer/train_gpt2.py \
             --project_name gpt2-small-shakespeare \
             --working_directory work_dir \
-            --checkpoint_iterations 100 \
             --context_length 256 \
             --model_size small \
             --dropout_p 0.0 \
             --path_to_data data/shakespeare \
             --train_iterations 2500 \
             --eval_interval 100 \
-            --eval_iterations 50 \
+            --eval_iterations 50  \
             --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
             --gradient_accumulation_steps 1 \
             --max_lr 1e-3 \
