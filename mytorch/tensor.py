@@ -2045,7 +2045,7 @@ class Tensor:
             out._add_parents(self)
         
         # Return values and indices (wrapped in Tensor for indices)
-        indices_tensor = Tensor(sorted_indices, requires_grad=False, device=device, dtype=int32)
+        indices_tensor = Tensor(sorted_indices, requires_grad=False, device=self.device, dtype=int32)
 
         return out, indices_tensor
 
