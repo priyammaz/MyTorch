@@ -2,6 +2,7 @@
 
 TARGET=""
 PER_GPU_BATCH_SIZE=32
+GRADIENT_CHECKPOINTING=false
 TRITON_AUTOTUNE=false
 DLPACK_DISABLE=false
 LOG_WANDB=false
@@ -47,6 +48,9 @@ if [[ "$DLPACK_DISABLE" == true ]]; then
 fi
 
 EXTRA_ARGS=""
+if [[ "$GRADIENT_CHECKPOINTING" == true ]]; then
+    EXTRA_ARGS+=" --enable_gradient_checkpointing"
+fi
 if [[ "$LOG_WANDB" == true ]]; then
     EXTRA_ARGS+=" --log_wandb"
 fi
