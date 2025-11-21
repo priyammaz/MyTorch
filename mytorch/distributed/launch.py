@@ -10,6 +10,7 @@ def main():
     parser.add_argument("--num_gpus", type=int, required=True)
     parser.add_argument("--master_addr", type=str, default="127.0.0.1")
     parser.add_argument("--master_port", type=str, default="13333")
+    parser.add_argument("-m", "--module", action="store_true")
 
     # Parse only launcher-specific args
     args, training_args = parser.parse_known_args()
@@ -24,9 +25,14 @@ def main():
             env["LOCAL_RANK"] = str(rank)
             env["CUPYX_DISTRIBUTED_HOST"] = os.environ.get("CUPYX_DISTRIBUTED_HOST", args.master_addr)
             env["CUPYX_DISTRIBUTED_PORT"] = os.environ.get("CUPYX_DISTRIBUTED_PORT", args.master_port)
-
-            cmd = [sys.executable, args.training_script] + training_args
-
+            
+            if args.module:
+                ### run in module mode like python -m package.run
+                cmd = [sys.executable, "-m", args.training_script] + training_args
+            else:
+                ### otherwise run like normal 
+                cmd = [sys.executable, args.training_script] + training_args
+                
             ### Start new process group ###
             p = subprocess.Popen(
                 cmd, 

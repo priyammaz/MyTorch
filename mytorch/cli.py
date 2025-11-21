@@ -254,7 +254,8 @@ def launch():
     parser.add_argument("--num_gpus", type=int, default=None)
     parser.add_argument("--master_addr", type=str, default=None)
     parser.add_argument("--master_port", type=str, default=None)
-    
+    parser.add_argument("-m", "--module", action="store_true")
+ 
     # Parse only what we care about, keep the rest
     args, remaining = parser.parse_known_args(sys.argv[1:])
     
@@ -297,6 +298,9 @@ def launch():
     master_port = args.master_port if args.master_port is not None else config.get("master_port", "13333")
     final_args.extend(["--master_port", master_port])
     
+    if args.module:
+        final_args.append("-m")
+        
     # Add all remaining args (including training script and its args)
     final_args.extend(remaining)
     
