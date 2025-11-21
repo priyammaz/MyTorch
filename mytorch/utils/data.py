@@ -119,8 +119,8 @@ class DataLoader:
             end_idx = min(self.current_idx + self.batch_size, len(self.dataset))
 
             ### Grab the batch of indexes ###
-            batch_indices = self.indices[self.current_idx:end_idx]
-            
+            batch_indices = self.indices[self.current_idx:end_idx].tolist()
+                        
             ### Set the current index ###
             self.current_idx = end_idx
             
