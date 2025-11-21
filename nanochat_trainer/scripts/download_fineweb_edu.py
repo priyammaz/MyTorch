@@ -4,8 +4,10 @@ This just downloads the FineWebEDU split, each parquet file is ~ 2.15 GB of data
 import os
 import requests
 import argparse
+import numpy as np
 from pathlib import Path
 from concurrent.futures import ProcessPoolExecutor, as_completed
+from nanochat_trainer.core.nanochat_gpt import GPT, GPTConfig
 
 TOKENS_PER_FILE = 750_000_000 # not on our tokenizer but based on the dataset "token_count" column
 ROOT_URL = "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu/resolve/main/sample/100BT/"
@@ -13,18 +15,57 @@ ROOT_URL = "https://huggingface.co/datasets/HuggingFaceFW/fineweb-edu/resolve/ma
 def parse_args():
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--num_model_parameters", default=500_000_000, type=int)
+
     parser.add_argument("--path_to_save", default="data/FineWebEDU/raw_data", type=str)
     parser.add_argument("--num_workers", default=8, type=int)
-    
+    parser.add_argument("--chinchilla_ratio", default=20, type=float)
+
+    # New model hyperparameters
+    parser.add_argument("--vocab_size", default=2**16, type=int)
+    parser.add_argument("--context_length", default=2048, type=int)
+    parser.add_argument("--num_blocks", default=20, type=int)
+    parser.add_argument("--embed_dim", default=1280, type=int)
+    parser.add_argument("--num_q_heads", default=10, type=int)
+    parser.add_argument("--num_kv_heads", default=10, type=int)
+    parser.add_argument("--mlp_ratio", default=4, type=int)
+
     args = parser.parse_args()
+    
     return args
 
-def compute_chincilla(num_params):
+def get_num_params(args):
+
+    config = GPTConfig(
+        vocab_size=args.vocab_size, 
+        sequence_length=args.context_length, 
+        embed_dim=args.embed_dim, 
+        mlp_ratio=args.mlp_ratio, 
+        num_blocks=args.num_blocks,
+        num_q_heads=args.num_q_heads, 
+        num_kv_heads=args.num_kv_heads
+    )
+
+    model = GPT(config)
+    
+    total = 0
+    for name, param in model.named_parameters():
+        total += np.prod(param.shape)
+
+    print(f"This Model Has {total:,} Parameters")
+    return total
+
+def compute_chincilla(num_params, chinchilla_ratio=20, just_a_little_extra=1.2):
     """
     chinchilla recommends roughly 20 times the tokens as we have parameters
+
+    We also just grab a little extra data as our grouping will drop some and we need a train/test split
+    so we have some buffer
     """
-    return num_params * 20
+    wanted_tokens = int(num_params * chinchilla_ratio * just_a_little_extra)
+    
+    print(f"With the selected Chinchilla Ratio {chinchilla_ratio}, we need {wanted_tokens:,} Tokens for Training!")
+
+    return wanted_tokens
 
 def generate_parquet_names(n_files):
     """
@@ -46,8 +87,8 @@ def generate_parquet_names(n_files):
         names.append(f"{group1:03d}_{group2:05d}.parquet")
     return names
 
-def how_many_files(num_params):
-    recommended_tokens = compute_chincilla(num_params) * 1.1 # Give a little buffer
+def how_many_files(num_params, chinchilla_ratio=20):
+    recommended_tokens = compute_chincilla(num_params, chinchilla_ratio) * 1.1 # Give a little buffer
     if recommended_tokens > 100_000_000_000:
         raise Exception("We are processing the 100B split of FineWeb!")
     return int((recommended_tokens // TOKENS_PER_FILE) + 1)
@@ -107,8 +148,10 @@ if __name__ == "__main__":
     print("-"*50)
 
     args = parse_args()
-    os.makedirs(args.path_to_save, exist_ok=True)
 
-    num_files = how_many_files(args.num_model_parameters)
+    total_params = get_num_params(args)
+
+    os.makedirs(args.path_to_save, exist_ok=True)
+    num_files = how_many_files(total_params, args.chinchilla_ratio)
     file_names = generate_parquet_names(num_files)
     download_files_parallel(file_names, args.path_to_save, args.num_workers)

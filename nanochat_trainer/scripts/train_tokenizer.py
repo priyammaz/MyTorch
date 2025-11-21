@@ -138,8 +138,8 @@ def train_tokenizer(path_to_dataset,
         special_tokens=SPECIAL_TOKENS
     )
 
-    ### Get Dataset ###
-    print("Loading Dataset")
+    ### Get Dataset (We load it here so it gets cached, later when tokenizing loading happens much quicker!) ###
+    print("Loading Dataset, This can take a bit the first time you run it!")
     training_dataset = load_dataset("parquet", data_dir=path_to_dataset, num_proc=num_workers)["train"].shuffle(seed=42)
 
     cumulative_chars = 0
