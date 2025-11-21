@@ -316,6 +316,8 @@ class GPT2(nn.Module):
         super().__init__()
 
         self.config = config
+        self._gradient_checkpointing_enabled = False
+
         self.embeddings = Embeddings(config)
         
         self.blocks = nn.ModuleList([
@@ -344,6 +346,9 @@ class GPT2(nn.Module):
         ### Weight tying ###
         self.lm_head.weight = self.embeddings.char_embeddings.weight
 
+    def enable_gradient_checkpointing(self):
+        self._gradient_checkpointing_enabled = True
+
     def forward(self, x, cache=None):
 
         ### How many tokens have we processed already? 
@@ -353,9 +358,12 @@ class GPT2(nn.Module):
         x = self.embeddings(x, past_length)
 
         for layer_idx, block in enumerate(self.blocks):
-            x = block(x, cache=cache, layer_idx=layer_idx)
-            
 
+            if not self._gradient_checkpointing_enabled:
+                x = block(x, cache=cache, layer_idx=layer_idx)
+            else:
+                x = mytorch.utils.checkpoint(block, x, cache, layer_idx)
+            
         x = self.final_layer_norm(x)    
         x = self.lm_head(x)
         
