@@ -284,6 +284,8 @@ class Accelerator:
             ### Now cast all our parameters to float16 ###
             for param in self.model._parameters_no_dedup():
                 param.data._array = param.data._array.astype("float16")
+            for param in self.model._buffers_no_dedup():
+                param.data._array = param.data._array.astype("float16")
        
         return self.model
     
@@ -451,7 +453,7 @@ class Accelerator:
                 """
 
                 real_idx = self.indices[idx*self.world_size + self.rank]
-                return self.base[real_idx]
+                return self.base[int(real_idx)]
 
         ### Grab Old Dataset ###
         shuffle_flag = getattr(dataloader, "shuffle", True) # Check if we were shuffling in the dataloader
