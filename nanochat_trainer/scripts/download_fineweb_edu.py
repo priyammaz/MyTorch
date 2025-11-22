@@ -20,7 +20,6 @@ def parse_args():
     parser.add_argument("--num_workers", default=8, type=int)
     parser.add_argument("--chinchilla_ratio", default=20, type=float)
 
-    # New model hyperparameters
     parser.add_argument("--vocab_size", default=2**16, type=int)
     parser.add_argument("--context_length", default=2048, type=int)
     parser.add_argument("--num_blocks", default=20, type=int)
