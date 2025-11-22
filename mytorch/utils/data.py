@@ -120,6 +120,7 @@ class DataLoader:
 
             ### Grab the batch of indexes ###
             batch_indices = self.indices[self.current_idx:end_idx].tolist()
+            batch_indices = [int(i) for i in batch_indices]
                         
             ### Set the current index ###
             self.current_idx = end_idx
