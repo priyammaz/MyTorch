@@ -141,6 +141,16 @@ class Module:
             sub_prefix = f"{prefix}{name}." if prefix else f"{name}."
             yield from m.named_buffers(sub_prefix, memo, persistent_only)
     
+    def _buffers_no_dedup(self, persistent_only=False):
+        """Yield all buffers with names, including duplicates"""
+        for name, param in self._buffers.items():
+            if persistent_only and name in self._non_persistent_buffers:
+                continue
+            yield param
+
+        for name, module in self._modules.items():
+            yield from module._buffers_no_dedup(persistent_only)
+
     def _named_buffers_no_dedup(self, prefix="", persistent_only=False):
         """Yield all buffers with names, including duplicates"""
         for name, param in self._buffers.items():
