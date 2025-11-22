@@ -1,7 +1,7 @@
 """
 Inference will be handled by a Pipeline kind of like Huggingface Pipelines, lots of inspiration
 from nanoChat of course!
-https://github.com/karpathy/nanochat/blob/master/nanochat/engine.py#L228
+https://github.com/karpathy/nanochat/blob/master/nanochat/engine.py
 """
 
 import mytorch
