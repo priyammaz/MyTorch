@@ -3,14 +3,14 @@ This will be basically a whatever transformer decoder that takes bits
 and bobs from here and there. Its not optimal but its ours! Main 
 ideas will come from nanoChat and Llama!
 
-Defaults make this a 560,988,160 Parameter Model! Not too bad given we arent using PyTorch!
+Defaults make this a 516,423,680 Parameter Model! Not too bad given we arent using PyTorch!
 
 Thought process:
 - Rotary embeds (why not its defacto these days)
 - Parameterless norm seems to work in nanoChat so we do the same here!
 - Relu squared activation (who would have though that would work lol https://arxiv.org/abs/2402.03804) 
-- Softcapping is nice addition (and i already wrote the kernel might as well use it)
 - Bias disabled everywhere, who wants biases anyway??
+- Weight tying, we get to add a few extra layers instead of having 2 different massive matricies for embeddings and prediction head
 
 Also, this will ONLY Support Fused ops. The model is too big to train/inference without it
 This means you will need the Triton install!
@@ -27,39 +27,19 @@ class GPTConfig:
     max_seq_len: int = 2048
     embed_dim: int = 1280
     mlp_ratio: int = 4
-    num_blocks: int = 20
-    num_q_heads: int = 10
+    num_blocks: int = 24
+    num_q_heads: int = 20
     num_kv_heads: int = 5
     dropout_p: float = 0.0
     use_fused_ops: bool = True
     use_bias: bool = False
     rope_base: float = 10000
-    softcap: float = 15.0
 
 def norm(x, training=True):
     """
     parameterless rmsnorm
     """
     return F.rmsnorm(x, weight=None, training=training, fused=True)
-
-class Embeddings(nn.Module):
-
-    def __init__(self, config):
-        super().__init__()
-
-        self.config = config
-
-        ### Embeddings for Tokens ###
-        self.embeddings = nn.Embedding(config.vocab_size, 
-                                       config.embed_dim, 
-                                       fused=config.use_fused_ops)
-
-    def forward(self, input_ids):
-
-        ### Convert Tokens to Embeddings ###
-        x = self.embeddings(input_ids)
-
-        return x
 
 class Attention(nn.Module):
 
@@ -119,9 +99,6 @@ class Attention(nn.Module):
         ### Rotary embeds
         cos, sin = cos_sin
         q, k = F.apply_rotary_pos_embed(q, k, cos, sin, unsqueeze_dim=2, fused=self.fused)
-
-        ### Prenorm q,k
-        q, k = norm(q), norm(k)
 
         ### Make batch x num_heads x seq_len x embed_dim ###
         q, k, v = q.transpose(1,2), k.transpose(1,2), v.transpose(1,2)
@@ -262,7 +239,9 @@ class GPT(nn.Module):
         self.config = config
         self._gradient_checkpointing_enabled = False
 
-        self.embeddings = Embeddings(config)
+        self.embeddings = nn.Embedding(config.vocab_size, 
+                                       config.embed_dim, 
+                                       fused=config.use_fused_ops)
         
         self.blocks = nn.ModuleList([
             TransformerBlock(config, layer_idx) for layer_idx in range(config.num_blocks)
@@ -273,19 +252,13 @@ class GPT(nn.Module):
                                  bias=config.use_bias,
                                  fused=config.use_fused_ops)
 
+        self.lm_head.weight = self.embeddings.weight
+
         ### Initialize Weights ###
         self.apply(_init_weights)
         for name, param in self.named_parameters():
-            # This one is new to me, normally we reduce the mangitude of weights 
-            # of the last layer of blocks so we reduce having an exploding 
-            # magnitude right at the beginning of training, but nanoChat
-            # just zeros it out to completely reduce this effect! So ill
-            # give it a try to!!
-            # in practice i see that the grad norm starts out very small 
-            # and slowly rises and then falls again, rather than just 
-            # starting large and falling, so nice trick here!
-            if ("out_proj" in name) or ("lm_head" in name):
-                mytorch.nn.init.zeros_(param)
+            if "out_proj" in name:
+                mytorch.nn.init.normal_(param, mean=0.0, std=(0.02/math.sqrt(2 * config.num_blocks)))
 
         cos, sin = F.precompute_rotary_cos_sin(
             head_dim=config.embed_dim//config.num_q_heads, 
@@ -299,7 +272,7 @@ class GPT(nn.Module):
     def enable_gradient_checkpointing(self):
         self._gradient_checkpointing_enabled = True
 
-    def forward(self, input_ids, target_ids, cache=None):
+    def forward(self, input_ids, target_ids=None, cache=None):
 
         batch_size, seq_len = input_ids.shape
 
@@ -327,35 +300,24 @@ class GPT(nn.Module):
         ### Projection Head ###
         logits = self.lm_head(x)
         
-        ### If no targets are provided we will just apply our softcap to the logits and return ###
-        ### Also I assume if no targets we are in inference mode, return the cache back as well! ###
+        ### I assume if no targets we are probably in inference mode, return the cache back as well! ###
         if target_ids is None:
-            logits = self.config.softcap * F.tanh(logits / self.config.softcap, fused=self.config.use_fused_ops)
             to_return = (logits, )
             if cache is not None:
                 to_return += (cache, )
             return to_return
         
-        ### If targets are provided we can compute a loss! ###    
-        ### Fused CE has softcap built right in so we can use that ###
-        ### again I assume you are using fused ops here because why would you want to train a ###
-        ### massive model without it? ###
-
-        ### I assume we are training here, and we dont need the cache in training (it is unused) so we dont pass it in ###
+        ### I assume we are training here, and we dont need the cache in training (it is unused) so we dont return it ###
         else:
             loss = F.cross_entropy(logits, 
                                    target_ids, 
-                                   softcap=self.config.softcap,
                                    fused=self.config.use_fused_ops)
             return logits, loss
     
 ### Standard Weight Init for Transformers ###
 def _init_weights(module):
     if isinstance(module, nn.Linear):
-        # https://arxiv.org/pdf/2310.17813
-        fan_out, fan_in = module.weight.shape
-        std = 1.0 / math.sqrt(fan_in) * min(1.0, math.sqrt(fan_out / fan_in))
-        mytorch.nn.init.normal_(module.weight, mean=0.0, std=std)
+        mytorch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
         if module.bias is not None:
             mytorch.nn.init.zeros_(module.bias)
             
