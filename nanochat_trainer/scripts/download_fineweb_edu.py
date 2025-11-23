@@ -36,7 +36,7 @@ def get_num_params(args):
 
     config = GPTConfig(
         vocab_size=args.vocab_size, 
-        sequence_length=args.context_length, 
+        max_seq_len=args.context_length, 
         embed_dim=args.embed_dim, 
         mlp_ratio=args.mlp_ratio, 
         num_blocks=args.num_blocks,
@@ -152,5 +152,5 @@ if __name__ == "__main__":
 
     os.makedirs(args.path_to_save, exist_ok=True)
     num_files = how_many_files(total_params, args.chinchilla_ratio)
-    file_names = generate_parquet_names(num_files)
+    file_names = generate_parquet_names(num_files + 1) # Add an extra file for test split
     download_files_parallel(file_names, args.path_to_save, args.num_workers)

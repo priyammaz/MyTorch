@@ -140,7 +140,13 @@ def train_tokenizer(path_to_dataset,
 
     ### Get Dataset (We load it here so it gets cached, later when tokenizing loading happens much quicker!) ###
     print("Loading Dataset, This can take a bit the first time you run it!")
-    training_dataset = load_dataset("parquet", data_dir=path_to_dataset, num_proc=num_workers)["train"].shuffle(seed=42)
+    parquet_files = [os.path.join(path_to_dataset, f) for f in os.listdir(path_to_dataset) if "parquet" in f]
+    training_files, testing_file = parquet_files[:-1], parquet_files[-1]
+    
+    ### Load Dataset ###
+    dataset = load_dataset("parquet", data_files={"train": training_files, "test": testing_file}, num_proc=num_workers)
+    dataset = dataset.select_columns("text")
+    training_dataset = dataset["train"]
 
     cumulative_chars = 0
     num_rows = 0
@@ -155,7 +161,7 @@ def train_tokenizer(path_to_dataset,
 
     ### Keep first 100 (in training split) and last 100 (not in training split) rows for non-training eval ###
     training_eval = "".join(training_dataset[:100]["text"])
-    non_training_eval = "".join(training_dataset[-100:]["text"])
+    non_training_eval = "".join(dataset["test"][:100]["text"])
     
     orig_ratios = {
         "Verification Text": compute_ratio(comparison_tokenizer, verification_text),

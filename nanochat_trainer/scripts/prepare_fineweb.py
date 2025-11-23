@@ -28,9 +28,14 @@ def tokenize_dataset(args):
     ### Load tokenizer ###
     tokenizer = MyTokenizer(os.path.join(args.path_to_tokenizer, "tokenizer.json"))
     
+    ### Get Paths to Downloaded Parquet Files ###
+    parquet_files = [os.path.join(args.path_to_data, f) for f in os.listdir(args.path_to_data) if "parquet" in f]
+    training_files, testing_file = parquet_files[:-1], parquet_files[-1]
+    
     ### Load Dataset ###
-    dataset = load_dataset("parquet", data_dir=args.path_to_data, num_proc=args.num_workers)["train"]
+    dataset = load_dataset("parquet", data_files={"train": training_files, "test": testing_file}, num_proc=args.num_workers)
     dataset = dataset.select_columns("text")
+    print(dataset)
     
     ### Tokenize Dataset
     def tokenize_samples(batch):
@@ -70,8 +75,8 @@ def tokenize_dataset(args):
         desc=f"Grouping into chunks of {args.max_seq_len}",
     )
 
-    ### Random Split ###
-    tokenized_datasets = tokenized_datasets.train_test_split(test_size=args.test_split_pct, seed=42)
+    ### Shuffle Dataset ###
+    tokenized_datasets = tokenized_datasets.shuffle(seed=42)
 
     train_split = tokenized_datasets["train"]
     test_split = tokenized_datasets["test"]
@@ -84,9 +89,6 @@ def tokenize_dataset(args):
     path_to_test = os.path.join(args.path_to_save, "test")
     train_split.save_to_disk(path_to_train, max_shard_size="2GB")
     test_split.save_to_disk(path_to_test, max_shard_size="2GB")
-    
-    dataset.cleanup_cache_files()
-    tokenized_datasets.cleanup_cache_files()
     
 if __name__ == "__main__":
     print("-"*50)
