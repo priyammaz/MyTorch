@@ -17,7 +17,7 @@ import warnings
 from .nn import *
 from .optim import *
 from .utils import data
-from .tensor import Tensor, zeros_like
+from .tensor import Tensor
 from .dtypes import *
 
 try:
