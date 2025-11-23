@@ -35,9 +35,9 @@ class Pipeline:
     def get_cache(self, batch_size):
         return KVCache(
             batch_size=batch_size, 
-            seq_len=self.config.sequence_length,
-            num_heads=self.config.num_kv_heads, 
-            head_dim=self.config.embed_dim // self.config.num_kv_heads,
+            seq_len=self.config.max_seq_len,
+            num_heads=self.config.num_kv_heads, # we have kv heads 
+            head_dim=self.config.embed_dim // self.config.num_q_heads, # but num q heads determines the head dim
             num_layers=self.config.num_blocks 
         )
 
@@ -237,7 +237,7 @@ class Pipeline:
             yield actual_next_tokens, forced_mask
 
             num_generated_tokens += 1
-            input_ids = mytorch.Tensor(actual_next_tokens, dtype=mytorch.int32).reshape(-1,1)
+            input_ids = mytorch.Tensor(actual_next_tokens, dtype=mytorch.int32, device=self.device).unsqueeze(-1)
             
     def generate(self,
                  input_ids, 
@@ -262,7 +262,7 @@ class Pipeline:
         )
 
         ### Create a list of lists as our starting point ###
-        output = [input_ids[0].numpy().tolist().copy() for _ in range(num_generations)]
+        output = [input_ids[0].numpy().astype(int).tolist().copy() for _ in range(num_generations)]
         
         ### Input tokens are masked ###
         masks = [[0]*len(output[0]) for _ in range(num_generations)]
@@ -300,7 +300,7 @@ if __name__ == "__main__":
 
     model = GPT(GPTConfig(num_blocks=2))
     tokenizer = MyTokenizer()
-    pipe = Pipeline(model, tokenizer)
+    pipe = Pipeline(model, tokenizer, device="cuda")
 
-    rand = mytorch.randint(0,100, shape=(1,4))
+    rand = mytorch.randint(0,100, shape=(1,4)).to("cuda")
     pipe.generate(rand, num_generations=2, max_token_gens=100)
