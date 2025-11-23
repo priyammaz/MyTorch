@@ -3,8 +3,8 @@
 # Simple script to download/prepare data and train a ~500M param LLM!
 
 # PATHS TO STUFF
-EXPERIMENT_NAME="mytorch_llm_500m"
-HF_CACHE_DIR="data/hf_cache"
+EXPERIMENT_NAME="mytorch_llm_500m" # Name for the run for local checkpointing and WanbB
+HF_CACHE_DIR="data/hf_cache" # Huggingface cache dir where temporary stuff will be stored (and deleted)
 DOWNLOAD_PATH="data/FineWebEDU" # Where do you want to store very thing
 PATH_TO_SAVE_TOKENIZER="nanochat_trainer/nanochat_tokenizer" # Where do you want to save your tokenizer.json
 RAW_TEXT_DIRECTORY="$DOWNLOAD_PATH/raw_text" # where do you want to download raw parquet data files
@@ -15,27 +15,27 @@ SFT_WORKING_DIRECTORY="work_dir/nanochat_sft" # Where to save SFT checkpoints
 
 ### MODEL SHAPE (This is the config for a ~500M param LLM)
 VOCAB_SIZE=65536 # 2**16 
-CONTEXT_LENGTH=2048
-NUM_BLOCKS=24
-EMBED_DIM=1280
-NUM_Q_HEADS=20
-NUM_KV_HEADS=10
-MLP_RATIO=4
+CONTEXT_LENGTH=2048 # Total context this model will process (and data will be cut into)
+NUM_BLOCKS=24 # Number of transformer blocks
+EMBED_DIM=1280 # Embedding dimension 
+NUM_Q_HEADS=20 # Number of Query heads
+NUM_KV_HEADS=10 # Number of KV Heads (must evenly divide Q Heads for GQA)
+MLP_RATIO=4 # MLP Ratio in Feed forward
 
 ### DATA CONFIG
 CHINCHILLA_RATIO=20 # you can increase this to overtrain model on > chinchilla optimal
-NUM_WORKERS=32
+NUM_WORKERS=32 # Number of cpu workers for everything data related
 
 ### TRAINING CONFIG ###
 PER_GPU_BATCH_SIZE=4 # Set to whatever doesn't OOM!
-TARGET_TOKENS_PER_BATCH=524288
-MAX_LEARNING_RATE=0.0004
-MIN_LEARNING_RATE_RATIO=0.1
-BETA1=0.9
-BETA2=0.95
-WEIGHT_DECAY=0.1
-WARMUP_RATIO=0.02
-MAX_GRAD_NORM=1.0
+TARGET_TOKENS_PER_BATCH=524288 # Grad accumulation until we hit this tok/batch
+MAX_LEARNING_RATE=0.0004 # Highest lr that we warmup to
+MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
+WARMUP_RATIO=0.05 # What proportion of training we do warmup for
+BETA1=0.9 # Adam Beta1
+BETA2=0.95 # Adam Beta2 
+WEIGHT_DECAY=0.1 # Adam Weight decay (non embedding params)
+MAX_GRAD_NORM=1.0 # Max for grad clipping
 
 # ===================================================================
 # DATA/TOKENZIER PREP
