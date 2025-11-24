@@ -2,6 +2,7 @@
 Simple script to pre-tokenize and save our pretraining dataset
 """
 import os
+import json
 from itertools import chain
 import argparse
 from nanochat_trainer.core.tokenizer import MyTokenizer
@@ -89,6 +90,12 @@ def tokenize_dataset(args):
     path_to_test = os.path.join(args.path_to_save, "test")
     train_split.save_to_disk(path_to_train, max_shard_size="2GB")
     test_split.save_to_disk(path_to_test, max_shard_size="2GB")
+
+    ### Save some metadata about how many parquet files were needed to build this dataset ###
+    ### This way if we download more files we can trigger a rebuild ###
+    meta = {"num_parquet_files": len(parquet_files)}
+    with open(os.path.join(args.path_to_save, "data_meta.json"), "w") as f:
+        json.dump(meta, f)
     
 if __name__ == "__main__":
     print("-"*50)
@@ -96,4 +103,20 @@ if __name__ == "__main__":
     print("-"*50)
 
     args = parse_args()
-    tokenize_dataset(args)
+    
+    if os.path.exists(os.path.join(args.path_to_save, "train")) and os.path.exists(os.path.join(args.path_to_save, "test")):
+
+        ### If it exists but we downloaded more parquet files we can check here as the metadata contains how many files were used ! ###
+        path_to_meta = os.path.join(args.path_to_save, "data_meta.json")
+        with open(path_to_meta, 'r') as file:
+            metadata = json.load(file)
+        num_files_from_prev = metadata["num_parquet_files"]
+
+        parquet_files = [os.path.join(args.path_to_data, f) for f in os.listdir(args.path_to_data) if "parquet" in f]
+        if num_files_from_prev == len(parquet_files):
+            print("Dataset already exists! Skipping!!")
+        else:
+            print("Detected New Parquet Files, Re-Tokenizing and Saving the Dataset!!")
+            tokenize_dataset(args)
+    else:
+        tokenize_dataset(args)

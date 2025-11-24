@@ -264,7 +264,9 @@ if __name__ == "__main__":
     print("Training Tokenizer!")
     print("-"*50)
     args = parse_args()
-    os.makedirs(args.path_to_save_tokenizer, exist_ok=True)
-    train_tokenizer(args.path_to_dataset, args.comparison_tokenizer, args.vocab_size, args.path_to_save_tokenizer)
-
+    if not os.path.exists(os.path.join(args.path_to_save_tokenizer, "tokenizer.json")):
+        os.makedirs(args.path_to_save_tokenizer, exist_ok=True)
+        train_tokenizer(args.path_to_dataset, args.comparison_tokenizer, args.vocab_size, args.path_to_save_tokenizer)
+    else:
+        print(f"Tokenizer already found in {args.path_to_save_tokenizer}!! No need to train again!!")
 
