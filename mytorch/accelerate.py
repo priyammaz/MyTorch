@@ -624,13 +624,6 @@ class Accelerator:
                 return len(self.dataloader)
             
             def state_dict(self):
-                # return {
-                #     'epoch': self.epoch,
-                #     'batches_consumed': self.batches_consumed,
-                #     'dataloader_state': self.dataloader.state_dict(),
-                #     'sharded_dataset_epoch': self.sharded_dataset.epoch,
-                #     'sharded_dataset_indices': self.sharded_dataset.indices.tolist(),
-                # }
                 return self.dataloader.state_dict()
             
             def load_state_dict(self, state_dict):
