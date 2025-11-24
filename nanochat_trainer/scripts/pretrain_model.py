@@ -14,7 +14,6 @@ import time
 
 from mytorch.accelerate import Accelerator
 from nanochat_trainer.core.nanochat_gpt import GPT, GPTConfig
-from nanochat_trainer.core.tokenizer import MyTokenizer
 from nanochat_trainer.scripts.utils import get_last_checkpoint 
 
 terminal_width = shutil.get_terminal_size().columns
@@ -67,8 +66,11 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
     ### Load Accelerator ###
     accelerator = Accelerator(log_wandb=args.log_wandb)
 
-    ### Load Tokenizer ###
-    tokenizer = MyTokenizer(os.path.join(args.path_to_tokenizer, "tokenizer.json"))
+    ### Init tracker ###
+    if args.log_wandb:
+        accelerator.init_tracker(project_name=args.experiment_name, 
+                                config=vars(args))
+
 
     ### Get path to work dir ###
     if not os.path.isdir(path_to_experiment) and accelerator.is_main_process:
