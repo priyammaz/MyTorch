@@ -1,17 +1,20 @@
 #!/bin/bash
 
 # Simple script to download/prepare data and train a ~500M param LLM!
+# This will auto resume, if training halts, just rerun the script
+# and it will pick up from where it left off!
 
 # PATHS TO STUFF
-EXPERIMENT_NAME="mytorch_llm_500m" # Name for the run for local checkpointing and WanbB
+EXPERIMENT_NAME="mytorch_llm_500m" # Name for the run for local checkpointing and WandB
 HF_CACHE_DIR="data/hf_cache" # Huggingface cache dir where temporary stuff will be stored (and deleted)
 DOWNLOAD_PATH="data/FineWebEDU" # Where do you want to store very thing
+WORKING_DIRECTORY="work_dir"
 PATH_TO_SAVE_TOKENIZER="nanochat_trainer/nanochat_tokenizer" # Where do you want to save your tokenizer.json
 RAW_TEXT_DIRECTORY="$DOWNLOAD_PATH/raw_text" # where do you want to download raw parquet data files
 TOKENIZED_DIRECTORY="$DOWNLOAD_PATH/tokenized" # where do you want to save pre-tokenized data
-PRETRAIN_WORKING_DIRECTORY="work_dir/nanochat_pretrain" # Where to save pretraining checkpoints
-MIDTRAIN_WORKING_DIRECTORY="work_dir/nanochat_midtrain" # Where to save midtraining checkpoints
-SFT_WORKING_DIRECTORY="work_dir/nanochat_sft" # Where to save SFT checkpoints
+PRETRAIN_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_pretrain" # Where to save pretraining checkpoints
+MIDTRAIN_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_midtrain" # Where to save midtraining checkpoints
+SFT_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_sft" # Where to save SFT checkpoints
 
 ### MODEL SHAPE (This is the config for a ~500M param LLM)
 VOCAB_SIZE=65536 # 2**16 
@@ -22,7 +25,7 @@ NUM_Q_HEADS=20 # Number of Query heads
 NUM_KV_HEADS=10 # Number of KV Heads (must evenly divide Q Heads for GQA)
 MLP_RATIO=4 # MLP Ratio in Feed forward
 
-### DATA CONFIG
+### DATA CONFIG ###
 CHINCHILLA_RATIO=20 # you can increase this to overtrain model on > chinchilla optimal
 NUM_WORKERS=32 # Number of cpu workers for everything data related
 
@@ -37,6 +40,9 @@ BETA2=0.95 # Adam Beta2
 WEIGHT_DECAY=0.1 # Adam Weight decay (non embedding params)
 MAX_GRAD_NORM=1.0 # Max for grad clipping
 
+### CHECKPOINTING CONFIG ###
+CHECKPOINT_ITERATIONS=5000 # after how many steps do you want to create a checkpoint? more frequent uses more disk space!
+
 # ===================================================================
 # DATA/TOKENZIER PREP
 # ===================================================================
@@ -44,7 +50,6 @@ MAX_GRAD_NORM=1.0 # Max for grad clipping
 mkdir -p $HF_CACHE_DIR
 mkdir -p $RAW_TEXT_DIRECTORY
 mkdir -p $TOKENIZED_DIRECTORY
-
 export HF_HOME=$HF_CACHE_DIR
 
 ### DOWNLOAD SLICE OF FINEWEB ###
@@ -80,9 +85,6 @@ python -m nanochat_trainer.scripts.prepare_fineweb \
 ### Delete Everything in Cache, Dont Need it Anymore ###
 rm -r $HF_CACHE_DIR/*
 
-### Delete the downloaded raw data, Dont need it Anymore ###
-rm -r $RAW_TEXT_DIRECTORY
-
 # ===================================================================
 # PRETRAINING (the expensive part)
 # ===================================================================
@@ -108,4 +110,5 @@ mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
     --weight_decay $WEIGHT_DECAY \
     --warmup_ratio $WARMUP_RATIO \
     --max_grad_norm $MAX_GRAD_NORM \
-    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
+    --checkpoint_iterations $CHECKPOINT_ITERATIONS
