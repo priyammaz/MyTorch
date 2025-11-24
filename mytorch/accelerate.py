@@ -878,7 +878,7 @@ class Accelerator:
 
     def init_tracker(self,
                      project_name, 
-                     run_name, 
+                     run_name=None, 
                      config=None):
 
         if config is not None:
