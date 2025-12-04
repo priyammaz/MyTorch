@@ -421,7 +421,7 @@ class Accelerator:
                 ### Random Shuffle Indices ###
                 if self.shuffle:
                     indices = rand_gen.permutation(indices)
-                    print(indices)
+            
                 ### Pad to make Divisible by World Size * Samples Per Rank ###
                 ### This makes sure we have even number of batches every time ###
                 if len(indices) < self.total_size:
