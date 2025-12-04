@@ -5,7 +5,6 @@ import os
 import numpy as np
 import argparse
 import mytorch
-import mytorch.nn as nn
 from mytorch.utils.data import DataLoader
 from datasets import load_from_disk
 from tqdm import tqdm
@@ -127,8 +126,6 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
     total_training_tokens = len(trainset) * args.context_length
     if total_training_tokens < total_tokens:
         ratio = (total_training_tokens / total_tokens)
-
-        ### Couple extra steps as we will loose some iters to grad fails potentially ###
         training_iterations = int(training_iterations * ratio)
         accelerator.print("WARNING, You dont have enough tokens in your dataset")
         accelerator.print(f"Reducing Iterations to {training_iterations}")
@@ -140,12 +137,11 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
         targets = mytorch.Tensor([s[1:] for s in samples], dtype=mytorch.int32)
         return inputs, targets
 
-    # No need to shuffle, we already preshuffled our data
     trainloader = DataLoader(trainset, batch_size=args.batch_size_per_gpu, 
-                            shuffle=False, num_workers=args.num_workers, 
+                            shuffle=True, num_workers=args.num_workers, 
                             collate_fn=basic_collator)
     testloader = DataLoader(testset, batch_size=args.batch_size_per_gpu, 
-                            shuffle=False, num_workers=args.num_workers, 
+                            shuffle=True, num_workers=args.num_workers, 
                             collate_fn=basic_collator)
 
     ### Load Optimizer ###

@@ -5,7 +5,7 @@
 # and it will pick up from where it left off!
 
 # PATHS TO STUFF
-EXPERIMENT_NAME="mytorch_llm_500m" # Name for the run for local checkpointing and WandB
+EXPERIMENT_NAME="mytorch_llm_500M" # Name for the run for local checkpointing and WandB
 HF_CACHE_DIR="data/hf_cache" # Huggingface cache dir where temporary stuff will be stored (and deleted)
 DOWNLOAD_PATH="data/FineWebEDU" # Where do you want to store very thing
 WORKING_DIRECTORY="work_dir"
@@ -19,7 +19,7 @@ SFT_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_sft" # Where to save SFT chec
 ### MODEL SHAPE (This is the config for a ~500M param LLM)
 VOCAB_SIZE=65536 # 2**16 
 CONTEXT_LENGTH=2048 # Total context this model will process (and data will be cut into)
-NUM_BLOCKS=24 # Number of transformer blocks
+NUM_BLOCKS=16 # Number of transformer blocks
 EMBED_DIM=1280 # Embedding dimension 
 NUM_Q_HEADS=20 # Number of Query heads
 NUM_KV_HEADS=10 # Number of KV Heads (must evenly divide Q Heads for GQA)
@@ -31,8 +31,8 @@ NUM_WORKERS=32 # Number of cpu workers for everything data related
 
 ### TRAINING CONFIG ###
 PER_GPU_BATCH_SIZE=4 # Set to whatever doesn't OOM!
-TARGET_TOKENS_PER_BATCH=524288 # Grad accumulation until we hit this tok/batch
-MAX_LEARNING_RATE=0.0004 # Highest lr that we warmup to
+TARGET_TOKENS_PER_BATCH=262144 # Grad accumulation until we hit this tok/batch
+MAX_LEARNING_RATE=0.0002 # Highest lr that we warmup to
 MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 BETA1=0.9 # Adam Beta1
@@ -50,11 +50,14 @@ CHECKPOINT_ITERATIONS=5000 # after how many steps do you want to create a checkp
 mkdir -p $HF_CACHE_DIR
 mkdir -p $RAW_TEXT_DIRECTORY
 mkdir -p $TOKENIZED_DIRECTORY
+mkdir -p $PRETRAIN_WORKING_DIRECTORY/$EXPERIMENT_NAME
+mkdir -p $MIDTRAIN_WORKING_DIRECTORY/$EXPERIMENT_NAME
+mkdir -p $SFT_WORKING_DIRECTORY/$EXPERIMENT_NAME
 export HF_HOME=$HF_CACHE_DIR
 
 ### DOWNLOAD SLICE OF FINEWEB ###
-### With the default settings this will download 20 parquet files from 100BT split
-### and will save a final 29 parquet files (about 55GB of data!)
+### With the default settings this will download ~20 parquet files from 100BT split
+### and will save a final ~30 parquet files (about 55GB of data!)
 python -m nanochat_trainer.scripts.download_fineweb_edu \
     --path_to_save $RAW_TEXT_DIRECTORY \
     --num_workers $NUM_WORKERS \
@@ -85,9 +88,9 @@ python -m nanochat_trainer.scripts.prepare_fineweb \
 ### Delete Everything in Cache, Dont Need it Anymore ###
 rm -r $HF_CACHE_DIR/*
 
-# ===================================================================
-# PRETRAINING (the expensive part)
-# ===================================================================
+# # ===================================================================
+# # PRETRAINING (the expensive part)
+# # ===================================================================
 mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
     --work_dir $PRETRAIN_WORKING_DIRECTORY \
     --experiment_name $EXPERIMENT_NAME \

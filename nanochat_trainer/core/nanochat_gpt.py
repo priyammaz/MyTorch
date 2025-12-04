@@ -8,7 +8,7 @@ Defaults make this a 516,423,680 Parameter Model! Not too bad given we arent usi
 Thought process:
 - Rotary embeds (why not its defacto these days)
 - Parameterless norm seems to work in nanoChat so we do the same here!
-- Relu squared activation (who would have though that would work lol https://arxiv.org/abs/2402.03804) 
+- Swiglu activation from Llama
 - Bias disabled everywhere, who wants biases anyway??
 - Weight tying, we get to add a few extra layers instead of having 2 different massive matricies for embeddings and prediction head
 
@@ -25,21 +25,22 @@ from dataclasses import dataclass
 class GPTConfig:
     vocab_size: int =  2**16
     max_seq_len: int = 2048
-    embed_dim: int = 1280
+    embed_dim: int = 2048
     mlp_ratio: int = 4
-    num_blocks: int = 24
-    num_q_heads: int = 20
-    num_kv_heads: int = 5
+    num_blocks: int = 16
+    num_q_heads: int = 32
+    num_kv_heads: int = 8
     dropout_p: float = 0.0
     use_fused_ops: bool = True
     use_bias: bool = False
     rope_base: float = 10000
+    tie_weights: bool = True
 
 def norm(x, training=True):
     """
     parameterless rmsnorm
     """
-    return F.rmsnorm(x, weight=None, training=training, fused=True)
+    return F.rmsnorm(x, weight=None, training=training, fused=True, eps=1e-5)
 
 class Attention(nn.Module):
 
@@ -179,21 +180,10 @@ class FeedForward(nn.Module):
 
         hidden_size = config.embed_dim * config.mlp_ratio
         self.fused = config.use_fused_ops 
-
-        if self.fused:
-            ## If using fused ops we can fuse the GELU activation right into forward pass ###
-            self.intermediate_dense = nn.Linear(config.embed_dim, hidden_size, 
-                                                bias=config.use_bias,
-                                                fused=self.fused, 
-                                                act_func="relu_squared")
         
-        else:
-            ### Otherwise we do them sequentially like normal! (This will be slower/use more memory!)
-            ### technically we can use the fused linear/fused gelu here too, but thats ok, we prefer
-            ### to fuse the activation straight in!
-            self.intermediate_dense = nn.Linear(config.embed_dim, hidden_size, 
-                                                bias=config.use_bias)
-            self.activation = nn.ReLUSquared()
+        self.up_proj = nn.Linear(config.embed_dim, hidden_size * 2, # Double as we have our gate and proj here
+                                 bias=config.use_bias, fused=self.fused)
+        self.activation = nn.SwiGLU(fused=self.fused)
 
         self.intermediate_dropout = nn.Dropout(config.dropout_p)
 
@@ -204,15 +194,26 @@ class FeedForward(nn.Module):
         self.output_dropout = nn.Dropout(config.dropout_p)
 
     def forward(self, x):
-        x = self.intermediate_dense(x)
-        
-        if not self.fused:
-            x = self.activation(x)
 
-        x = self.intermediate_dropout(x)
-        x = self.out_proj(x)
-        x = self.output_dropout(x)
-        return x
+        ### Do our swiglu activation ###
+        swiglu_proj = self.up_proj(x)
+
+        ### Chunk for gating ###
+        swiglu_a, swiglu_b = swiglu_proj.chunk(2, dim=-1)
+        
+        ### Apply Activation ###
+        x_swiglu_out = self.activation(swiglu_a, swiglu_b)
+
+        ### Dropout ###
+        x_swiglu_out = self.intermediate_dropout(x_swiglu_out)
+
+        ### Project back to embed dim ###
+        out = self.out_proj(x_swiglu_out)
+
+        ### Dropout again ###
+        out = self.output_dropout(out)
+
+        return out
     
 class TransformerBlock(nn.Module):
     def __init__(self, 
@@ -251,8 +252,9 @@ class GPT(nn.Module):
                                  config.vocab_size, 
                                  bias=config.use_bias,
                                  fused=config.use_fused_ops)
-
-        self.lm_head.weight = self.embeddings.weight
+        
+        if config.tie_weights:
+            self.lm_head.weight = self.embeddings.weight
 
         ### Initialize Weights ###
         self.apply(_init_weights)
@@ -264,7 +266,7 @@ class GPT(nn.Module):
             head_dim=config.embed_dim//config.num_q_heads, 
             max_position_embeddings=config.max_seq_len, 
             base=config.rope_base
-        )
+        )   
 
         self.register_buffer("cos", cos, persistent=False)
         self.register_buffer("sin", sin, persistent=False)
@@ -285,7 +287,7 @@ class GPT(nn.Module):
 
         ### Get our embeddings ###
         x = self.embeddings(input_ids)
-
+ 
         ### Transformer magic ###
         for block in self.blocks:
             if not self._gradient_checkpointing_enabled:
