@@ -61,11 +61,12 @@ def gelu_backward_kernel(input):
     return 0.5 * (1 + tanh_res + input * sech_sq * 0.7978845608 * (1 + 3 * 0.044715 * input * input))
 
 @triton.jit
-def silu(input):
+def silu_forward_kernel(input):
     return (input * sigmoid_forward_kernel(input))
 
 @triton.jit
-def silu_grad(input):
+def silu_backward_kernel(input):
+    ### recompute sigmoid to save some memory ###
     output_sigmoid = sigmoid_forward_kernel(input)
     return (output_sigmoid * (input * (1 - output_sigmoid) + 1))
 
@@ -113,7 +114,7 @@ def activation_switcher_forward(name, input):
         output = gelu_forward_kernel(input)
     if name == "silu":
         input = input.to(tl.float32)
-        output = sigmoid_forward_kernel(input)
+        output = silu_forward_kernel(input)
     if name == "relu":
         output = relu_forward_kernel(input)
     if name == "leaky_relu":
@@ -133,14 +134,14 @@ def activation_switcher_backward(name, out_grad, input):
     if name == "gelu":
         output = gelu_backward_kernel(input)
     if name == "silu":
-        output = sigmoid_backward_kernel(input)
+        output = silu_backward_kernel(input)
     if name == "relu":
         output = relu_backward_kernel(input)
     if name == "leaky_relu":
         output = leaky_relu_backward_kernel(input)
     if name == "relu_squared":
         output = relu_squared_backward_kernel(input)
-    
+
     return output * out_grad # <- multiply by upstream grads
 
 #####################

@@ -50,7 +50,7 @@ def fused_silu(input):
     input_arr = get_inner_inner_array(input)
     output = fused_activation_forward(input_arr, act_func="silu")
     
-    def _sigmoid_backward(output_grad):
+    def _silu_backward(output_grad):
         output_grad = fused_activation_backward(input_arr, output_grad, act_func="silu")
         
         if input.grad is None:
@@ -62,7 +62,7 @@ def fused_silu(input):
     out = Tensor(
         output,
         requires_grad=requires_grad,
-        grad_fn=_sigmoid_backward if requires_grad else None,
+        grad_fn=_silu_backward if requires_grad else None,
         grad_fn_name="<SiLUBackward>" if requires_grad else None,
         device=input.device, 
         dtype=input.dtype

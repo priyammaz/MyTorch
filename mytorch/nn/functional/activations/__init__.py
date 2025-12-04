@@ -6,3 +6,4 @@ from .relu_squared import relu_squared
 from .sigmoid import sigmoid
 from .tanh import tanh
 from .silu import silu
+from .swiglu import swiglu

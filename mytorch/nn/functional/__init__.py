@@ -6,6 +6,6 @@ from .norm import layernorm, batchnorm, rmsnorm
 from .flash_attention import scaled_dot_product_attention
 from .losses import cross_entropy, mse_loss
 from .activations import gelu, leaky_relu, relu_squared, relu, sigmoid, \
-    softmax, tanh, silu
+    softmax, tanh, silu, swiglu
 from .utils import get_inner_array, get_inner_inner_array
 from .other import precompute_rotary_cos_sin, apply_rotary_pos_embed

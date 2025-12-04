@@ -4,6 +4,7 @@ from .relu_squared import ReLUSquared
 from .relu import ReLU
 from .sigmoid import Sigmoid
 from .silu import SiLU
+from .swiglu import SwiGLU
 from .softmax import Softmax
 from .tanh import Tanh
 
@@ -16,4 +17,5 @@ __all__ = [
     "SiLU",
     "Softmax",
     "Tanh",
+    "SwiGLU"
 ]
