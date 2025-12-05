@@ -787,12 +787,12 @@ I am not even close to done! Here are some of the stuff I want to work on next t
   - [x] Add Grouped Query Attention
 - [x] KV Cache for Inference
 - [ ] Reimplement and Reproduce (something like) Llama, closer to nanoChat
-  - [ ] Rotary Embeddings (kernel)
+  - [x] Rotary Embeddings (kernel)
   - [x] Repeat
   - [x] Optimizer Groups
   - [ ] Better inference wrapper
-  - [ ] Swiglu Kernel
-  - [ ] RMSNorm (kernel)
+  - [x] Swiglu Kernel
+  - [x] RMSNorm (kernel)
 - [ ] GRPO Trainer for post-training
 - [ ] Mixture of Experts
 - [x] Benchmark Scripts to scope gains from Fused Ops
