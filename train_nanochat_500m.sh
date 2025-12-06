@@ -1,27 +1,32 @@
 #!/bin/bash
 
 # Simple script to download/prepare data and train a ~500M param LLM!
-# This will auto resume, if training halts, just rerun the script
-# and it will pick up from where it left off!
+# This will auto resume, if you stop anywhere, just rerun the script and
+# it will just pick up from where it left off! 
 
-# PATHS TO STUFF
+### Set These To Where You Want to Save Your Stuff! ###
 EXPERIMENT_NAME="mytorch_llm_500M" # Name for the run for local checkpointing and WandB
-HF_CACHE_DIR="data/hf_cache" # Huggingface cache dir where temporary stuff will be stored (and deleted)
-DOWNLOAD_PATH="data/FineWebEDU" # Where do you want to store very thing
-WORKING_DIRECTORY="work_dir"
-PATH_TO_SAVE_TOKENIZER="nanochat_trainer/nanochat_tokenizer" # Where do you want to save your tokenizer.json
-RAW_TEXT_DIRECTORY="$DOWNLOAD_PATH/raw_text" # where do you want to download raw parquet data files
-TOKENIZED_DIRECTORY="$DOWNLOAD_PATH/tokenized" # where do you want to save pre-tokenized data
-PRETRAIN_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_pretrain" # Where to save pretraining checkpoints
-MIDTRAIN_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_midtrain" # Where to save midtraining checkpoints
-SFT_WORKING_DIRECTORY="$WORKING_DIRECTORY/nanochat_sft" # Where to save SFT checkpoints
+DATA_DIRECTORY="data" # Where do you want all data related stuff to be stored?
+WORKING_DIRECTORY="work_dir" # Where do you want checkpoints to be stored?
+
+### ALL PATHS ###
+EXPERIMENT_WORKING_DIRECTORY="$WORKING_DIRECTORY/$EXPERIMENT_NAME" # Folder for this experiment in our working directory
+HF_CACHE_DIR="$DATA_DIRECTORY/hf_cache" # Huggingface cache dir where temporary stuff will be stored (and deleted)
+DOWNLOAD_FINEWEB_PATH="$DATA_DIRECTORY/FineWebEDU" # Where do you want to store very thing
+DOWNLOAD_TASKS_PATH="$DATA_DIRECTORY/tasks"
+RAW_TEXT_DIRECTORY="$DOWNLOAD_FINEWEB_PATH/raw_text" # where do you want to download raw parquet data files
+TOKENIZED_DIRECTORY="$DOWNLOAD_FINEWEB_PATH/tokenized" # where do you want to save pre-tokenized data
+PRETRAIN_WORKING_DIRECTORY="$EXPERIMENT_WORKING_DIRECTORY/nanochat_pretrain" # Where to save pretraining checkpoints
+MIDTRAIN_WORKING_DIRECTORY="$EXPERIMENT_WORKING_DIRECTORY/nanochat_midtrain" # Where to save midtraining checkpoints
+SFT_WORKING_DIRECTORY="$EXPERIMENT_WORKING_DIRECTORY/nanochat_sft" # Where to save SFT checkpoints
+PATH_TO_SAVE_TOKENIZER=$EXPERIMENT_WORKING_DIRECTORY # Where do you want to save your tokenizer.json (we can just store in work dir for this experiment!)
 
 ### MODEL SHAPE (This is the config for a ~500M param LLM)
 VOCAB_SIZE=65536 # 2**16 
 CONTEXT_LENGTH=2048 # Total context this model will process (and data will be cut into)
 NUM_BLOCKS=16 # Number of transformer blocks
 EMBED_DIM=1280 # Embedding dimension 
-NUM_Q_HEADS=20 # Number of Query heads
+NUM_Q_HEADS=10 # Number of Query heads
 NUM_KV_HEADS=10 # Number of KV Heads (must evenly divide Q Heads for GQA)
 MLP_RATIO=4 # MLP Ratio in Feed forward
 
@@ -31,7 +36,7 @@ NUM_WORKERS=32 # Number of cpu workers for everything data related
 
 ### TRAINING CONFIG ###
 PER_GPU_BATCH_SIZE=4 # Set to whatever doesn't OOM!
-TARGET_TOKENS_PER_BATCH=262144 # Grad accumulation until we hit this tok/batch
+TARGET_TOKENS_PER_BATCH=524288 # Grad accumulation until we hit this tok/batch
 MAX_LEARNING_RATE=0.0002 # Highest lr that we warmup to
 MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 WARMUP_RATIO=0.05 # What proportion of training we do warmup for
@@ -44,17 +49,35 @@ MAX_GRAD_NORM=1.0 # Max for grad clipping
 CHECKPOINT_ITERATIONS=5000 # after how many steps do you want to create a checkpoint? more frequent uses more disk space!
 
 # ===================================================================
-# DATA/TOKENZIER PREP
+# CREATE ALL THE DIRECTORIES
 # ===================================================================
 # Create directories and set HF Home for dataset caching (can be deleted later)
 mkdir -p $HF_CACHE_DIR
 mkdir -p $RAW_TEXT_DIRECTORY
 mkdir -p $TOKENIZED_DIRECTORY
-mkdir -p $PRETRAIN_WORKING_DIRECTORY/$EXPERIMENT_NAME
-mkdir -p $MIDTRAIN_WORKING_DIRECTORY/$EXPERIMENT_NAME
-mkdir -p $SFT_WORKING_DIRECTORY/$EXPERIMENT_NAME
+mkdir -p $PRETRAIN_WORKING_DIRECTORY
+mkdir -p $MIDTRAIN_WORKING_DIRECTORY
+mkdir -p $SFT_WORKING_DIRECTORY
+mkdir -p $DOWNLOAD_TASKS_PATH
 export HF_HOME=$HF_CACHE_DIR
 
+# ===================================================================
+# CACHE THIS MODELS CONFIG
+# ===================================================================
+python -m nanochat_trainer.scripts.save_model_meta \
+    --path_to_store $EXPERIMENT_WORKING_DIRECTORY \
+    --vocab_size $VOCAB_SIZE \
+    --context_length $CONTEXT_LENGTH \
+    --num_blocks $NUM_BLOCKS \
+    --embed_dim $EMBED_DIM \
+    --num_q_heads $NUM_Q_HEADS \
+    --num_kv_heads $NUM_KV_HEADS \
+    --mlp_ratio $MLP_RATIO \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
+
+# ===================================================================
+#  DOWNLOAD AND TOKENIZE ALL THE PRETRAINING DATA
+# ===================================================================
 ### DOWNLOAD SLICE OF FINEWEB ###
 ### With the default settings this will download ~20 parquet files from 100BT split
 ### and will save a final ~30 parquet files (about 55GB of data!)
@@ -88,9 +111,9 @@ python -m nanochat_trainer.scripts.prepare_fineweb \
 ### Delete Everything in Cache, Dont Need it Anymore ###
 rm -r $HF_CACHE_DIR/*
 
-# # ===================================================================
-# # PRETRAINING (the expensive part)
-# # ===================================================================
+# ===================================================================
+# PRETRAINING (the expensive part)
+# ===================================================================
 mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
     --work_dir $PRETRAIN_WORKING_DIRECTORY \
     --experiment_name $EXPERIMENT_NAME \
