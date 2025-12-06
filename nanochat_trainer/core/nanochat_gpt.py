@@ -3,7 +3,7 @@ This will be basically a whatever transformer decoder that takes bits
 and bobs from here and there. Its not optimal but its ours! Main 
 ideas will come from nanoChat and Llama!
 
-Defaults make this a 516,423,680 Parameter Model! Not too bad given we arent using PyTorch!
+Defaults make this a 503,316,480 Parameter Model! Not too bad given we arent using PyTorch!
 
 Thought process:
 - Rotary embeds (why not its defacto these days)
