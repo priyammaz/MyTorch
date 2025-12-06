@@ -1,6 +1,7 @@
 """
-Pretraining on ~10B tokens of FineWeb with a ~560M param model!
+Pretraining on ~10B tokens of FineWeb with a ~500M param model!
 """
+import cupy as cp
 import os
 import numpy as np
 import argparse
@@ -14,6 +15,9 @@ import time
 from mytorch.accelerate import Accelerator
 from nanochat_trainer.core.nanochat_gpt import GPT, GPTConfig
 from nanochat_trainer.scripts.utils import get_last_checkpoint 
+from nanochat_trainer.core.tokenizer import MyTokenizer
+
+tokenizer = MyTokenizer("work_dir/mytorch_llm_500M/tokenizer.json")
 
 terminal_width = shutil.get_terminal_size().columns
 
@@ -68,7 +72,7 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
     ### Init tracker ###
     if args.log_wandb:
         accelerator.init_tracker(project_name=args.experiment_name, 
-                                config=vars(args))
+                                 config=vars(args))
 
 
     ### Get path to work dir ###
@@ -88,12 +92,12 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
 
     ### Load Model ###
     config = GPTConfig(vocab_size=args.vocab_size, 
-                    max_seq_len=args.context_length,
-                    embed_dim=args.embed_dim, 
-                    mlp_ratio=args.mlp_ratio, 
-                    num_blocks=args.num_blocks,
-                    num_q_heads=args.num_q_heads, 
-                    num_kv_heads=args.num_kv_heads)
+                       max_seq_len=args.context_length,
+                       embed_dim=args.embed_dim, 
+                       mlp_ratio=args.mlp_ratio, 
+                       num_blocks=args.num_blocks,
+                       num_q_heads=args.num_q_heads, 
+                       num_kv_heads=args.num_kv_heads)
     model = GPT(config)
 
     ### Get Total Training Steps Necessary ###
@@ -214,7 +218,7 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
 
             # Move to correct device 
             inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
-
+     
             # Forward pass
             _, loss = model(inputs, targets)
 
@@ -248,7 +252,8 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
 
                     ### Gather (no-op if we are on single GPU) ###
                     loss = accelerator.gather_for_metrics(loss)
-        
+
+                   
                     ### Logging stuff ###
                     lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
                     log_parts = [
@@ -316,7 +321,7 @@ if __name__ == "__main__":
     args = parse_args()
 
     ### Get path to experiment ###
-    path_to_experiment = os.path.join(args.work_dir, args.experiment_name)
+    path_to_experiment = args.work_dir
 
     ### Check if any checkpoints exist to resume ###
     last_checkpoint = get_last_checkpoint(path_to_experiment)
