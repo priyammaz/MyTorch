@@ -25,11 +25,11 @@ from dataclasses import dataclass
 class GPTConfig:
     vocab_size: int =  2**16
     max_seq_len: int = 2048
-    embed_dim: int = 2048
+    embed_dim: int = 1280
     mlp_ratio: int = 4
     num_blocks: int = 16
-    num_q_heads: int = 32
-    num_kv_heads: int = 8
+    num_q_heads: int = 10
+    num_kv_heads: int = 10
     dropout_p: float = 0.0
     use_fused_ops: bool = True
     use_bias: bool = False
@@ -304,9 +304,9 @@ class GPT(nn.Module):
         
         ### I assume if no targets we are probably in inference mode, return the cache back as well! ###
         if target_ids is None:
-            to_return = (logits, )
+            to_return = logits
             if cache is not None:
-                to_return += (cache, )
+                to_return = (logits, cache)
             return to_return
         
         ### I assume we are training here, and we dont need the cache in training (it is unused) so we dont return it ###
@@ -315,6 +315,14 @@ class GPT(nn.Module):
                                    target_ids, 
                                    fused=self.config.use_fused_ops)
             return logits, loss
+    
+    @mytorch.no_grad()
+    def generate(self, input_ids, max_tokens_gen=100):
+        pass
+
+
+
+
     
 ### Standard Weight Init for Transformers ###
 def _init_weights(module):
