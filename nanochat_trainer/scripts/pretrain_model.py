@@ -72,6 +72,7 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
     ### Init tracker ###
     if args.log_wandb:
         accelerator.init_tracker(project_name=args.experiment_name, 
+                                 run_name="pretraining",
                                  config=vars(args))
 
 
