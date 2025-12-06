@@ -37,7 +37,7 @@ NUM_WORKERS=32 # Number of cpu workers for everything data related
 ### TRAINING CONFIG ###
 PER_GPU_BATCH_SIZE=4 # Set to whatever doesn't OOM!
 TARGET_TOKENS_PER_BATCH=524288 # Grad accumulation until we hit this tok/batch
-MAX_LEARNING_RATE=0.0002 # Highest lr that we warmup to
+MAX_LEARNING_RATE=0.00015 # Highest lr that we warmup to
 MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 BETA1=0.9 # Adam Beta1
@@ -137,4 +137,5 @@ mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
     --warmup_ratio $WARMUP_RATIO \
     --max_grad_norm $MAX_GRAD_NORM \
     --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
-    --checkpoint_iterations $CHECKPOINT_ITERATIONS
+    --checkpoint_iterations $CHECKPOINT_ITERATIONS \
+    --log_wandb
