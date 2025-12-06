@@ -1,3 +1,7 @@
+"""
+Quick helper to store a yaml file of a models config so we can load the exact
+same model during inference time!
+"""
 import os
 import yaml
 import argparse 
@@ -46,7 +50,8 @@ if __name__ == "__main__":
     }
 
     path_to_save = os.path.join(args.path_to_store, "model_meta.yaml")
-    with open(path_to_save, "w") as file:
-        yaml.dump(model_meta, file, default_flow_style=False, sort_keys=False)
+    if not os.path.exists(path_to_save):
+        with open(path_to_save, "w") as file:
+            yaml.dump(model_meta, file, default_flow_style=False, sort_keys=False)
 
     
