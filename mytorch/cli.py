@@ -270,7 +270,7 @@ def launch():
     os.environ["TRITON_AUTOTUNE_MODE"] = str(config.get("triton_autotune", "none"))
     os.environ["USE_FUSED_OPS"] = str(config.get("use_fused", "False"))
     os.environ["MYTORCHRUN_MIXED_PRECISION"] = str(config.get("mixed_precision", "No"))
-    gpu_indices = str(config.get("gpu_indices"))
+    gpu_indices = str(config.get("gpu_indices", "all"))
     if gpu_indices != "all":
         os.environ["CUDA_VISIBLE_DEVICES"] = gpu_indices
 
