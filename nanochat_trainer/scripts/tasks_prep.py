@@ -5,7 +5,8 @@ so we will just write them all out here!
 
 The Datasets we will do are:
 
-- Arc: Multiple Choice Questions
+- Arc: Multiple Choice Questions (high quality subset)
+- MMLU: Multiple Choice Questions (larger multiple choice dataset)
 - GSM8k: Basic arithmetic (will call our calculator tool)
 - HumanEval: Coding benchmark
 - SmolTalk: Coversation
@@ -49,6 +50,9 @@ from datasets import load_dataset
 from nanochat_trainer.core.tokenizer import MyTokenizer
 
 class GenericDatasetPrep:
+    """
+    Every task needs logic to prepare a sample and then prepare the dataset!
+    """
     def prep_sample(self):
         raise NotImplementedError
     def prepare(self):
@@ -87,9 +91,96 @@ class SmolTalkPrep(GenericDatasetPrep):
         tokenized = self.dataset.map(self.prep_sample, remove_columns=["messages"], num_proc=num_workers)
         tokenized.save_to_disk(self.path_to_store)
 
+class MMLUPrep(GenericDatasetPrep):
+
+    """
+    MMLU is a large dataset of multipiple choice questions. There are a bunch of topics that you can pick from 
+    but for simplicity we will use the "auxiliary-train" split that contains multiple choice questions from ARC, MC_TEST
+    OBQA, RACE and others! This has about 100K examples in total
+
+    Each sample looks like:
+
+    {
+        "answer": 0,
+        "choices": [
+        "gasify",
+        "condense",
+        "melted",
+        "solidified"
+        ],
+        "question": "If a liquid disappears then that liquid probably did what?",
+        "subject": ""
+    }
+
+     We will have to convert this to our own format so it will look like:
+
+        Multiple Choice Question: If a liquid disappears then that liquid probably did what?
+
+        - gasify=A
+        - condense=B
+        - melted=C
+        - solidified=D
+
+        Respond only with the letter of the correct answer.
+
+    The reason the letter comes after the anwser is to follow the render_mc method in nanochat
+    https://github.com/karpathy/nanochat/blob/master/tasks/common.py, where it seems that smaller models
+    have better binding if we do it this way instead!
+
+
+    """
+
+    def __init__(self, 
+                 path_to_store, 
+                 tokenizer):
+        
+        self.dataset = load_dataset("cais/mmlu", "auxiliary_train")
+        self.choices = ("A", "B", "C", "D") # only 4 options per question
+        self.path_to_store = os.path.join(path_to_store, "mmlu")
+        self.tokenizer = tokenizer
+
+    def prep_sample(self, sample):
+        
+        sample = sample["train"]
+
+        question = sample["question"]
+        choices_text = sample["choices"]
+        assistant_message = self.choices[sample["answer"]] # Answer is the index, grab which letter is correct
+
+        user_message = ""
+        user_message += f"Multiple Choice Question: {question}\n"
+        for text, label in zip(choices_text, self.choices):
+            choice = f"- {text}={label}\n"
+            user_message += choice
+        user_message += "\nRespond only with the letter of the correct answer."
+        
+        prepped_sample = {
+            "messages": [
+                {"role": "user", "content": user_message},
+                {"role": "assistant", "content": assistant_message}
+            ]
+        }
+
+        input_ids, mask = self.tokenizer.parse_conversation(prepped_sample)
+
+        sample["input_ids"] = input_ids
+        sample["mask"] = mask     
+
+        return sample 
+    
+    def prepare(self, num_workers):
+        
+        columns_to_drop = self.dataset.column_names["train"]
+        tokenized = self.dataset["train"].map(self.prep_sample, remove_columns=columns_to_drop, num_proc=num_workers)
+        tokenized = tokenized.train_test_split(test_size=0.1) # about 10K examples for testing purposes!
+        tokenized.save_to_disk(self.path_to_store)
+        
 class ArcPrep(GenericDatasetPrep):
     """
-    Arc is a dataset of multiple choice questions. Each sample looks like:
+    Arc is a dataset of multiple choice questions. This will be our high quality data that we will use
+    in SFT as its a pretty small dataset
+    
+    Each sample looks like:
 
     {
         "answerKey": "B",
@@ -103,14 +194,14 @@ class ArcPrep(GenericDatasetPrep):
 
     We will have to convert this to our own format so it will look like:
     
-    Multiple Choice Question: One year, the oak trees in a park began producing more acorns than usual. The next year, the population of chipmunks in the park also increased. Which best explains why there were more chipmunks the next year?
-    
-    - Shady areas increased.=A
-    - Food sources increased.=B
-    - Oxygen levels increased.=C
-    - Available water increased.=D
+        Multiple Choice Question: One year, the oak trees in a park began producing more acorns than usual. The next year, the population of chipmunks in the park also increased. Which best explains why there were more chipmunks the next year?
+        
+        - Shady areas increased.=A
+        - Food sources increased.=B
+        - Oxygen levels increased.=C
+        - Available water increased.=D
 
-    Respond only with the letter of the correct answer.
+        Respond only with the letter of the correct answer.
 
     The reason the letter comes after the anwser is to follow the render_mc method in nanochat
     https://github.com/karpathy/nanochat/blob/master/tasks/common.py, where it seems that smaller models
@@ -183,16 +274,27 @@ if __name__ == "__main__":
     
     parser = argparse.ArgumentParser()
     parser.add_argument("--path_to_store", default="data/tasks")
-    parser.add_argument("--path_to_tokenizer", default="nanochat_trainer/nanochat_tokenizer")
+    parser.add_argument("--path_to_tokenizer", required=True)
     parser.add_argument("--num_workers", type=int, default=8)
     args = parser.parse_args()
 
     # Get tokenizer 
     tokenizer = MyTokenizer(os.path.join(args.path_to_tokenizer, "tokenizer.json"))
 
-    # Init all datasets so they just download and are prepped #
-    # smol = SmolTalkPrep(args.path_to_store, tokenizer).prepare(args.num_workers)
-    arc_easy = ArcPrep("ARC-Easy", args.path_to_store, tokenizer).prepare(args.num_workers)
+    # Prep all our tasks 
+    if not os.path.exists(os.path.join(args.path_to_store, "smoltalk")):
+        print("PREPARING SMOLTALK")
+        SmolTalkPrep(args.path_to_store, tokenizer).prepare(args.num_workers)
+    if not os.path.exists(os.path.join(args.path_to_store, "arc_easy")):
+        print("PREPARING ARC EASY")
+        ArcPrep("ARC-Easy", args.path_to_store, tokenizer).prepare(args.num_workers)
+    if not os.path.exists(os.path.join(args.path_to_store, "arc_challenge")):
+        print("PREPARING ARC CHALLENGE")
+        ArcPrep("ARC-Challenge", args.path_to_store, tokenizer).prepare(args.num_workers)
+    if not os.path.exists(os.path.join(args.path_to_store, "mmlu")):
+        print("PREPARING MMLU")
+        MMLUPrep(args.path_to_store, tokenizer).prepare(args.num_workers)
+
     
 
 
