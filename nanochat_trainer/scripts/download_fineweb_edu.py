@@ -53,7 +53,7 @@ def get_num_params(args):
     print(f"This Model Has {total:,} Parameters")
     return total
 
-def compute_chincilla(num_params, chinchilla_ratio=20, just_a_little_extra=1.2):
+def compute_chincilla(num_params, chinchilla_ratio=20, just_a_little_extra=1.1):
     """
     chinchilla recommends roughly 20 times the tokens as we have parameters
 
