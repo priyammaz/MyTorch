@@ -8,7 +8,6 @@ The Datasets we will do are:
 - Arc: Multiple Choice Questions (high quality subset)
 - MMLU: Multiple Choice Questions (larger multiple choice dataset)
 - GSM8k: Basic arithmetic (will call our calculator tool)
-- HumanEval: Coding benchmark
 - SmolTalk: Coversation
 
 Again, inspiration from NanoChat! 
@@ -31,7 +30,7 @@ And for ToolCalling in GSM8k we need:
     "messages": [
         {"role": "system", "content": ...}
         {"role": "user", "content": ...},
-        {"role": "user", "content": [
+        {"role": "assistant", "content": [
             {"type": "python", "text": "...some expression to eval with python"},
             {"type": "python_output", "text": "...result from the toolcall"}
         ]} 
@@ -45,6 +44,7 @@ The output of every prep will be:
 
 """
 import os
+import re
 import argparse
 from datasets import load_dataset
 from nanochat_trainer.core.tokenizer import MyTokenizer
@@ -264,10 +264,102 @@ class ArcPrep(GenericDatasetPrep):
         tokenized.save_to_disk(self.path_to_store)
 
 class GSM8kPrep(GenericDatasetPrep):
-    pass
+    """
+    GSM8k is just simple arithmetic. This will be calling our calculator tool
 
-class HumanEvalPrep(GenericDatasetPrep):
-    pass
+    Data looks like this:
+
+    {
+        "question": "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"
+        "answer": "Natalia sold 48/2 = <<48/2=24>>24 clips in May. Natalia sold 48+24 = <<48+24=72>>72 clips altogether in April and May. #### 72
+    }
+
+    So you can see the calculations are always contained within << >> and the answer is after ####
+
+    We will convert this to :
+
+    {
+    "messages": [
+        {"role": "user", "content": "Natalia sold clips to 48 of her friends in April, and then she sold half as many clips in May. How many clips did Natalia sell altogether in April and May?"},
+        {"role": "assistant", "content": [
+            {"type": "text", "text": Natalia sold 48/2 = }
+            {"type": "python", "text": "48/2"}, # this is what goes to our calculator
+            {"type": "python_output", "text": "24"} # this is the result of our calculator
+            {"type": "text", "text":  clips in May. Natalia sold 48+24 = }
+            {"type": "python", "text": "48+24"}
+            {"type": "python", "text": "72"}
+            {"type": "72 clips altogether in April and May."}
+        ]} 
+      ]
+    }
+
+
+    """
+    
+    def __init__(self, 
+                 path_to_store, 
+                 tokenizer):
+        
+        self.dataset = load_dataset("openai/gsm8k", "main")
+        self.path_to_store = os.path.join(path_to_store, "gsm8k")
+        self.tokenizer = tokenizer
+
+    def prep_sample(self, sample):
+        
+        question = sample["question"]
+        answer = sample["answer"]
+
+        ### Now we parse the answer ###
+        assistant_text = []
+
+        ### Split text on things that start and end with << >>
+        split = re.split(r'(<<[^>]+>>)', answer) 
+        
+        for s in split:
+
+            ### Stuff inside the << >> is our expression to evaluate
+            if s.startswith("<<") and s.endswith(">>"):
+
+                ### Remove the symbols ###
+                s = s[2:-2]
+
+                ### Now this looks like 48/2=2, we can split it now ###
+                expr, solution = s.split("=")
+
+                assistant_text.append({"type":"python", "text": expr})
+                assistant_text.append({"type":"python_output", "text": solution})
+
+            ### Other stuff is just normal text ###
+            else:
+                assistant_text.append({"type": "text", "text": s})
+
+        ### [{'type': 'text', 'text': 'Natalia sold 48/2 = '}, 
+        ###  {'type': 'python', 'text': '48/2'}, 
+        ###  {'type': 'python_output', 'text': '24'},
+        ###  {'type': 'text', 'text': '24 clips in May.\nNatalia sold 48+24 = '},
+        ###  {'type': 'python', 'text': '48+24'},
+        ###  {'type': 'python_output', 'text': '72'},
+        ###  {'type': 'text', 'text': '72 clips altogether in April and May.\n#### 72'}]
+
+            
+        messages = [
+            {"role": "user", "content": question},
+            {"role": "assistant", "content": assistant_text}
+        ]
+
+        input_ids, mask = self.tokenizer.parse_conversation({"messages": messages})
+        
+        sample["input_ids"] = input_ids
+        sample["mask"] = mask     
+
+        return sample
+
+    def prepare(self, num_workers):
+
+        columns_to_drop = self.dataset.column_names["train"]
+        tokenized = self.dataset.map(self.prep_sample, remove_columns=columns_to_drop, num_proc=num_workers)
+        tokenized.save_to_disk(self.path_to_store)
+
 
 
 if __name__ == "__main__":
@@ -294,7 +386,8 @@ if __name__ == "__main__":
     if not os.path.exists(os.path.join(args.path_to_store, "mmlu")):
         print("PREPARING MMLU")
         MMLUPrep(args.path_to_store, tokenizer).prepare(args.num_workers)
-
+    if not os.path.exists(os.path.join(args.path_to_store, "gsm8k")):
+        GSM8kPrep(args.path_to_store, tokenizer).prepare(args.num_workers)
     
 
 
