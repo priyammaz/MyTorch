@@ -67,6 +67,7 @@ class Pipeline:
         if temperature == 0.0:
             ### grab the per row argmax, if temp is 0 it is deterministic ###
             next_token_pred = mytorch.argmax(logits, dim=-1).unsqueeze(1)
+  
         else:
             if topk is not None:
                 
@@ -100,7 +101,7 @@ class Pipeline:
 
                 ### Sample ###
                 next_token_pred = mytorch.multinomial(probs)
-        
+
         return next_token_pred
     
     @mytorch.no_grad()
@@ -194,7 +195,8 @@ class Pipeline:
                 ### and when finetuned the end of the assistant is <|assistant_end|> so either of these ###
                 ### will trigger our end of generation for this specific sample ###
                 if (next_token == self.tokenizer.assistant_end_id) or (next_token == self.tokenizer.bos_token_id):
-                    state["completed"] = True 
+                    # state["completed"] = True 
+                    pass
                 
                 ### This is if the LLM has triggered a python start block ###
                 if next_token == self.tokenizer.python_start_id:
@@ -274,8 +276,8 @@ class Pipeline:
             
             ### This gives us the next token and mask val per generation ###
             for i, (token_, mask_) in enumerate(zip(next_tokens, next_mask)):
-
-                ### If we are not done ###
+         
+                ### If we are not done ###  
                 if not completed[i]:
 
                     ### If the next token is a done token ###
@@ -294,13 +296,28 @@ class Pipeline:
         return output, masks
                         
 if __name__ == "__main__":
-
+    import mytorch
     from .nanochat_gpt import GPT, GPTConfig
     from .tokenizer import MyTokenizer
 
-    model = GPT(GPTConfig(num_blocks=2))
-    tokenizer = MyTokenizer()
+
+
+    model = GPT(GPTConfig())
+    state_dict = mytorch.load("work_dir/mytorch_llm_500M/nanochat_pretrain/final_checkpoint/model.safetensors")
+    model.load_state_dict(state_dict)
+
+    for name, param in model.named_parameters():
+        param.astype(mytorch.float16)
+    for name, param in model.named_buffers():
+        param.astype(mytorch.float16)
+
+    tokenizer = MyTokenizer("work_dir/mytorch_llm_500M/tokenizer.json")
     pipe = Pipeline(model, tokenizer, device="cuda")
 
-    rand = mytorch.randint(0,100, shape=(1,4)).to("cuda")
-    pipe.generate(rand, num_generations=2, max_token_gens=100)
+    start = "Artificial intelligence (AI) is the capability of computational systems to perform tasks"
+    rand = tokenizer.encode(start, prepend=tokenizer.bos_token)
+    rand = mytorch.Tensor(rand, dtype=mytorch.int32).reshape(1,-1)
+
+    output, _ = pipe.generate(rand, num_generations=1, max_token_gens=200, temperature=0.7, topk=100)
+    print(output)
+    print(tokenizer.decode(output[0]))
