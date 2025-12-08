@@ -37,7 +37,7 @@ NUM_WORKERS=32 # Number of cpu workers for everything data related
 ### TRAINING CONFIG ###
 PER_GPU_BATCH_SIZE=4 # Set to whatever doesn't OOM!
 TARGET_TOKENS_PER_BATCH=524288 # Grad accumulation until we hit this tok/batch
-MAX_LEARNING_RATE=0.00015 # Highest lr that we warmup to
+MAX_LEARNING_RATE=0.00015 # Highest lr that we warmup to (be a little conservative, fp16 at high lr has led to training divergence)
 MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 BETA1=0.9 # Adam Beta1
@@ -78,9 +78,9 @@ python -m nanochat_trainer.scripts.save_model_meta \
 # ===================================================================
 #  DOWNLOAD AND TOKENIZE ALL THE PRETRAINING DATA
 # ===================================================================
-### DOWNLOAD SLICE OF FINEWEB ###
-### With the default settings this will download ~20 parquet files from 100BT split
-### and will save a final ~30 parquet files (about 55GB of data!)
+## DOWNLOAD SLICE OF FINEWEB ###
+## With the default settings this will download ~20 parquet files from 100BT split
+## and will save a final ~30 parquet files (about 55GB of data!)
 python -m nanochat_trainer.scripts.download_fineweb_edu \
     --path_to_save $RAW_TEXT_DIRECTORY \
     --num_workers $NUM_WORKERS \
@@ -139,3 +139,39 @@ mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
     --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
     --checkpoint_iterations $CHECKPOINT_ITERATIONS \
     --log_wandb
+
+# ===================================================================
+# MIDTRAINING (Lets Make it Conversational)
+# ===================================================================
+### Download and prepare conversational datasets. The main datasets we 
+### will be doing here as an example is "smoltalk", "arc_easy", 
+### "arc_challenge", "mmlu", "gsm8k"
+python -m nanochat_trainer.scripts.tasks_prep \
+    --path_to_store $DOWNLOAD_TASKS_PATH \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
+    --num_workers $NUM_WORKERS
+
+### Midtrain the model now!
+mytorchrun launch -m nanochat_trainer.scripts.midtrain_model \
+    --work_dir $MIDTRAIN_WORKING_DIRECTORY \
+    --experiment_name $EXPERIMENT_NAME \
+    --path_to_starting_checkpoint $PRETRAIN_WORKING_DIRECTORY \
+    --path_to_data $DOWNLOAD_TASKS_PATH \
+    --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
+    --tokens_per_batch $TARGET_TOKENS_PER_BATCH \
+    --num_workers $NUM_WORKERS \
+    --vocab_size $VOCAB_SIZE \
+    --context_length $CONTEXT_LENGTH \
+    --num_blocks $NUM_BLOCKS \
+    --embed_dim $EMBED_DIM \
+    --num_q_heads $NUM_Q_HEADS \
+    --num_kv_heads $NUM_KV_HEADS \
+    --mlp_ratio $MLP_RATIO \
+    --max_learning_rate $MAX_LEARNING_RATE \
+    --min_learning_rate_ratio $MIN_LEARNING_RATE_RATIO \
+    --beta1 $BETA1 \
+    --beta2 $BETA2 \
+    --weight_decay $WEIGHT_DECAY \
+    --warmup_ratio $WARMUP_RATIO \
+    --max_grad_norm $MAX_GRAD_NORM \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
