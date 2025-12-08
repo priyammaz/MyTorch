@@ -174,4 +174,5 @@ mytorchrun launch -m nanochat_trainer.scripts.midtrain_model \
     --weight_decay $WEIGHT_DECAY \
     --warmup_ratio $WARMUP_RATIO \
     --max_grad_norm $MAX_GRAD_NORM \
-    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
+    --log_wandb
