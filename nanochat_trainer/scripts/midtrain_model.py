@@ -104,7 +104,6 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
         chunk_size=args.context_length, 
         num_proc=args.num_workers
     )
-    print(trainset)
 
     ### Compute Gradient Accumulation Steps ###
     num_devices = accelerator.num_processes
@@ -143,163 +142,163 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
     accelerator.print(f"Num Warmup Steps: {int(training_iterations*args.warmup_ratio):,}")
     accelerator.print("="*terminal_width)
 
-    # ### Get Dataloaders ###
-    # def basic_collator(batch):
-    #     samples = [s["input_ids"] for s in batch]
-    #     inputs = mytorch.Tensor([s[:-1] for s in samples], dtype=mytorch.int32)
-    #     targets = mytorch.Tensor([s[1:] for s in samples], dtype=mytorch.int32)
-    #     return inputs, targets
+    ### Get Dataloaders ###
+    def basic_collator(batch):
+        samples = [s["input_ids"] for s in batch]
+        inputs = mytorch.Tensor([s[:-1] for s in samples], dtype=mytorch.int32)
+        targets = mytorch.Tensor([s[1:] for s in samples], dtype=mytorch.int32)
+        return inputs, targets
 
-    # trainloader = DataLoader(trainset.dataset, batch_size=args.batch_size_per_gpu, 
-    #                         shuffle=True, num_workers=args.num_workers, 
-    #                         collate_fn=basic_collator)
-    # testloader = DataLoader(testset.dataset, batch_size=args.batch_size_per_gpu, 
-    #                         shuffle=True, num_workers=args.num_workers, 
-    #                         collate_fn=basic_collator)
+    trainloader = DataLoader(trainset.dataset, batch_size=args.batch_size_per_gpu, 
+                            shuffle=True, num_workers=args.num_workers, 
+                            collate_fn=basic_collator)
+    testloader = DataLoader(testset.dataset, batch_size=args.batch_size_per_gpu, 
+                            shuffle=True, num_workers=args.num_workers, 
+                            collate_fn=basic_collator)
     
-    # ### Load Optimizer ###
-    # embedding_params = []
-    # non_embedding_params = []
-    # for name, param in model.named_parameters():
-    #     if "embeddings" in name:
-    #         embedding_params.append(param)
-    #     else:
-    #         non_embedding_params.append(param)
+    ### Load Optimizer ###
+    embedding_params = []
+    non_embedding_params = []
+    for name, param in model.named_parameters():
+        if "embeddings" in name:
+            embedding_params.append(param)
+        else:
+            non_embedding_params.append(param)
 
-    # ### No weight decay on embeddings as inspired by SmolLM! ### 
-    # param_groups = [
-    #     {"params": embedding_params, "weight_decay": 0.0},
-    #     {"params": non_embedding_params, "weight_decay": args.weight_decay}
-    # ]
+    ### No weight decay on embeddings as inspired by SmolLM! ### 
+    param_groups = [
+        {"params": embedding_params, "weight_decay": 0.0},
+        {"params": non_embedding_params, "weight_decay": args.weight_decay}
+    ]
 
-    # optimizer = mytorch.optim.AdamW(param_groups, args.max_learning_rate, 
-    #                                 beta1=args.beta1, 
-    #                                 beta2=args.beta2)
+    optimizer = mytorch.optim.AdamW(param_groups, args.max_learning_rate, 
+                                    beta1=args.beta1, 
+                                    beta2=args.beta2)
 
-    # ### Load Scheduler ###
-    # scheduler = mytorch.lr_scheduler.CosineLRScheduler(
-    #     optimizer=optimizer, 
-    #     max_lr=args.max_learning_rate,
-    #     min_lr=args.max_learning_rate * args.min_learning_rate_ratio, 
-    #     total_steps=training_iterations, 
-    #     warmup_steps=training_iterations * args.warmup_ratio
-    # )
+    ### Load Scheduler ###
+    scheduler = mytorch.lr_scheduler.CosineLRScheduler(
+        optimizer=optimizer, 
+        max_lr=args.max_learning_rate,
+        min_lr=args.max_learning_rate * args.min_learning_rate_ratio, 
+        total_steps=training_iterations, 
+        warmup_steps=training_iterations * args.warmup_ratio
+    )
 
-    # ### Prepare Everything ###
-    # model, optimizer, trainloader, testloader = accelerator.prepare(
-    #     model, optimizer, trainloader, testloader
-    # )
+    ### Prepare Everything ###
+    model, optimizer, trainloader, testloader = accelerator.prepare(
+        model, optimizer, trainloader, testloader
+    )
 
-    # ### Starting number of steps ###
-    # completed_steps = 0
+    ### Starting number of steps ###
+    completed_steps = 0
 
-    # ### Train Model ###
-    # pbar = tqdm(range(training_iterations), 
-    #             disable=not accelerator.is_main_process(),
-    #             initial=completed_steps)
+    ### Train Model ###
+    pbar = tqdm(range(training_iterations), 
+                disable=not accelerator.is_main_process(),
+                initial=completed_steps)
 
-    # t0 = time.time()
-    # train = True
-    # while train:
+    t0 = time.time()
+    train = True
+    while train:
 
-    #     for inputs, targets in trainloader:
+        for inputs, targets in trainloader:
 
-    #         # Move to correct device 
-    #         inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
+            # Move to correct device 
+            inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
      
-    #         # Forward pass
-    #         _, loss = model(inputs, targets)
+            # Forward pass
+            _, loss = model(inputs, targets)
 
-    #         # Backward
-    #         accelerator.backward(loss)
+            # Backward
+            accelerator.backward(loss)
             
-    #         # Clip gradients (and get the grads to check on training health)
-    #         accelerator.clip_grad_norm_(args.max_grad_norm)
+            # Clip gradients (and get the grads to check on training health)
+            accelerator.clip_grad_norm_(args.max_grad_norm)
 
-    #         # Step optimizer
-    #         optimizer.step()
-    #         optimizer.zero_grad()
+            # Step optimizer
+            optimizer.step()
+            optimizer.zero_grad()
 
-    #         ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
-    #         if accelerator.sync_grad:
+            ### Accelerator tracks when accumulation is done, the flag is just sync_grad ###
+            if accelerator.sync_grad:
         
-    #             ### Get Time and reset start time ###
-    #             t1 = time.time()
-    #             dt = t1 - t0
-    #             t0 = t1
+                ### Get Time and reset start time ###
+                t1 = time.time()
+                dt = t1 - t0
+                t0 = t1
         
-    #             ### Iter ###
-    #             completed_steps += 1
-    #             pbar.update(1)
+                ### Iter ###
+                completed_steps += 1
+                pbar.update(1)
 
-    #             ### Update Scheduler ###
-    #             scheduler.step()
+                ### Update Scheduler ###
+                scheduler.step()
 
-    #             ### Gather metrics across GPUs
-    #             if completed_steps % args.log_iter == 0:
+                ### Gather metrics across GPUs
+                if completed_steps % args.log_iter == 0:
 
-    #                 ### Gather (no-op if we are on single GPU) ###
-    #                 loss = accelerator.gather_for_metrics(loss)
+                    ### Gather (no-op if we are on single GPU) ###
+                    loss = accelerator.gather_for_metrics(loss)
 
                    
-    #                 ### Logging stuff ###
-    #                 lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
-    #                 log_parts = [
-    #                     f"Iter: {completed_steps:6d}",
-    #                     f"Loss: {loss:7.4f}",
-    #                     f"LR: {lr:9.2e}"
-    #                 ]
-    #                 ### Grab our stored grad_norm for checking on model health ###
-    #                 if accelerator.grad_norm is not None:
-    #                     log_parts.append(f"GradNorm: {accelerator.grad_norm:7.3f}")
-    #                 log_parts.append(f"Toks/Sec: {int(args.tokens_per_batch / dt):6d}")
-    #                 log_statement = " | ".join(log_parts)
+                    ### Logging stuff ###
+                    lr = scheduler.get_last_lr()[0] if isinstance(scheduler.get_last_lr(), list) else scheduler.get_last_lr()
+                    log_parts = [
+                        f"Iter: {completed_steps:6d}",
+                        f"Loss: {loss:7.4f}",
+                        f"LR: {lr:9.2e}"
+                    ]
+                    ### Grab our stored grad_norm for checking on model health ###
+                    if accelerator.grad_norm is not None:
+                        log_parts.append(f"GradNorm: {accelerator.grad_norm:7.3f}")
+                    log_parts.append(f"Toks/Sec: {int(args.tokens_per_batch / dt):6d}")
+                    log_statement = " | ".join(log_parts)
 
-    #                 if accelerator.is_main_process():
-    #                     tqdm.write(log_statement)
+                    if accelerator.is_main_process():
+                        tqdm.write(log_statement)
 
-    #                 ### Log with Wandb if enabled ###
-    #                 if args.log_wandb:  
-    #                     logging_dict = {"loss": loss, "lr": lr}
-    #                     if accelerator.grad_norm is not None:
-    #                         logging_dict["grad_norm"] = accelerator.grad_norm 
-    #                     accelerator.log(logging_dict, step=completed_steps)
+                    ### Log with Wandb if enabled ###
+                    if args.log_wandb:  
+                        logging_dict = {"loss": loss, "lr": lr}
+                        if accelerator.grad_norm is not None:
+                            logging_dict["grad_norm"] = accelerator.grad_norm 
+                        accelerator.log(logging_dict, step=completed_steps)
 
-    #             if completed_steps % args.eval_interval == 0:
-    #                 accelerator.print("Evaluating!")
-    #                 model.eval()
-    #                 val_losses = []
+                if completed_steps % args.eval_interval == 0:
+                    accelerator.print("Evaluating!")
+                    model.eval()
+                    val_losses = []
 
-    #                 for val_iter, (inputs, targets) in enumerate(testloader):
-    #                     inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
+                    for val_iter, (inputs, targets) in enumerate(testloader):
+                        inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
                     
-    #                     with mytorch.no_grad():
-    #                         _, loss = model(inputs, targets)
-    #                     loss_val = accelerator.gather_for_metrics(loss)
-    #                     val_losses.append(loss_val)
+                        with mytorch.no_grad():
+                            _, loss = model(inputs, targets)
+                        loss_val = accelerator.gather_for_metrics(loss)
+                        val_losses.append(loss_val)
 
-    #                     if val_iter >= args.eval_iterations:
-    #                         break
+                        if val_iter >= args.eval_iterations:
+                            break
                     
-    #                 ### Log Loss ###
-    #                 if len(val_losses) > 0:  # Make sure we have some losses to compute
-    #                     val_losses = np.mean(val_losses)
-    #                     accelerator.print("Validation Loss:", val_losses)
-    #                     if args.log_wandb:
-    #                         logging_dict = {"val_loss": val_losses}
-    #                         accelerator.log(logging_dict, step=completed_steps)
+                    ### Log Loss ###
+                    if len(val_losses) > 0:  # Make sure we have some losses to compute
+                        val_losses = np.mean(val_losses)
+                        accelerator.print("Validation Loss:", val_losses)
+                        if args.log_wandb:
+                            logging_dict = {"val_loss": val_losses}
+                            accelerator.log(logging_dict, step=completed_steps)
 
-    #                 ### Set back into Training Mode ###
-    #                 model.train()
+                    ### Set back into Training Mode ###
+                    model.train()
 
-    #         if completed_steps >= training_iterations:
-    #             accelerator.print("Completed Training!!!")
-    #             train = False
-    #             break
+            if completed_steps >= training_iterations:
+                accelerator.print("Completed Training!!!")
+                train = False
+                break
             
-    # ### Save final checkpoint once done ! ###
-    # accelerator.save_state(os.path.join(path_to_experiment, f"final_checkpoint"), save_model_only=True)
-    # accelerator.end_training()
+    ### Save final checkpoint once done ! ###
+    accelerator.save_state(os.path.join(path_to_experiment, f"final_checkpoint"), save_model_only=True)
+    accelerator.end_training()
 
 if __name__ == "__main__":
     
