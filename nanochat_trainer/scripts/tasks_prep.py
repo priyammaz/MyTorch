@@ -170,9 +170,10 @@ class MMLUPrep(GenericDatasetPrep):
     
     def prepare(self, num_workers):
         
-        columns_to_drop = self.dataset.column_names["train"]
-        tokenized = self.dataset["train"].map(self.prep_sample, remove_columns=columns_to_drop, num_proc=num_workers)
+        tokenized = self.dataset["train"].map(self.prep_sample, num_proc=num_workers)
         tokenized = tokenized.train_test_split(test_size=0.1) # about 10K examples for testing purposes!
+        columns_to_remove = [col for col in tokenized['train'].column_names if col not in ["input_ids", "mask"]]
+        tokenized = tokenized.remove_columns(columns_to_remove)
         tokenized.save_to_disk(self.path_to_store)
         
 class ArcPrep(GenericDatasetPrep):
