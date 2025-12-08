@@ -1,7 +1,6 @@
 """
 Pretraining on ~10B tokens of FineWeb with a ~500M param model!
 """
-import cupy as cp
 import os
 import numpy as np
 import argparse
@@ -16,8 +15,6 @@ from mytorch.accelerate import Accelerator
 from nanochat_trainer.core.nanochat_gpt import GPT, GPTConfig
 from nanochat_trainer.scripts.utils import get_last_checkpoint 
 from nanochat_trainer.core.tokenizer import MyTokenizer
-
-tokenizer = MyTokenizer("work_dir/mytorch_llm_500M/tokenizer.json")
 
 terminal_width = shutil.get_terminal_size().columns
 
