@@ -102,7 +102,7 @@ class MyTokenizer:
             "messages": [
                 {"role": "system", "content": ...}
                 {"role": "user", "content": ...},
-                {"role": "user", "content": [
+                {"role": "assistant", "content": [
                     {"type": "python", "text": "...some expression to eval with python"},
                     {"type": "python_output", "text": "...result from the toolcall"}
                 ]} 
