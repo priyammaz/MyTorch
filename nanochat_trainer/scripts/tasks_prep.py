@@ -76,7 +76,7 @@ class SmolTalkPrep(GenericDatasetPrep):
     
     def prep_sample(self, sample):
         
-        input_ids, mask = self.tokenizer.parse_conversation(sample)
+        input_ids, mask = self.tokenizer.parse_conversation(sample, return_mask=True)
         sample["input_ids"] = input_ids
         sample["mask"] = mask
         
@@ -161,7 +161,7 @@ class MMLUPrep(GenericDatasetPrep):
             ]
         }
 
-        input_ids, mask = self.tokenizer.parse_conversation(prepped_sample)
+        input_ids, mask = self.tokenizer.parse_conversation(prepped_sample, return_mask=True)
 
         sample["input_ids"] = input_ids
         sample["mask"] = mask     
@@ -250,7 +250,7 @@ class ArcPrep(GenericDatasetPrep):
 
         }
 
-        input_ids, mask = self.tokenizer.parse_conversation(prepped_sample)
+        input_ids, mask = self.tokenizer.parse_conversation(prepped_sample, return_mask=True)
 
         sample["input_ids"] = input_ids
         sample["mask"] = mask     
@@ -348,7 +348,7 @@ class GSM8kPrep(GenericDatasetPrep):
             {"role": "assistant", "content": assistant_text}
         ]
 
-        input_ids, mask = self.tokenizer.parse_conversation({"messages": messages})
+        input_ids, mask = self.tokenizer.parse_conversation({"messages": messages}, return_mask=True)
         
         sample["input_ids"] = input_ids
         sample["mask"] = mask     
