@@ -18,14 +18,29 @@ Backward (given grad_y = ∂L/∂y ∈ (B, O)):
 
     db = grad_y.sum(axis=0)
           (B, O) -> (O,)
-"""
 
+
+CAVEAT:
+Our fused_grouped_matmul is only as fast as CUDNN IF Triton Autotune is enabled. Normally we dont 
+care about this, but in some problems, like Transformers where every batch can be a different sequence length
+the change of shape will retrigger the Triton autotuner which is very slow. So we add an extra environment flag
+here to disable the fused_grouped_matmul and just use normal CUPY matmuls that are already have a decision 
+pathway of kernel settings to use provided by vendors! This is a little hacky but its fine! We also ensure that
+in the fused_linear, if an activation function was passed in to be fused, it wont be fused anymore but
+will still occur in the forward pass separately!
+
+"""
+import os
 import numpy as np
 from mytorch import Tensor
 from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
 from mytorch.nn.functional.utils import get_inner_array, get_inner_inner_array
-from ..fused_ops import fused_linear_forward, fused_grouped_matmul, fused_activation_backward
+from ..fused_ops import fused_linear_forward, fused_grouped_matmul, fused_activation_forward, fused_activation_backward
+
+# Flag to default to Cupy matmuls instead of our own fused matmul ###
+DISABLE_FUSED_LINEAR = (os.environ.get("DISABLE_FUSED_LINEAR", "").lower() == "true")
+FLAG_ONCE = True
 
 def reshape_for_linear(x):
 
@@ -152,25 +167,53 @@ def fused_linear(input, weight, bias=None, act_func=None):
     fused_linear will use triton kernels to do 
     the same operation as manual_linear
     """
+
+    global FLAG_ONCE
+    if FLAG_ONCE and DISABLE_FUSED_LINEAR:
+        print("Fused Linear Layers Disabled!!")
+        FLAG_ONCE = False
+
     input, dims, reshaped_flag = reshape_for_linear(input)
     out_features, in_features = weight.shape
 
-    ### Fused Means we need the inner inner array (the cupy array) ###
-    input_arr = get_inner_inner_array(input)
-    weight_arr = get_inner_inner_array(weight).T
-    if bias is not None:
-        bias_arr = get_inner_inner_array(bias)
-    
-    ### Perform the Fused Forward Pass ###
-    outputs = fused_linear_forward(
-        input_arr, weight_arr, bias_arr if bias is not None else None, act_func=act_func
-    )
+    ### If we disable fused linear layers ###
+    if DISABLE_FUSED_LINEAR:
 
-    ### If we use an activation function we get both the pre/post activation for backprop ###
-    if act_func is not None:
-        preact_output, output = outputs
+        ### basically the same as our manual_linear ###
+        input_arr = get_inner_array(input)
+        weight_arr = get_inner_array(weight).T
+        if bias is not None:
+            bias_arr = get_inner_array(bias)
+
+        preact_output = np.matmul(input_arr, weight_arr)
+        if bias is not None:
+            preact_output += bias_arr.reshape(1,-1)
+
+        ### Fused accepts an act_func argument. To ensure we dont break anything ###
+        ### we just apply the activation function here internally! ###
+        if act_func is not None:
+            output = fused_activation_forward(preact_output, act_func=act_func)
+        else:
+            output = preact_output
+
     else:
-        output, _ = outputs
+
+        ### Fused Means we need the inner inner array (the cupy array) ###
+        input_arr = get_inner_inner_array(input)
+        weight_arr = get_inner_inner_array(weight).T
+        if bias is not None:
+            bias_arr = get_inner_inner_array(bias)
+        
+        ### Perform the Fused Forward Pass ###
+        outputs = fused_linear_forward(
+            input_arr, weight_arr, bias_arr if bias is not None else None, act_func=act_func
+        )
+
+        ### If we use an activation function we get both the pre/post activation for backprop ###
+        if act_func is not None:
+            preact_output, output = outputs
+        else:
+            output, _ = outputs
  
     if reshaped_flag:
         output = output.reshape(*dims, out_features)
@@ -191,7 +234,13 @@ def fused_linear(input, weight, bias=None, act_func=None):
 
         ### Standard Weight Update formula ###
         if weight.requires_grad:
-            grad_W = fused_grouped_matmul(input_arr.T, grad_output)
+            
+            ### Decide which matmul method to use
+            if DISABLE_FUSED_LINEAR:
+                grad_W = np.matmul(input_arr.T, grad_output)
+            else:
+                grad_W = fused_grouped_matmul(input_arr.T, grad_output)
+
             if weight.grad is None:
                 weight.grad = grad_W.T
             else:
@@ -209,7 +258,12 @@ def fused_linear(input, weight, bias=None, act_func=None):
         
         ### Grad to Input ###
         if input.requires_grad:
-            grad_input = fused_grouped_matmul(grad_output, weight_arr.T)
+
+            ### Decide which matmul method to use
+            if DISABLE_FUSED_LINEAR:
+                grad_input = np.matmul(grad_output, weight_arr.T)
+            else:
+                grad_input = fused_grouped_matmul(grad_output, weight_arr.T)
 
             ### Reshape grad_input back to input feature shape (* x I) ###
             grad_input = grad_input.reshape(*dims, in_features)
