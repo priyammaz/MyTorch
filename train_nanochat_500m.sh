@@ -246,4 +246,5 @@ mytorchrun launch -m nanochat_trainer.scripts.sft_model \
     --warmup_ratio $SFT_WARMUP_RATIO \
     --max_grad_norm $MAX_GRAD_NORM \
     --checkpoint_iterations $SFT_CHECKPOINT_ITERATIONS \
-    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
+    --log_wandb
