@@ -68,6 +68,14 @@ MIDTRAIN_MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay do
 MIDTRAIN_WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 MIDTRAIN_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a checkpoint? More frequent is more disk space!
 
+### SFT CONFIG (~800 Steps in preset config) ###
+SFT_EPOCHS=2 # How many epochs through the midtraining data do you want to do?
+SFT_EXAMPLES_PER_BATCH=32 # Grad accumulation until we hit this tok/batch
+SFT_MAX_LEARNING_RATE=0.00001 # Highest lr that we warmup to (less than midtraining lr to avoid catastrophic forgetting)
+SFT_MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
+SFT_WARMUP_RATIO=0.05 # What proportion of training we do warmup for
+SFT_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a checkpoint? More frequent is more disk space!
+
 # ===================================================================
 # CREATE ALL THE DIRECTORIES
 # ===================================================================
@@ -194,4 +202,48 @@ mytorchrun launch -m nanochat_trainer.scripts.midtrain_model \
     --weight_decay $WEIGHT_DECAY \
     --warmup_ratio $MIDTRAIN_WARMUP_RATIO \
     --max_grad_norm $MAX_GRAD_NORM \
-    --checkpoint_iterations $MIDTRAIN_CHECKPOINT_ITERATIONS
+    --checkpoint_iterations $MIDTRAIN_CHECKPOINT_ITERATIONS \
+    --log_wandb
+
+# ===================================================================
+# SUPERVISED FINE TUNING (Single Conversation Samples)
+# ===================================================================
+### In SFT each batch will have different lengths, to avoid retriggering the 
+### autotuner on our linear layer we just disable it here. A bit hacky
+### but CUDA kernels are precompiled, and NVIDIA/CUBLAS already knows the ideal
+### settings for a specific matmul, so it internally dispatches to the optimal
+### matmul internally. The Autotuner from triton gives similar performance
+### but has to be tuned to a specific shape. This didnt matter earlier as in 
+### midtraining/pretraining our seq lens and batch size are always the same. 
+### but now as they dynamically will change based on the longest sample in the batch
+### we have this issue. So this setting here will essentially use CUPY matmuls do 
+### do our linear ops so it will internally dispatch to cuBLAS and will be as performant
+### as possible!!!
+### An alternative is just pad each sample to the context length and then we wouldnt really care
+### about all this extra stuff!
+export DISABLE_FUSED_LINEAR="true" 
+mytorchrun launch -m nanochat_trainer.scripts.sft_model \
+    --work_dir $SFT_WORKING_DIRECTORY \
+    --experiment_name $EXPERIMENT_NAME \
+    --path_to_starting_checkpoint $MIDTRAIN_WORKING_DIRECTORY \
+    --path_to_data $DOWNLOAD_TASKS_PATH \
+    --epochs $SFT_EPOCHS \
+    --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
+    --examples_per_batch $SFT_EXAMPLES_PER_BATCH \
+    --num_workers $NUM_WORKERS \
+    --vocab_size $VOCAB_SIZE \
+    --context_length $CONTEXT_LENGTH \
+    --num_blocks $NUM_BLOCKS \
+    --embed_dim $EMBED_DIM \
+    --num_q_heads $NUM_Q_HEADS \
+    --num_kv_heads $NUM_KV_HEADS \
+    --mlp_ratio $MLP_RATIO \
+    --max_learning_rate $SFT_MAX_LEARNING_RATE \
+    --min_learning_rate_ratio $SFT_MIN_LEARNING_RATE_RATIO \
+    --beta1 $BETA1 \
+    --beta2 $BETA2 \
+    --weight_decay $WEIGHT_DECAY \
+    --warmup_ratio $SFT_WARMUP_RATIO \
+    --max_grad_norm $MAX_GRAD_NORM \
+    --checkpoint_iterations $SFT_CHECKPOINT_ITERATIONS \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
