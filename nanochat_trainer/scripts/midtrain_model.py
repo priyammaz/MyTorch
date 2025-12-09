@@ -1,10 +1,12 @@
 """
 Midtraining and Pretraining are the same thing. Its just now we are training on conversational datasets
-rather than just a bunch of data text from the internet!
+rather than just a bunch of data text from the internet! The datasets we train on are the: 
+- smoltalk dataset
+- mmlu
+- gsm8k
 
-We will just need to do 1 epoch over our dataset, the dataset can be set via the MixtureDataset!
+The dataset mixture can be set via the MixtureDataset!
 
-Also midtraining is pretty quick, no need to do any checkpointing we will just save the final checkpoint!
 """
 import os
 import numpy as np
@@ -20,6 +22,8 @@ from nanochat_trainer.core.nanochat_gpt import GPT, GPTConfig
 from nanochat_trainer.scripts.utils import get_last_checkpoint 
 from nanochat_trainer.core.tasks import Task, MixtureDataset, GroupedDataset
 
+import warnings
+
 terminal_width = shutil.get_terminal_size().columns
 
 def parse_args():
@@ -29,6 +33,7 @@ def parse_args():
     parser.add_argument("--experiment_name", type=str, required=True)
     parser.add_argument("--path_to_starting_checkpoint", type=str, required=True) # this is new, we need to start from our pretrained checkpoint
     parser.add_argument("--path_to_data", type=str, default="data/tasks")
+    parser.add_argument("--epochs", type=int, default=3)
     parser.add_argument("--batch_size_per_gpu", type=int, default=8)
     parser.add_argument("--tokens_per_batch", type=int, default=524288)
     parser.add_argument("--num_workers", type=int, default=8)
@@ -56,18 +61,24 @@ def parse_args():
     parser.add_argument("--log_iter", type=int, default=1)
     parser.add_argument("--eval_interval", type=int, default=150)
     parser.add_argument("--eval_iterations", type=int, default=200)
-
-    ### Tokenizer ###
-    parser.add_argument("--path_to_tokenizer", type=str, default="nanochat_trainer/nanochat_tokenizer")
+    parser.add_argument("--checkpoint_iterations", type=int, default=500)
 
     args = parser.parse_args()
     
     return args
 
-def trainer(args, path_to_experiment, starting_checkpoint=None):
+def trainer(args, 
+            path_to_experiment, 
+            starting_checkpoint=None, # This is the path to the last checkpoint created from pretraining
+            resume_from_checkpoint=None # This is the path to the last checkpoint created during midtraining
+    ):
 
     ### Load Accelerator ###
     accelerator = Accelerator(log_wandb=args.log_wandb)
+
+    ### Quick check on checkpoints ###
+    if (starting_checkpoint is None) and (resume_from_checkpoint is None):
+        warnings.warn("You are starting Midtraining WITHOUT and pretrained weights!!! NOT RECOMMENDED!!!")
 
     ### Init tracker ###
     if args.log_wandb:
@@ -82,9 +93,9 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
     
     ### Setup Dataset ###
     trainset = MixtureDataset([
-        Task(args.path_to_data, "smoltalk"), # 460K samples of general conversation 
-        Task(args.path_to_data, "mmlu"), # 90K samples of multiple choice
-        Task(args.path_to_data, "gsm8k"), # 8K samples of arithmetic
+        Task(args.path_to_data, "smoltalk", keep_mask=False), # 460K samples of general conversation 
+        Task(args.path_to_data, "mmlu", keep_mask=False), # 90K samples of multiple choice
+        Task(args.path_to_data, "gsm8k", keep_mask=False), # 8K samples of arithmetic
     ])
 
     trainset = GroupedDataset(
@@ -94,9 +105,9 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
     )
 
     testset = MixtureDataset([
-        Task(args.path_to_data, "smoltalk", "test"), 
-        Task(args.path_to_data, "mmlu", "test"),
-        Task(args.path_to_data, "gsm8k", "test"), 
+        Task(args.path_to_data, "smoltalk", "test", keep_mask=False), 
+        Task(args.path_to_data, "mmlu", "test", keep_mask=False),
+        Task(args.path_to_data, "gsm8k", "test", keep_mask=False), 
     ])
 
     testset = GroupedDataset(
@@ -125,14 +136,15 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
                        num_kv_heads=args.num_kv_heads)
     model = GPT(config)
 
-    if starting_checkpoint is not None:
-        accelerator.print("Starting from Checkpoint: ", starting_checkpoint)
+    ### Load our starting checkpoint from pretraining if we are not resuming our midtraining run! ###
+    if (starting_checkpoint is not None) and (resume_from_checkpoint is None):
+        accelerator.print("Starting from Stage 1 Pretraining Checkpoint: ", starting_checkpoint)
         state_dict = mytorch.load(starting_checkpoint)
         model.load_state_dict(state_dict)
 
     ### Get Total Training Iterations ###
     samples_per_step = gradient_accumulation_steps * batch_per_device * num_devices # number of chunks processed per step across all GPUs
-    training_iterations = len(trainset)//samples_per_step + 1         # total number of chunks / proc per step
+    training_iterations = args.epochs * (len(trainset)//samples_per_step + 1) # total training iterations in this run
 
     accelerator.print("="*terminal_width)
     accelerator.print("!!TRAINING DETAILS!!")
@@ -189,8 +201,29 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
         model, optimizer, trainloader, testloader
     )
 
-    ### Starting number of steps ###
-    completed_steps = 0
+    ### Resume from Checkpoint ###
+    if resume_from_checkpoint is not None:
+
+        ### This is if we pass in a full path to checkpoint ###
+        if os.path.exists(resume_from_checkpoint):
+            path_to_checkpoint = resume_from_checkpoint
+        
+        ### Otherwise we can pass the folder name in our experiment directory ###
+        else:
+            path_to_checkpoint = os.path.join(path_to_experiment, resume_from_checkpoint)
+        
+        ### Load our State (model and optimizer) ###
+        accelerator.load_state(path_to_checkpoint)
+        
+        ### Start completed steps from checkpoint index ###
+        completed_steps = int(resume_from_checkpoint.split("_")[-1])
+        accelerator.print(f"Resuming from Iteration: {completed_steps}")
+
+        ### Advance our scheduler to the correct step ###
+        scheduler.step_count = completed_steps
+
+    else:
+        completed_steps = 0
 
     ### Train Model ###
     pbar = tqdm(range(training_iterations), 
@@ -264,6 +297,9 @@ def trainer(args, path_to_experiment, starting_checkpoint=None):
                             logging_dict["grad_norm"] = accelerator.grad_norm 
                         accelerator.log(logging_dict, step=completed_steps)
 
+                if completed_steps % args.checkpoint_iterations == 0:
+                    accelerator.save_state(os.path.join(path_to_experiment, f"checkpoint_{completed_steps}"))
+
                 if completed_steps % args.eval_interval == 0:
                     accelerator.print("Evaluating!")
                     model.eval()
@@ -306,12 +342,25 @@ if __name__ == "__main__":
 
     ### Get path to experiment ###
     path_to_experiment = args.work_dir
+    
+    ### Get Last Checkpoint from Pretraining ###
+    last_pretraining_checkpoint = get_last_checkpoint(args.path_to_starting_checkpoint)
+    if last_pretraining_checkpoint == -1:
+        last_pretraining_checkpoint = "final_checkpoint"
+    path_to_last_pretraining_checkpoint = os.path.join(
+        args.path_to_starting_checkpoint, last_pretraining_checkpoint, "model.safetensors"
+    )
 
-    ### Get Starting Checkpoint from pretraining stage ###
-    last_checkpoint = get_last_checkpoint(args.path_to_starting_checkpoint)
+    ### Get Last Midtraining Checkpoint If Resuming ###
+    last_midtraining_checkpoint = get_last_checkpoint(path_to_experiment)
+    
+    if last_midtraining_checkpoint != -1:
+        trainer(
+            args, 
+            path_to_experiment, 
+            path_to_last_pretraining_checkpoint, 
+            last_midtraining_checkpoint
+        )
 
-    if last_checkpoint == -1: # this was our catch for if the final_checkpoint already exists
-        last_checkpoint = "final_checkpoint"
-    path_to_checkpoint = os.path.join(args.path_to_starting_checkpoint, last_checkpoint, "model.safetensors")
-
-    trainer(args, path_to_experiment, starting_checkpoint=path_to_checkpoint)
+    else:
+        print("Midtraining is already complete!!")
