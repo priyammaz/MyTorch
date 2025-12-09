@@ -81,7 +81,11 @@ class MyTokenizer:
     def id_to_token(self, id):
         return self.tokenizer.decode(id)
     
-    def parse_conversation(self, conversation, max_tokens=None):
+    def parse_conversation(self, 
+                           conversation, 
+                           max_tokens=None,
+                           add_generation_prompt=False,
+                           return_mask=False):
 
         """
         Instead of Jinja we will just manually parse conversations here. Conversations will take the standard
@@ -136,6 +140,7 @@ class MyTokenizer:
         add_tokens(self.bos_token_id, 0)
 
         has_system_message = False
+        last_message_role = None
         for i, message in enumerate(messages):
             
             ### Sanity checks ###
@@ -229,12 +234,24 @@ class MyTokenizer:
                 ### End asssistant with end token ###
                 add_tokens(self.assistant_end_id, 1)
 
+            last_message_role = role
+
+        if add_generation_prompt:
+
+            if last_message_role == "assistant":
+                raise Exception("Trying to add <|assistant_start|> token after assistants turn, unexpected!! Only want this after users turn")
+            ids.append(self.assistant_start_id)
+            mask.append(0)
+
         ### Truncate text incase it goes over our max context limit ###
         if max_tokens is not None:
             ids = ids[:max_tokens]
             mask = mask[:max_tokens]
-
-        return ids, mask
+        
+        if return_mask:
+            return ids, mask
+        
+        return ids
 
     def __repr__(self):
         return str(self.tokenizer)
