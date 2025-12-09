@@ -39,6 +39,7 @@ import triton.language as tl
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
 
 def get_fwd_autotune_configs():
+    
     # Read the autotune mode from environment variable, default to "none"
     mode = AUTOTUNE_MODE
 
@@ -330,7 +331,7 @@ def _attn_fwd_inner(
 
 @triton.autotune(
     configs=get_fwd_autotune_configs(),
-    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"]
+    key=["HEAD_DIM"]
 )
 @triton.jit
 def _attn_fwd(
@@ -529,7 +530,7 @@ def _attn_fwd(
 
 @triton.autotune(
     configs=get_preprocess_autotune_configs(),
-    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def attn_backward_preprocess(
@@ -585,7 +586,7 @@ def attn_backward_preprocess(
 
 @triton.autotune(
     configs=get_bwd_dq_autotune_configs(),
-    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def _attn_bwd_dq(
@@ -747,7 +748,7 @@ def _attn_bwd_dq(
 
 @triton.autotune(
     configs=get_bwd_dkdv_autotune_configs(),
-    key=["SEQ_LEN_Q", "SEQ_LEN_KV", "HEAD_DIM"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def _attn_bwd_dk_dv(

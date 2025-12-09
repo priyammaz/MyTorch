@@ -347,7 +347,7 @@ def _attn_fwd_inner(
 
 @triton.autotune(
     configs=get_fwd_autotune_configs(),
-    key=["SEQ_LEN", "HEAD_DIM"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def _attn_fwd(
@@ -668,7 +668,7 @@ def _attn_fwd(
 
 @triton.autotune(
     configs=get_preprocess_autotune_configs(),
-    key=["SEQ_LEN", "HEAD_DIM"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def attn_backward_preprocess(
@@ -943,7 +943,7 @@ def _attn_bwd_dq(
 
 @triton.autotune(
     configs=get_bwd_autotune_configs(),
-    key=["SEQ_LEN", "HEAD_DIM"],
+    key=["HEAD_DIM"],
 )
 @triton.jit
 def _attn_bwd(
