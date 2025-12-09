@@ -12,7 +12,6 @@ CUDNN in the backend. This is more of an attempt to understand grouping as we wi
 our linear layers (with a fused bias) and convolution layers
 """
 
-import os
 import torch
 from torch.utils.dlpack import from_dlpack
 import cupy as cp
