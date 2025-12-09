@@ -14,7 +14,6 @@ import time
 from mytorch.accelerate import Accelerator
 from nanochat_trainer.core.nanochat_gpt import GPT, GPTConfig
 from nanochat_trainer.scripts.utils import get_last_checkpoint 
-from nanochat_trainer.core.tokenizer import MyTokenizer
 
 terminal_width = shutil.get_terminal_size().columns
 
@@ -52,11 +51,7 @@ def parse_args():
     parser.add_argument("--log_iter", type=int, default=1)
     parser.add_argument("--eval_interval", type=int, default=150)
     parser.add_argument("--eval_iterations", type=int, default=200)
-    parser.add_argument("--checkpoint_iterations", type=int, default=500)
-    parser.add_argument("--generate_interval", type=int, default=150)
-
-    ### Tokenizer ###
-    parser.add_argument("--path_to_tokenizer", type=str, default="nanochat_trainer/nanochat_tokenizer")
+    parser.add_argument("--checkpoint_iterations", type=int, default=5000)
 
     args = parser.parse_args()
     
@@ -327,4 +322,4 @@ if __name__ == "__main__":
     if last_checkpoint != -1: # this was our catch for if the final_checkpoint already exists
         trainer(args, path_to_experiment, resume_from_checkpoint=last_checkpoint)
     else:
-        print("This training is already complete!!")
+        print("Pretraining is already complete!!")
