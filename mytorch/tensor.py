@@ -2118,6 +2118,19 @@ class Tensor:
     def numpy(self):
         return self.data.asnumpy()
     
+    def clone(self):
+
+        clone = Tensor(
+            self.data.copy(), 
+            requires_grad=self.requires_grad,
+            grad_fn=self.grad_fn, 
+            grad_fn_name=self.grad_fn_name, 
+            device=self.device
+        )
+
+        return clone
+        
+    
     def __len__(self):
         return self.shape[0]
 
