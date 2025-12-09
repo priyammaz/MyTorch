@@ -13,9 +13,15 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 - **Education Focus**: Try to be as readable as possible to be hackable and transparent!
 - **LLM Focused**: We will have some implementations of Convolutions, but they are notoriously challenging to reach CUDNN levels even with fused kernels, so these will be less of a focus for this repo!
 
-### Try it in Colab!
+## Try it in Colab!
 
 [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/drive/1wOz7Q2QDVo0bvF-WtLTAEyg2WOBf14gu?usp=sharing) 
+
+## Table of Contents
+- [Installation](#installation)
+- [Usage](#usage)
+- [Reproduce GPT2 (124M Parms)](#train-gpt2)
+
 
 ### References
 
@@ -786,11 +792,11 @@ I am not even close to done! Here are some of the stuff I want to work on next t
   - [ ] Add Sliding Window Attention
   - [x] Add Grouped Query Attention
 - [x] KV Cache for Inference
-- [ ] Reimplement and Reproduce (something like) Llama, closer to nanoChat
+- [x] Reimplement and Reproduce (something like) Llama, closer to nanoChat
   - [x] Rotary Embeddings (kernel)
   - [x] Repeat
   - [x] Optimizer Groups
-  - [ ] Better inference wrapper
+  - [x] Better inference wrapper
   - [x] Swiglu Kernel
   - [x] RMSNorm (kernel)
 - [ ] GRPO Trainer for post-training
