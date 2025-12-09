@@ -81,94 +81,94 @@ mkdir -p $SFT_WORKING_DIRECTORY
 mkdir -p $DOWNLOAD_TASKS_PATH
 export HF_HOME=$HF_CACHE_DIR
 
-# # ===================================================================
-# # CACHE THIS MODELS CONFIG
-# # ===================================================================
-# python -m nanochat_trainer.scripts.save_model_meta \
-#     --path_to_store $EXPERIMENT_WORKING_DIRECTORY \
-#     --vocab_size $VOCAB_SIZE \
-#     --context_length $CONTEXT_LENGTH \
-#     --num_blocks $NUM_BLOCKS \
-#     --embed_dim $EMBED_DIM \
-#     --num_q_heads $NUM_Q_HEADS \
-#     --num_kv_heads $NUM_KV_HEADS \
-#     --mlp_ratio $MLP_RATIO \
-#     --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
+# ===================================================================
+# CACHE THIS MODELS CONFIG
+# ===================================================================
+python -m nanochat_trainer.scripts.save_model_meta \
+    --path_to_store $EXPERIMENT_WORKING_DIRECTORY \
+    --vocab_size $VOCAB_SIZE \
+    --context_length $CONTEXT_LENGTH \
+    --num_blocks $NUM_BLOCKS \
+    --embed_dim $EMBED_DIM \
+    --num_q_heads $NUM_Q_HEADS \
+    --num_kv_heads $NUM_KV_HEADS \
+    --mlp_ratio $MLP_RATIO \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
 
-# # ===================================================================
-# #  DOWNLOAD AND TOKENIZE ALL THE PRETRAINING DATA
-# # ===================================================================
-# ## DOWNLOAD SLICE OF FINEWEB ###
-# ## With the default settings this will download ~20 parquet files from 100BT split
-# ## and will save a final ~30 parquet files (about 55GB of data!)
-# python -m nanochat_trainer.scripts.download_fineweb_edu \
-#     --path_to_save $RAW_TEXT_DIRECTORY \
-#     --num_workers $NUM_WORKERS \
-#     --chinchilla_ratio $PRETRAIN_CHINCHILLA_RATIO \
-#     --vocab_size $VOCAB_SIZE \
-#     --context_length $CONTEXT_LENGTH \
-#     --num_blocks $NUM_BLOCKS \
-#     --embed_dim $EMBED_DIM \
-#     --num_q_heads $NUM_Q_HEADS \
-#     --num_kv_heads $NUM_KV_HEADS \
-#     --mlp_ratio $MLP_RATIO
+# ===================================================================
+#  DOWNLOAD AND TOKENIZE ALL THE PRETRAINING DATA
+# ===================================================================
+## DOWNLOAD SLICE OF FINEWEB ###
+## With the default settings this will download ~20 parquet files from 100BT split
+## and will save a final ~30 parquet files (about 55GB of data!)
+python -m nanochat_trainer.scripts.download_fineweb_edu \
+    --path_to_save $RAW_TEXT_DIRECTORY \
+    --num_workers $NUM_WORKERS \
+    --chinchilla_ratio $PRETRAIN_CHINCHILLA_RATIO \
+    --vocab_size $VOCAB_SIZE \
+    --context_length $CONTEXT_LENGTH \
+    --num_blocks $NUM_BLOCKS \
+    --embed_dim $EMBED_DIM \
+    --num_q_heads $NUM_Q_HEADS \
+    --num_kv_heads $NUM_KV_HEADS \
+    --mlp_ratio $MLP_RATIO
 
-# ### TRAIN TOKENIZER ON FINEWEB ###
-# python -m nanochat_trainer.scripts.train_tokenizer \
-#     --comparison_tokenizer "gpt2" \
-#     --path_to_dataset $RAW_TEXT_DIRECTORY \
-#     --vocab_size $VOCAB_SIZE \
-#     --path_to_save_tokenizer $PATH_TO_SAVE_TOKENIZER
+### TRAIN TOKENIZER ON FINEWEB ###
+python -m nanochat_trainer.scripts.train_tokenizer \
+    --comparison_tokenizer "gpt2" \
+    --path_to_dataset $RAW_TEXT_DIRECTORY \
+    --vocab_size $VOCAB_SIZE \
+    --path_to_save_tokenizer $PATH_TO_SAVE_TOKENIZER
 
-# ### Tokenize and Save Dataset 
-# python -m nanochat_trainer.scripts.prepare_fineweb \
-#     --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
-#     --path_to_data $RAW_TEXT_DIRECTORY \
-#     --path_to_save $TOKENIZED_DIRECTORY \
-#     --num_workers $NUM_WORKERS \
-#     --max_seq_len $CONTEXT_LENGTH
+### Tokenize and Save Dataset 
+python -m nanochat_trainer.scripts.prepare_fineweb \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
+    --path_to_data $RAW_TEXT_DIRECTORY \
+    --path_to_save $TOKENIZED_DIRECTORY \
+    --num_workers $NUM_WORKERS \
+    --max_seq_len $CONTEXT_LENGTH
 
-# ### Delete Everything in Cache, Dont Need it Anymore ###
-# rm -r $HF_CACHE_DIR/*
+### Delete Everything in Cache, Dont Need it Anymore ###
+rm -r $HF_CACHE_DIR/*
 
-# # ===================================================================
-# # PRETRAINING (the expensive part)
-# # ===================================================================
-# mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
-#     --work_dir $PRETRAIN_WORKING_DIRECTORY \
-#     --experiment_name $EXPERIMENT_NAME \
-#     --path_to_data $TOKENIZED_DIRECTORY \
-#     --chinchilla_ratio $PRETRAIN_CHINCHILLA_RATIO \
-#     --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
-#     --tokens_per_batch $PRETRAIN_TARGET_TOKENS_PER_BATCH \
-#     --num_workers $NUM_WORKERS \
-#     --vocab_size $VOCAB_SIZE \
-#     --context_length $CONTEXT_LENGTH \
-#     --num_blocks $NUM_BLOCKS \
-#     --embed_dim $EMBED_DIM \
-#     --num_q_heads $NUM_Q_HEADS \
-#     --num_kv_heads $NUM_KV_HEADS \
-#     --mlp_ratio $MLP_RATIO \
-#     --max_learning_rate $PRETRAIN_MAX_LEARNING_RATE \
-#     --min_learning_rate_ratio $PRETRAIN_MIN_LEARNING_RATE_RATIO \
-#     --beta1 $BETA1 \
-#     --beta2 $BETA2 \
-#     --weight_decay $WEIGHT_DECAY \
-#     --warmup_ratio $PRETRAIN_WARMUP_RATIO \
-#     --max_grad_norm $MAX_GRAD_NORM \
-#     --checkpoint_iterations $PRETRAIN_CHECKPOINT_ITERATIONS \
-#     --log_wandb
+# ===================================================================
+# PRETRAINING (the expensive part)
+# ===================================================================
+mytorchrun launch -m nanochat_trainer.scripts.pretrain_model \
+    --work_dir $PRETRAIN_WORKING_DIRECTORY \
+    --experiment_name $EXPERIMENT_NAME \
+    --path_to_data $TOKENIZED_DIRECTORY \
+    --chinchilla_ratio $PRETRAIN_CHINCHILLA_RATIO \
+    --batch_size_per_gpu $PER_GPU_BATCH_SIZE \
+    --tokens_per_batch $PRETRAIN_TARGET_TOKENS_PER_BATCH \
+    --num_workers $NUM_WORKERS \
+    --vocab_size $VOCAB_SIZE \
+    --context_length $CONTEXT_LENGTH \
+    --num_blocks $NUM_BLOCKS \
+    --embed_dim $EMBED_DIM \
+    --num_q_heads $NUM_Q_HEADS \
+    --num_kv_heads $NUM_KV_HEADS \
+    --mlp_ratio $MLP_RATIO \
+    --max_learning_rate $PRETRAIN_MAX_LEARNING_RATE \
+    --min_learning_rate_ratio $PRETRAIN_MIN_LEARNING_RATE_RATIO \
+    --beta1 $BETA1 \
+    --beta2 $BETA2 \
+    --weight_decay $WEIGHT_DECAY \
+    --warmup_ratio $PRETRAIN_WARMUP_RATIO \
+    --max_grad_norm $MAX_GRAD_NORM \
+    --checkpoint_iterations $PRETRAIN_CHECKPOINT_ITERATIONS \
+    --log_wandb
 
-# # ===================================================================
-# # MIDTRAINING (Lets Make it Conversational)
-# # ===================================================================
-# ### Download and prepare conversational datasets. The main datasets we 
-# ### will be doing here as an example is "smoltalk", "arc_easy", 
-# ### "arc_challenge", "mmlu", "gsm8k"
-# python -m nanochat_trainer.scripts.tasks_prep \
-#     --path_to_store $DOWNLOAD_TASKS_PATH \
-#     --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
-#     --num_workers $NUM_WORKERS
+# ===================================================================
+# MIDTRAINING (Lets Make it Conversational)
+# ===================================================================
+### Download and prepare conversational datasets. The main datasets we 
+### will be doing here as an example is "smoltalk", "arc_easy", 
+### "arc_challenge", "mmlu", "gsm8k"
+python -m nanochat_trainer.scripts.tasks_prep \
+    --path_to_store $DOWNLOAD_TASKS_PATH \
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
+    --num_workers $NUM_WORKERS
 
 ### Midtrain the model now!
 mytorchrun launch -m nanochat_trainer.scripts.midtrain_model \
