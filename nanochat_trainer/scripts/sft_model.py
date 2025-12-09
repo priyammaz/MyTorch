@@ -104,7 +104,7 @@ def trainer(args,
     ### Init tracker ###
     if args.log_wandb:
         accelerator.init_tracker(project_name=args.experiment_name, 
-                                 run_name="midtraining",
+                                 run_name="sft",
                                  config=vars(args))
         
     ### Get path to work dir ###
