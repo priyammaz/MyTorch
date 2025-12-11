@@ -32,6 +32,18 @@ class Pipeline:
         ### Store device ###
         self.device = device
 
+        ### What Tokens Are We Not Allowed To Generate? ###
+        ### These are tokens that we set during generation ###
+        ### so we can mask these out so they are never selected ###
+        self.invalid_gen_tokens = [
+            tokenizer.bos_token_id, 
+            tokenizer.system_start_id, 
+            tokenizer.system_end_id, 
+            tokenizer.user_start_id, 
+            tokenizer.user_end_id, 
+            tokenizer.assistant_start_id,
+        ]
+
     def get_cache(self, batch_size):
         return KVCache(
             batch_size=batch_size, 
@@ -57,13 +69,26 @@ class Pipeline:
             "completed": False
         }
     
+    def mask_invalid(self, logits):
+        """
+        Quick helper method to set any logits of invalid generation tokens (like user tokens, system tokens, etc...)
+        to -inf (which becomes 0 after softmax)
+        """
+
+        assert logits.shape[0] == 1, "Expected to sample for only 1 token"
+        logits[0, self.invalid_gen_tokens] = float("-inf")
+        return logits
+
     @staticmethod
     @mytorch.no_grad()
-    def sample(logits, temperature=1.0, topk=None):
+    def sample(logits, 
+               temperature=1.0, 
+               topk=None):
         """
         sample logits where the shape is [B x Vocab Size]
         and predict the next token!
         """
+
         if temperature == 0.0:
             ### grab the per row argmax, if temp is 0 it is deterministic ###
             next_token_pred = mytorch.argmax(logits, dim=-1).unsqueeze(1)
@@ -110,7 +135,8 @@ class Pipeline:
                   num_generations=1, 
                   max_token_gens=None, 
                   temperature=1.0, 
-                  topk=None):
+                  topk=None,
+                  mask_invalid_tokens=True):
         
         if isinstance(input_ids, list):
             input_ids = mytorch.Tensor(input_ids).reshape(1,-1)
@@ -131,6 +157,10 @@ class Pipeline:
 
         ### Grab the last timesteps logits so we can predict the next token ###
         logits = logits[:, -1, :]
+
+        ### Remove possibility of sampling an invalid token ###
+        if mask_invalid_tokens:
+            logits = self.mask_invalid(logits)
         
         ### Sample input ids (this is now (b x 1)) ###
         new_input_ids = self.sample(logits, temperature, topk)
@@ -140,12 +170,15 @@ class Pipeline:
         new_input_ids_list = new_input_ids.flatten().numpy().tolist() # our next token (per generation)
         states = [self.per_row_generation_meta(input_ids_list + [new_input_ids_list[i]]) for i in range(num_generations)] 
         
+        ### Yield this fist token generation (which can never be forced) ###
+        yield new_input_ids_list, [1]*len(new_input_ids_list)
+
         ### Start Generations ###
         input_ids = new_input_ids
         num_generated_tokens = 0
 
         while True:
-
+                            
             ### Stop if we hit our max length ###
             if max_token_gens is not None and num_generated_tokens >= max_token_gens:
                 break
@@ -226,7 +259,7 @@ class Pipeline:
 
                             ### Cache some forced tokens for the "<|output_start|>" + [ANSWER] + "<|output_end|>" ###
                             state["forced_tokens"].append(self.tokenizer.output_start_id)
-                            state["forced_tokens"].append(result_tokens)
+                            state["forced_tokens"].extend(result_tokens)
                             state["forced_tokens"].append(self.tokenizer.output_end_id)
 
                     ### Reset our expression ###
@@ -246,7 +279,8 @@ class Pipeline:
                  num_generations=1, 
                  max_token_gens=None, 
                  temperature=1.0, 
-                 topk=None):
+                 topk=None,
+                 mask_invalid_tokens=True):
 
         if isinstance(input_ids, list):
             input_ids = mytorch.Tensor(input_ids).reshape(1,-1)
@@ -260,7 +294,8 @@ class Pipeline:
             num_generations, 
             max_token_gens, 
             temperature, 
-            topk
+            topk,
+            mask_invalid_tokens
         )
 
         ### Create a list of lists as our starting point ###
@@ -284,40 +319,132 @@ class Pipeline:
                     if (token_ == self.tokenizer.assistant_end_id) or (token_ == self.tokenizer.bos_token_id):
                         completed[i] = True
 
-                    ### otherwise just keep going ###
-                    else:
-                        output[i].append(token_)
-                        masks[i].append(mask_)
-                
+                    output[i].append(token_)
+                    masks[i].append(mask_)
+                    
             # Stop if all rows are completed 
             if all(completed):
                 break
         
         return output, masks
-                        
+    
+    def generate_for_chat(self,
+                          message=None, 
+                          input_ids=None,
+                          max_token_gens=None, 
+                          temperature=1.0, 
+                          topk=None,
+                          mask_invalid_tokens=True):
+        
+        """
+        Identical to generate, but will be used for printing
+        """
+        
+        ### Tokenize ###
+        if input_ids is None:
+            input_ids = self.tokenizer.parse_conversation(message, add_generation_prompt=True)
+            input_ids = mytorch.Tensor(input_ids, dtype=mytorch.int32).reshape(1,-1)
+
+        if isinstance(input_ids, list):
+            input_ids = mytorch.Tensor(input_ids).reshape(1,-1)
+        input_ids = input_ids.to(self.device)
+      
+        assert len(input_ids.shape) == 2, "Input ids must be [Batch Size x Seq Len] !!"
+        assert input_ids.shape[0] == 1, f"Only support single sample input generations. got {input_ids.shape[0]} samples"
+
+        generator = self._generate(
+            input_ids, 
+            num_generations=1,
+            max_token_gens=max_token_gens, 
+            temperature=temperature, 
+            topk=topk,
+            mask_invalid_tokens=mask_invalid_tokens
+        )
+
+        ### Create our starting point ###
+        output = input_ids[0].numpy().astype(int).tolist().copy()
+
+        ### Create a list of only the newly generated tokens ###
+        new_gens = []
+
+        ### Completion flag ###
+        completed = False
+
+        for token_, _ in generator:
+
+            if len(output) > self.config.max_seq_len:
+                raise Exception("You have reached the Context Limit!!")
+               
+            ### Unpack the list for the actual token value ###
+            token_ = token_[0]
+
+            ### If we are not done ###  
+            if not completed:
+
+                ### If the next token is a done token ###
+                if (token_ == self.tokenizer.assistant_end_id) or (token_ == self.tokenizer.bos_token_id):
+                    completed = True
+
+                output.append(token_)
+
+                ### As long as we dont generate a valid special token we print to console! ###
+                if token_ not in [
+                    self.tokenizer.python_start_id, 
+                    self.tokenizer.python_end_id,
+                    self.tokenizer.assistant_end_id, 
+                    # self.tokenizer.output_start_id, 
+                    # self.tokenizer.output_end_id
+                ]:
+                    new_gens.append(token_)
+                    decoded = self.tokenizer.decode([token_], skip_special_tokens=False)
+                    yield decoded
+
+            # Stop if all rows are completed 
+            if completed:
+                break
+    
+        ### Decode Everything We Generated ###
+        generated_text = self.tokenizer.decode(new_gens, skip_special_tokens=False)
+
+        ### Update our message completion ###
+        message["messages"].append(
+            {"role": "assistant", "content": generated_text}
+        )
+        
+        ### The final thing the generator will yield is the dictionary of our updated messages ###
+        yield message
+    
+
 if __name__ == "__main__":
     import mytorch
     from .nanochat_gpt import GPT, GPTConfig
     from .tokenizer import MyTokenizer
 
-
-
-    model = GPT(GPTConfig())
-    state_dict = mytorch.load("work_dir/mytorch_llm_500M/nanochat_pretrain/final_checkpoint/model.safetensors")
-    model.load_state_dict(state_dict)
-
-    for name, param in model.named_parameters():
-        param.astype(mytorch.float16)
-    for name, param in model.named_buffers():
-        param.astype(mytorch.float16)
+    from nanochat_trainer.core.tasks import Task
 
     tokenizer = MyTokenizer("work_dir/mytorch_llm_500M/tokenizer.json")
+    model = GPT(GPTConfig())
+    state_dict = mytorch.load("work_dir/mytorch_llm_500M/nanochat_sft/final_checkpoint/model.safetensors")
+    model.load_state_dict(state_dict)
+
+    # for name, param in model.named_parameters():
+    #     param.astype(mytorch.float16)
+    # for name, param in model.named_buffers():
+    #     param.astype(mytorch.float16)
+
     pipe = Pipeline(model, tokenizer, device="cuda")
 
-    start = "Artificial intelligence (AI) is the capability of computational systems to perform tasks"
-    rand = tokenizer.encode(start, prepend=tokenizer.bos_token)
-    rand = mytorch.Tensor(rand, dtype=mytorch.int32).reshape(1,-1)
+    prepped_sample = {
+        "messages": [
+            {"role": "user", "content": "What are large language models?"},
+        ]
+    }
 
-    output, _ = pipe.generate(rand, num_generations=1, max_token_gens=200, temperature=0.7, topk=100)
-    print(output)
-    print(tokenizer.decode(output[0]))
+    
+    generator = pipe.generate_for_chat(prepped_sample, max_token_gens=512, temperature=0.6, topk=50)
+    for t in generator:
+        print(t, end="", flush=True)
+    print("\n")
+    # print(input_ids)
+    # print(output)
+    # print(tokenizer.decode(output[0], skip_special_tokens=False))
