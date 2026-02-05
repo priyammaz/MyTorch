@@ -22,6 +22,7 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 - [Usage](#usage)
 - [BabyGPT](#baby-gpt)
 - [Reproduce GPT2 (124M Parms)](#train-gpt2)
+- [Train 500M Param LLM](#train-500m-param-llm)
 
 
 ### References
@@ -789,6 +790,49 @@ For they say, he did disobedient unto them:
 But where did these hapless saplings
 
 ```
+
+### Train 500M Param LLM
+
+Lets keep pushing! Inspired by [NanoChat](https://github.com/karpathy/nanochat) we will be training a 500M param LLM with our MyTorch system! To make this simple we provide a single training script that will process and train your model!
+
+```bash
+bash train_nanochat_500m.sh
+```
+
+## Model Configuration
+
+Inspired by NanoChat, the model has the following specifications:
+
+| Parameter                | Value    |
+|--------------------------|---------|
+| Vocab Size               | 65,536  |
+| Context Length           | 2,048   |
+| Transformer Blocks       | 16      |
+| Embedding Dimension      | 1,280   |
+| Number of Query Heads    | 10      |
+| Number of Key/Value Heads| 10      |
+| MLP Ratio                | 4       |
+| Activation Function      | SwiGLU  |
+| Positional Embeddings    | Rope    |
+
+
+#### Data Preparation
+- Download [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) according to Chinchilla scaling laws. This means we want 20 tokens/parameter, and for a 500m param model, we need ```10 Billion``` tokens!
+- Train a tokenizer w/ a vocab size of ```65536```
+- Tokenize and save the entire dataset so its ready to train with!
+- We also download/tokenize the following finetuning datasets:
+  - [smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smoltalk)
+  - [Arc Easy/Hard](https://huggingface.co/datasets/allenai/ai2_arc)
+  - [MMLU](https://huggingface.co/datasets/cais/mmlu)
+  - [GSM8K](https://huggingface.co/datasets/openai/gsm8k)
+
+#### Pretraining (The Expensive Part)
+
+Pretraining on [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) dataset will take some time. Despite our best efforts to make this as efficient as possible, it is hard to match PyTorch, especially with ```.compile()``` doing awesome magic in the backend! But regardless pretraining is the most expensive part!
+
+We have about 10B tokens prepared for pretraining, and each batch is set to process ```524288``` tokens (with gradient accumulation if needed), so this means we have roughly 19,000 steps of training in total!
+
+I locally ran this on a ```4xGH200``` cluster and it took 15 Hours to complete! Not so bad for our framework!
 
 ### Plans for this Repo
 
