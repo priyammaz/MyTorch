@@ -150,8 +150,13 @@ class Adam(Optimizer):
                 'weight_decay': weight_decay,
             }]
 
+        ### Get parameter device by checking the first parameter ###
+        ### we assume its all or nothing, all parameters (even if multiple groups) ###
+        ### must be on the same device! ###
+        device = self.param_groups[0]["params"][0].device
+
         ### Init everything we need for this optimizer ###
-        self._init_optimizer_state()
+        self._init_optimizer_state(device)
 
     def _init_optimizer_state(self, device="cpu"):
         
@@ -322,8 +327,13 @@ class AdamW(Optimizer):
                 'weight_decay': weight_decay,
             }]
 
+        ### Get parameter device by checking the first parameter ###
+        ### we assume its all or nothing, all parameters (even if multiple groups) ###
+        ### must be on the same device! ###
+        device = self.param_groups[0]["params"][0].device
+
         ### Init everything we need for this optimizer ###
-        self._init_optimizer_state()
+        self._init_optimizer_state(device)
 
     def _init_optimizer_state(self, device="cpu"):
         
