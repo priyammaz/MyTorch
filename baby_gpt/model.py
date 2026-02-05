@@ -21,10 +21,10 @@ class BabyGPTConfig:
     
     vocab_size: int =  65
     max_seq_len: int = 256
-    embed_dim: int = 256
+    embed_dim: int = 384
     mlp_ratio: int = 4
     num_blocks: int = 6
-    num_heads: int = 4
+    num_heads: int = 6
     mlp_dropout_p: float = 0.0
     attn_dropout_p: float = 0.0 
     use_full_auto: bool = False

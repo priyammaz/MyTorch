@@ -3,7 +3,6 @@ Super simple training script on shakespeare data just
 like in NanoGPT!
 """
 
-import os
 import numpy as np
 import mytorch
 import mytorch.nn as nn
@@ -21,12 +20,12 @@ AUTO = False
 DEVICE = "cuda"
 
 ### TRAINING PARAMETERS ###
-TRAINING_ITERS = 2500 # Total training steps
+TRAINING_ITERS = 3000 # Total training steps
 EVAL_ITERS = 250 # After how many steps do you want to eval?
-LR = 0.001
+LR = 0.0001
 BATCH_SIZE = 16
 GEN_ITER = 1000
-GEN_START = "H"
+GEN_START = "K"
 
 ### LOAD DATASET ###
 trainset, testset, meta = prep_shakespeare()
@@ -48,6 +47,27 @@ completed_steps = 0
 train = True
 pbar = tqdm(range(TRAINING_ITERS))
 
+### GENERATION METHOD ###
+def generate():
+    start_idx = [char2idx[i] for i in GEN_START]
+    start_tensor = mytorch.Tensor(start_idx, dtype=mytorch.uint32).unsqueeze(0).to(DEVICE)
+
+    ### Inference ###
+    for _ in range(config.max_seq_len):
+        
+        ### Sample next token ###
+        with mytorch.no_grad():
+            last_logits = model(start_tensor)[:, -1, :]
+            last_logits = last_logits.astype(mytorch.float32)
+            exp_logits = mytorch.exp(last_logits - mytorch.max(last_logits))
+            probs = exp_logits / mytorch.sum(exp_logits)
+            next_id = mytorch.multinomial(probs, num_samples=1)[0].numpy().item()
+        
+        start_idx.append(next_id)
+        start_tensor = mytorch.Tensor(start_idx, dtype=mytorch.uint32).unsqueeze(0).to(DEVICE)
+    
+    return start_idx
+    
 while train:
 
     ### Sample some data ###
@@ -97,29 +117,11 @@ while train:
     if completed_steps % GEN_ITER == 0 or completed_steps == 1:
         
         model.eval()
-
-        ### Store Start Tokens ###
-        start_idx = [char2idx[i] for i in GEN_START]
-        start_tensor = mytorch.Tensor(start_idx, dtype=mytorch.uint32).unsqueeze(0).to(DEVICE)
-        
-        ### Inference ###
-        for _ in range(config.max_seq_len):
-            
-            ### Sample next token ###
-            with mytorch.no_grad():
-                last_logits = model(start_tensor)[:, -1, :]
-                last_logits = last_logits.astype(mytorch.float32)
-                exp_logits = mytorch.exp(last_logits - mytorch.max(last_logits))
-                probs = exp_logits / mytorch.sum(exp_logits)
-                next_id = mytorch.multinomial(probs, num_samples=1)[0].numpy().item()
-            
-            start_idx.append(next_id)
-            start_tensor = mytorch.Tensor(start_idx, dtype=mytorch.uint32).unsqueeze(0).to(DEVICE)
-                
+        gen_tokens = generate()
         model.train()
 
         print("Generation:")
-        gen = "".join([idx2char[i] for i in start_idx])
+        gen = "".join([idx2char[i] for i in gen_tokens])
         print(gen)
         print("-"*50)
 
@@ -128,6 +130,13 @@ while train:
         train = False
         break
 
+model.eval()
+gen_tokens = generate()
+
+print("Generation:")
+gen = "".join([idx2char[i] for i in gen_tokens])
+print(gen)
+print("-"*50)
 
 
 
