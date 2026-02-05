@@ -20,6 +20,7 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 ## Table of Contents
 - [Installation](#installation)
 - [Usage](#usage)
+- [BabyGPT](#baby-gpt)
 - [Reproduce GPT2 (124M Parms)](#train-gpt2)
 
 
@@ -595,9 +596,21 @@ Fused operations follow a simple idea, why not copy all the data once, do all th
 
 Triton is not too challenging to learn, it just needs some practice! I think my fused softmax at [```mytorch/nn/fused_ops/softmax.py```](mytorch/nn/fused_ops/softmax.py) is a great place to start, as you will see the differences immediately!
 
+# Baby GPT:
+
+This is the starting point where you can use MyTorch to train a baby GPT model using nothing but Autograd on the Shakespeare dataset! This is intended to be close to the [minGPT](https://github.com/karpathy/minGPT) implementation!
+
+To train the model simply run:
+
+```bash
+python baby_gpt/train.py
+```
+
 # Train GPT2:
 
 Although this repo is educational, it also can be used for some serious training tasks! My GPT2 Implementation here is intended to be closely matched to [NanoGPT](https://github.com/karpathy/nanoGPT)
+
+Whats new here is the addition of new options like MultiGPU training, Mixed Precision Training and Kernel Fusion! That way we get to watch GPUs go brrrr.
 
 ### Train Tiny Shakespeare (10M Parameters)
 
