@@ -60,10 +60,10 @@ PRETRAIN_MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay do
 PRETRAIN_WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 PRETRAIN_CHECKPOINT_ITERATIONS=5000 # After how many steps do you want to save a checkpoint? More frequent is more disk space!
 
-### MIDTRAINING CONFIG (~2400 Steps in preset config) ###
-MIDTRAIN_EPOCHS=3 # How many epochs through the midtraining data do you want to do?
+### MIDTRAINING CONFIG (~800 Steps in preset config) ###
+MIDTRAIN_EPOCHS=1 # How many epochs through the midtraining data do you want to do?
 MIDTRAIN_TARGET_TOKENS_PER_BATCH=524288 # Grad accumulation until we hit this tok/batch
-MIDTRAIN_MAX_LEARNING_RATE=0.000075 # Highest lr that we warmup to (less than pretraining lr to avoid catastrophic forgetting)
+MIDTRAIN_MAX_LEARNING_RATE=0.00005 # Highest lr that we warmup to (less than pretraining lr to avoid catastrophic forgetting)
 MIDTRAIN_MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 MIDTRAIN_WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 MIDTRAIN_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a checkpoint? More frequent is more disk space!
@@ -71,7 +71,7 @@ MIDTRAIN_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a 
 ### SFT CONFIG (~700 Steps in preset config) ###
 SFT_EPOCHS=1 # How many epochs through the midtraining data do you want to do?
 SFT_EXAMPLES_PER_BATCH=32 # Grad accumulation until we hit this tok/batch
-SFT_MAX_LEARNING_RATE=0.000005 # Highest lr that we warmup to (less than midtraining lr to avoid catastrophic forgetting)
+SFT_MAX_LEARNING_RATE=0.00001 # Highest lr that we warmup to (less than midtraining lr to avoid catastrophic forgetting)
 SFT_MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 SFT_WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 SFT_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a checkpoint? More frequent is more disk space!
@@ -212,7 +212,7 @@ mytorchrun launch -m nanochat_trainer.scripts.midtrain_model \
 ### autotuner on our linear layer we just disable it here. A bit hacky
 ### but CUDA kernels are precompiled, and NVIDIA/CUBLAS already knows the ideal
 ### settings for a specific matmul, so it internally dispatches to the optimal
-### matmul internally. The Autotuner from triton gives similar performance
+### matmul. The Autotuner from triton gives similar performance
 ### but has to be tuned to a specific shape. This didnt matter earlier as in 
 ### midtraining/pretraining our seq lens and batch size are always the same. 
 ### but now as they dynamically will change based on the longest sample in the batch
@@ -246,5 +246,4 @@ mytorchrun launch -m nanochat_trainer.scripts.sft_model \
     --warmup_ratio $SFT_WARMUP_RATIO \
     --max_grad_norm $MAX_GRAD_NORM \
     --checkpoint_iterations $SFT_CHECKPOINT_ITERATIONS \
-    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER \
-    --log_wandb
+    --path_to_tokenizer $PATH_TO_SAVE_TOKENIZER
