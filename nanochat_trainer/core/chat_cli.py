@@ -72,12 +72,6 @@ def generate(pipe,
              temperature=0.6, 
              topk=50):
 
-    """
-    We will not use the generate method from the pipeline here
-    but rather the internal _generate method, just so we can yield
-    one token at a time and print to console as it goes rather than
-    waiting till the end!
-    """
     message = {
         "messages": [
             {"role": "user", "content": msg}
