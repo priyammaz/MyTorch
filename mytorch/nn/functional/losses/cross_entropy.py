@@ -1,4 +1,5 @@
 import numpy as np
+import mytorch
 from mytorch import Tensor
 from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
@@ -7,40 +8,11 @@ from ..fused_ops import fused_cross_entropy_forward, fused_cross_entropy_backwar
 
 def auto_cross_entropy(logits, targets, ignore_index=-100, *args):
     
-    *dims, num_classes = logits.shape
-    flattened_dim = np.prod(dims)
-    logits = logits.reshape(flattened_dim, num_classes)
-
-    ### Make sure targets are always int32 ###
-    targets = targets.astype("int32", copy=False)
-
-    ### Flatten Targets ###
-    targets = targets.reshape(flattened_dim)
-
-    ### Mask out our ignore index (-100 by default) ###
-    mask = (targets != ignore_index)
-    logits = logits[mask]
-    targets = targets[mask]
-
-    ### Get number of valid labels so we can compute the avg over them ###
-    valid_count = mask.sum()
-
-    ### Stable Log-Softmax ###
-    logits_shifted = logits - logits.max(dim=1, keepdims=True)
-
-    ### Log Sum Exp ###
-    logsumexp = (logits_shifted.exp()).sum(dim=1, keepdims=True).log()
-
-    ### Log Softmax ###
-    log_softmax = logits_shifted - logsumexp
-
-    ### Negative Log Likelihood For Correct Class ###
-    nll = -log_softmax[np.arange(len(targets)), targets] / valid_count
-
-    ### Mean Loss ###
-    loss = nll.sum()
-
-    return loss
+    """
+    Automatic diff through CrossEntropy seems to have some instability, 
+    so we are sticking to manual diff and fused diff
+    """
+    raise NotImplementedError
 
 def manual_cross_entropy(logits, targets, ignore_index=-100, *args):
 
@@ -163,16 +135,11 @@ def fused_cross_entropy(logits, targets, ignore_index=-100, softcap=None):
 
     return out
 
-def cross_entropy(logits, targets, ignore_index=-100, softcap=None, auto=False, fused=False):
-    if auto:
-        if softcap is not None:
-            raise Exception("Softcapping not supported in auto cross_entropy, apply manually to logits")
-        return auto_cross_entropy(logits, targets, ignore_index)
-    else:
-        _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
-        if softcap is not None and not _use_fused:
-            raise Exception("Softcapping not supported in non_fused cross_entropy, apply manually to logits")
-        op = fused_cross_entropy if _use_fused else manual_cross_entropy
-        if fused and op is manual_cross_entropy:
-            CHECKS.warn_triton_missing()
-        return op(logits, targets, ignore_index)
+def cross_entropy(logits, targets, ignore_index=-100, softcap=None, fused=False):
+    _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
+    if softcap is not None and not _use_fused:
+        raise Exception("Softcapping not supported in non_fused cross_entropy, apply manually to logits")
+    op = fused_cross_entropy if _use_fused else manual_cross_entropy
+    if fused and op is manual_cross_entropy:
+        CHECKS.warn_triton_missing()
+    return op(logits, targets, ignore_index)
