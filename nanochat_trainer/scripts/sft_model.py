@@ -117,11 +117,12 @@ def trainer(args,
         Task(args.path_to_data, "arc_easy", keep_mask=True), # 5.2K samples of multiple choice
         Task(args.path_to_data, "arc_challenge", keep_mask=True), # 2.3K samples of harder multiple choice
         Task(args.path_to_data, "gsm8k", keep_mask=True), # 8K samples of arithmetic
-        Task(args.path_to_data, "smoltalk", num_samples=10000) # 10k samples of general converation
+        Task(args.path_to_data, "smoltalk", num_samples=50000) # 50k samples of general converation
     ])
 
     testset = MixtureDataset([
         Task(args.path_to_data, "smoltalk", "test", keep_mask=True), 
+        Task(args.path_to_data, "gsm8k", keep_mask=True),
     ])
 
     ### Compute Gradient Accumulation Steps ###
