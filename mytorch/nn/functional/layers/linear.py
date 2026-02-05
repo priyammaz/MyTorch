@@ -70,15 +70,14 @@ def auto_linear(input, weight, bias=None, *args):
     """
 
     input, dims, reshaped_flag = reshape_for_linear(input)
-    out_features = weight.shape[-1]
+    out_features = weight.shape[0]
 
     output = input @ weight.transpose(-1,-2)
     if bias is not None:
         output = output + bias.reshape(1,-1)
-    
     if reshaped_flag:
         output = output.reshape(*dims, out_features)
-
+ 
     return output
 
 def manual_linear(input, weight, bias=None, *args):
