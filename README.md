@@ -791,7 +791,7 @@ But where did these hapless saplings
 
 ```
 
-### Train 500M Param LLM
+# Train 500M Param LLM
 
 Lets keep pushing! Inspired by [NanoChat](https://github.com/karpathy/nanochat) we will be training a 500M param LLM with our MyTorch system! To make this simple we provide a single training script that will process and train your model!
 
@@ -799,7 +799,7 @@ Lets keep pushing! Inspired by [NanoChat](https://github.com/karpathy/nanochat) 
 bash train_nanochat_500m.sh
 ```
 
-## Model Configuration
+### Model Configuration
 
 Inspired by NanoChat, the model has the following specifications:
 
@@ -814,25 +814,90 @@ Inspired by NanoChat, the model has the following specifications:
 | MLP Ratio                | 4       |
 | Activation Function      | SwiGLU  |
 | Positional Embeddings    | Rope    |
+| KVCache                  | Enabled |
+
+Also fused operations are enabled by default, you dont want to train this model without that!
 
 
-#### Data Preparation
+### Data Preparation
 - Download [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) according to Chinchilla scaling laws. This means we want 20 tokens/parameter, and for a 500m param model, we need ```10 Billion``` tokens!
 - Train a tokenizer w/ a vocab size of ```65536```
 - Tokenize and save the entire dataset so its ready to train with!
-- We also download/tokenize the following finetuning datasets:
-  - [smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smoltalk)
-  - [Arc Easy/Hard](https://huggingface.co/datasets/allenai/ai2_arc)
-  - [MMLU](https://huggingface.co/datasets/cais/mmlu)
-  - [GSM8K](https://huggingface.co/datasets/openai/gsm8k)
 
-#### Pretraining (The Expensive Part)
+### Pretraining (The Expensive Part)
 
 Pretraining on [FineWeb](https://huggingface.co/datasets/HuggingFaceFW/fineweb) dataset will take some time. Despite our best efforts to make this as efficient as possible, it is hard to match PyTorch, especially with ```.compile()``` doing awesome magic in the backend! But regardless pretraining is the most expensive part!
 
 We have about 10B tokens prepared for pretraining, and each batch is set to process ```524288``` tokens (with gradient accumulation if needed), so this means we have roughly 19,000 steps of training in total!
 
-I locally ran this on a ```4xGH200``` cluster and it took 15 Hours to complete! Not so bad for our framework!
+I locally ran this on a ```4xGH200``` cluster and it took 16 Hours to complete! Not so bad for our little framework! And the best validation loss was about ```3.22``` on the FineWeb dataset
+
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/500m_param_model_pretrain_loss.png?raw=true" alt="drawing" width="560"/>
+
+### MidTraining
+
+The second stage of training is MidTraining. This is identical to pretraining with one key difference. The pretraining data was just raw text, but we want the model to know understand turn-based conversations instead! For this we first have to prepare the following common conversational datasets:
+
+- [smoltalk](https://huggingface.co/datasets/HuggingFaceTB/smoltalk): General Conversation
+- [Arc Easy/Hard](https://huggingface.co/datasets/allenai/ai2_arc): Multiple Choice
+- [MMLU](https://huggingface.co/datasets/cais/mmlu): Multiple Choice
+- [GSM8K](https://huggingface.co/datasets/openai/gsm8k): Arithmetic (with tool calling)
+
+Conversation datasets are formatted into the typical pattern as such:
+
+```python
+{
+    "messages": [
+        {"role": "system", "content": ...}
+        {"role": "user", "content": ...},
+        {"role": "assistant", "content": ...},
+        ...
+    ]
+}
+```
+
+After the dataset is tokenized and saved, we concatenate together conversations to again efficiently train with full context length (of 2048 tokens)
+
+Midtraining took about 2.5 Hours to complete!
+
+### Supervised FineTuning (SFT) 
+
+In Pretraining/MidTraining we wanted to be as efficient as possible, so we packed each sample to have the full 2048 tokens as that was our context length (no padding tokens). But this meant during midtraining that we concatenated our conversational samples together until we reached that length. In the end we have samples of tokens which have either multiple conversations in it or one longer conversation that was cut off. 
+
+In Supervised Finetuning we will only train single conversation samples, so no concatenation! We also need our model to get better at predicting when it is done answering and to generate the ```<|assistant_end|>``` token. So we repeat our training on the conversation data as before, but each sample in the batch will consist of a single conversational sample!
+
+SFT took about 20 minutes to Complete!
+
+### Inference w/ Command Line Interface
+
+There are two ways we can use this model now! The first is through the command line:
+
+```bash
+python -m nanochat_trainer.core.chat_cli work_dir/mytorch_llm_500M \
+    -p "What is artificial intelligence?"
+```
+
+And you will get a result that looks like:
+
+```
+USER INPUT:
+What is artificial intelligence?
+
+ASSISTANT RESPONSE:
+Artificial Intelligence (AI) is a field of computer science that refers to the concept of creating computer technology that can carry out human-like activities such as voice, vision, or speech. These can include anything from robots to people. 
+
+AI has applications in various industries, including healthcare, finance, manufacturing, and healthcare. For example, AI-powered healthcare services can help doctors manage patients, track their health, and monitor their treatment options. AI systems can also be used to detect and prevent diseases, improve healthcare systems, and personalize treatment plans.
+The field of Artificial Intelligence (AI) is changing rapidly, and it is expected to continue growing in importance. As technology continues to evolve, AI will play a significant role in shaping various fields, including healthcare, finance, and manufacturing.
+```
+
+### Inference w/ Interface 
+
+[TODO]
+
+### Limitations
+
+There are obvious limitations here. There is a much more complex process of alignment (RLHF, GRPO, etc...) that needs to occur, and this model is very succeptible to hallucinating. But again we are just here for fun, not making a frontier LLM!
+
 
 ### Plans for this Repo
 
