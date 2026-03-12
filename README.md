@@ -933,6 +933,10 @@ Inspired by NanoChat, the model has the following specifications:
 
 Evaluations are not that impressive here. For multiple choice problems we have roughly random chance for example! My guess here is that the learning rates I trained with are too low. But also due to our FP16 training, I get precision errors and loss divergence at higher learning rates! On the other hand for general conversation this LLM seems to be fine, giving reasonable answers to questions. 
 
+For a general comparison, the 500M parameter model was pretrained with a learning rate of ```1.5e-4``` and the 1B model was trained at ```1.0e-4```, whereas the Llama 8B model was trained with a learning rate of ```3e-4```. Because our models were much smaller, we should have used a much larger learning rate close to ```5e-4```, but unfortunately, we have major training instability at those rates. 
+
+Our pretrained backbone loss dropped to about ```3.2``` by the end of training. Ideally this would have been closer to ```2.5``` as ablation studies in the [SmolLM-Training-Playbook](https://huggingface.co/spaces/HuggingFaceTB/smol-training-playbook#attention) had losses close to ```2.2```. This indicates a severly undertrained backbone that can be solved by either training for longer (which I dont have patience for!) or training with a larger learning rate (which wont work!). So in the rock and the hard place situation, I just accepted my fate that this was the best we can do without PyTorch doing the heavy lifting.
+
 # General Conversation is Good!
 
 Overall talking to the model is actually quite nice! For example I provide the prompt:
