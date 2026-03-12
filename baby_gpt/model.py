@@ -8,6 +8,7 @@ At this point we have defined the following things:
 - LayerNorm
 - Embedding Layers
 - Cross Entropy
+- Relu Activation
 - Adam Optimizer
 """
 
@@ -144,7 +145,7 @@ class FeedForward(nn.Module):
         
         self.intermediate_dense = nn.Linear(config.embed_dim, hidden_size, 
                                             auto=config.use_full_auto)
-        self.activation = nn.GELU()
+        self.activation = nn.ReLU()
 
         self.intermediate_dropout = nn.Dropout(config.mlp_dropout_p)
 
