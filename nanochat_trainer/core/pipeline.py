@@ -129,6 +129,30 @@ class Pipeline:
 
         return next_token_pred
     
+    def _apply_repetition_penalty(self, logits, token_history, penalty=1.2):
+        """
+        For any token that has already appeared, divide its logit by the penalty
+        if positive, or multiply if negative (so both directions are penalized).
+        penalty=1.0 means no effect, >1.0 means more repetition suppression.
+        """
+        if penalty == 1.0:
+            return logits
+    
+        if isinstance(token_history, mytorch.Tensor):
+            token_history = token_history.numpy()
+            if len(token_history.shape) > 1:
+                token_history = token_history[0]
+        
+        for token_id in set(token_history):
+            val = float(logits[:, token_id].item())
+            
+            if val > 0:
+                logits[:, token_id] = val / penalty
+            else:
+                logits[:, token_id] = val * penalty
+
+        return logits
+
     @mytorch.no_grad()
     def _generate(self,
                   input_ids, 
@@ -136,6 +160,7 @@ class Pipeline:
                   max_token_gens=None, 
                   temperature=1.0, 
                   topk=None,
+                  repetition_penalty=1.2,
                   mask_invalid_tokens=True):
         
         if isinstance(input_ids, list):
@@ -161,6 +186,9 @@ class Pipeline:
         ### Remove possibility of sampling an invalid token ###
         if mask_invalid_tokens:
             logits = self.mask_invalid(logits)
+
+        ### Repetition Penalty 
+        logits = self._apply_repetition_penalty(logits, input_ids, penalty=repetition_penalty)
         
         ### Sample input ids (this is now (b x 1)) ###
         new_input_ids = self.sample(logits, temperature, topk)
@@ -190,6 +218,13 @@ class Pipeline:
             ### Sample next token ###
             logits, cache = self.model(input_ids, cache=cache)
             logits = logits[:, -1, :]
+
+            ### Apply Repetition Penalty ###
+            for i in range(num_generations):
+                logits[i:i+1] = self._apply_repetition_penalty(
+                    logits[i:i+1], states[i]["tokens"], penalty=repetition_penalty
+                )
+
             input_ids = self.sample(logits, temperature, topk)
 
             ### List of our per sample next token prediction ###
@@ -280,6 +315,7 @@ class Pipeline:
                  max_token_gens=None, 
                  temperature=1.0, 
                  topk=None,
+                 repetition_penalty=1.2,
                  mask_invalid_tokens=True):
 
         if isinstance(input_ids, list):
@@ -295,6 +331,7 @@ class Pipeline:
             max_token_gens, 
             temperature, 
             topk,
+            repetition_penalty,
             mask_invalid_tokens
         )
 
@@ -334,6 +371,7 @@ class Pipeline:
                           max_token_gens=None, 
                           temperature=1.0, 
                           topk=None,
+                          repetition_penalty=1.2,
                           mask_invalid_tokens=True):
         
         """
@@ -358,6 +396,7 @@ class Pipeline:
             max_token_gens=max_token_gens, 
             temperature=temperature, 
             topk=topk,
+            repetition_penalty=repetition_penalty,
             mask_invalid_tokens=mask_invalid_tokens
         )
 
@@ -392,8 +431,8 @@ class Pipeline:
                     self.tokenizer.python_start_id, 
                     self.tokenizer.python_end_id,
                     self.tokenizer.assistant_end_id, 
-                    # self.tokenizer.output_start_id, 
-                    # self.tokenizer.output_end_id
+                    self.tokenizer.output_start_id, 
+                    self.tokenizer.output_end_id
                 ]:
                     new_gens.append(token_)
                     decoded = self.tokenizer.decode([token_], skip_special_tokens=False)
@@ -427,11 +466,6 @@ if __name__ == "__main__":
     state_dict = mytorch.load("work_dir/mytorch_llm_500M/nanochat_sft/final_checkpoint/model.safetensors")
     model.load_state_dict(state_dict)
 
-    # for name, param in model.named_parameters():
-    #     param.astype(mytorch.float16)
-    # for name, param in model.named_buffers():
-    #     param.astype(mytorch.float16)
-
     pipe = Pipeline(model, tokenizer, device="cuda")
 
     prepped_sample = {
@@ -439,12 +473,12 @@ if __name__ == "__main__":
             {"role": "user", "content": "What are large language models?"},
         ]
     }
-
     
-    generator = pipe.generate_for_chat(prepped_sample, max_token_gens=512, temperature=0.6, topk=50)
+    generator = pipe.generate_for_chat(prepped_sample, 
+                                       max_token_gens=512, 
+                                       temperature=0.6, 
+                                       topk=50,
+                                       repetition_penalty=1.2)
     for t in generator:
         print(t, end="", flush=True)
     print("\n")
-    # print(input_ids)
-    # print(output)
-    # print(tokenizer.decode(output[0], skip_special_tokens=False))
