@@ -236,12 +236,12 @@ No Deep Learning Framework would be complete without a set of modules! These are
 
 | **Core Layers** | **Impl** | **Fused** | **Normalization** | **Impl** | **Fused** | **Activations** | **Impl** | **Fused** | 
 |---------------|----------|-----------|---------------|----------|-----------|---------------|----------|-----------|
-| Linear | ✅ | ✅ | LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ❌ |
-| Embedding | ✅ | ✅| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ❌ |
-| Dropout | ✅ | ❌ | BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ❌ | 
+| Linear | ✅ | ✅ | LayerNorm | ✅ | ✅ | Sigmoid | ✅ | ✅ |
+| Embedding | ✅ | ✅| BatchNorm1d | ✅ | ❌ | ReLU | ✅ | ✅ |
+| Dropout | ✅ | ❌ | BatchNorm2d | ✅ | ❌ | GeLU | ✅ | ✅ | 
 |  | | | GroupNorm | ❌ | ❌ | Softmax | ✅ | ✅ |
-| | | | InstanceNorm | ❌ | ❌ | LeakyReLU | ❌ | ❌ |
-| | | | RMSNorm | ❌ | ❌ | Tanh | ❌ | ❌ |
+| | | | InstanceNorm | ❌ | ❌ | LeakyReLU | ✅ | ✅ |
+| | | | RMSNorm | ✅ | ✅ | Tanh | ✅ | ✅ |
 
 | **Losses** | **Impl** | **Fused** | **Attention** | **Impl** | **Fused** |
 |---------------|----------|-----------|---------------|----------|-----------|
