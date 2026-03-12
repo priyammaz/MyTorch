@@ -71,7 +71,7 @@ MIDTRAIN_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a 
 ### SFT CONFIG (~700 Steps in preset config) ###
 SFT_EPOCHS=1 # How many epochs through the midtraining data do you want to do?
 SFT_EXAMPLES_PER_BATCH=32 # Grad accumulation until we hit this tok/batch
-SFT_MAX_LEARNING_RATE=0.00001 # Highest lr that we warmup to (less than midtraining lr to avoid catastrophic forgetting)
+SFT_MAX_LEARNING_RATE=0.00001 # Highest lr that we warmup to (less than pretraining lr to avoid catastrophic forgetting)
 SFT_MIN_LEARNING_RATE_RATIO=0.1 # Proportion of highest lr that we decay down to
 SFT_WARMUP_RATIO=0.05 # What proportion of training we do warmup for
 SFT_CHECKPOINT_ITERATIONS=500 # After how many steps do you want to save a checkpoint? More frequent is more disk space!

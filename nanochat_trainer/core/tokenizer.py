@@ -81,6 +81,111 @@ class MyTokenizer:
     def id_to_token(self, id):
         return self.tokenizer.decode(id)
     
+    def parse_tokens(self, input_ids):
+        """
+        Takes a flat list of token ids and reconstructs the conversation dict format:
+        {
+            "messages": [
+                {"role": "system", "content": "..."},
+                {"role": "user", "content": "..."},
+                {"role": "assistant", "content": "..." or [...]},
+                ...
+            ]
+        }
+        """
+
+        assert isinstance(input_ids, list), "input_ids must be provided as a list to convert back to conversation"
+
+        messages = []
+        i = 0
+
+        ### Skip leading BOS token ###
+        if input_ids[0] == self.bos_token_id:
+            i += i
+
+        while i < len(input_ids):
+
+            token = input_ids[i]
+
+            ### System message ###
+            if token == self.system_start_id:
+                i += 1
+                content_tokens =[ ]
+                while i < len(input_ids) and input_ids[i] != self.system_end_id:
+                    content_tokens.append(input_ids[i])
+                    i += 1
+
+                ### Skip system_end token ###
+                i += 1
+                messages.append({"role": "system", "content": self.decode(content_tokens)})
+
+            ### User message ###
+            elif token == self.user_start_id:
+                i += 1
+                content_tokens = []
+                while i < len(input_ids) and input_ids[i] != self.user_end_id:
+                    content_tokens.append(input_ids[i])
+                    i += 1
+
+                i += 1  # skip user_end
+                messages.append({"role": "user", "content": self.decode(content_tokens)})
+
+            ### Assistant Message ###
+            elif token == self.assistant_start_id:
+                i += 1
+                content_parts = []
+                current_tokens = []
+                in_python = False
+                in_output = False
+
+                while i < len(input_ids) and input_ids[i] != self.assistant_end_id:
+                    
+                    t = input_ids[i]
+
+                    if t == self.python_start_id:
+                        # Flush any plain text before the python block
+                        if current_tokens:
+                            content_parts.append({"type": "text", "text": self.decode(current_tokens)})
+                            current_tokens = []
+                        in_python = True
+                    
+                    elif t == self.python_end_id:
+                        content_parts.append({"type": "python", "text": self.decode(current_tokens)})
+                        current_tokens = []
+                        in_python = False
+
+                    elif t == self.output_start_id:
+                        in_output = True
+
+                    elif t == self.output_end_id:
+                        content_parts.append({"type": "python_output", "text": self.decode(current_tokens)})
+                        current_tokens = []
+                        in_output = False
+
+                    else:
+                        current_tokens.append(t)
+                    
+                    i += 1
+
+                i += 1 # skip assistant end
+
+                ### Flush any remaining tokens ###
+                if current_tokens:
+                    content_parts.append({"type": "text", "text": self.decode(current_tokens)})
+
+                # If it's just plain text with no tool calls, use a simple string
+                if len(content_parts) == 1 and content_parts[0]["type"] == "text":
+                    messages.append({"role": "assistant", "content": content_parts[0]["text"]})
+                else:
+                    messages.append({"role": "assistant", "content": content_parts})
+
+                
+            else:
+                ### unk token ###
+                i += 1
+
+        return {"messages": messages}
+
     def parse_conversation(self, 
                            conversation, 
                            max_tokens=None,
@@ -258,7 +363,7 @@ class MyTokenizer:
 
 if __name__ == "__main__":
 
-    tokenizer = MyTokenizer()
+    tokenizer = MyTokenizer("work_dir/mytorch_llm_500M/tokenizer.json")
     
     print("TEST NORMAL TEXT\n")
     text = "Hello! I want to be a helpful assistant"
@@ -267,7 +372,6 @@ if __name__ == "__main__":
     print("Encoded:", encode)
     print("Decoded:", decode)
 
-    print("TEST BATCH ENCODE/DECODE\n")
     texts = [text, text, text]
     encode = tokenizer.batch_encode(texts, prepend=tokenizer.bos_token)
     decode = tokenizer.batch_decode(encode, skip_special_tokens=False)
@@ -285,11 +389,13 @@ if __name__ == "__main__":
 
 
 
-    ids, mask = tokenizer.parse_conversation(conversation)
+    ids, mask = tokenizer.parse_conversation(conversation, return_mask=True)
     print("Encoded:", ids)
     print("Mask:", mask)
     decode = tokenizer.decode(ids, skip_special_tokens=False)
     print("Decoded:", decode)
+    parse_message_format = tokenizer.parse_tokens(ids)
+    print("Return to Message Format:", parse_message_format)
 
 
     print("\nTEST TOOLCALL CONVERSATION")
@@ -307,8 +413,10 @@ if __name__ == "__main__":
 
 
 
-    ids, mask = tokenizer.parse_conversation(conversation)
+    ids, mask = tokenizer.parse_conversation(conversation, return_mask=True)
     print("Encoded:", ids)
     print("Mask:", mask)
     decode = tokenizer.decode(ids, skip_special_tokens=False)
     print("Decoded:", decode)
+    parse_message_format = tokenizer.parse_tokens(ids)
+    print("Return to Message Format:", parse_message_format)

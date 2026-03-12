@@ -99,7 +99,7 @@ def trainer(args,
 
     ### Quick check on checkpoints ###
     if (starting_checkpoint is None) and (resume_from_checkpoint is None):
-        warnings.warn("You are starting Midtraining WITHOUT and pretrained weights!!! NOT RECOMMENDED!!!")
+        warnings.warn("You are starting Midtraining WITHOUT any pretrained weights!!! NOT RECOMMENDED!!!")
 
     ### Init tracker ###
     if args.log_wandb:
@@ -117,12 +117,14 @@ def trainer(args,
         Task(args.path_to_data, "arc_easy", keep_mask=True), # 5.2K samples of multiple choice
         Task(args.path_to_data, "arc_challenge", keep_mask=True), # 2.3K samples of harder multiple choice
         Task(args.path_to_data, "gsm8k", keep_mask=True), # 8K samples of arithmetic
-        Task(args.path_to_data, "smoltalk", num_samples=50000) # 50k samples of general converation
+        Task(args.path_to_data, "smoltalk", keep_mask=True, num_samples=50000) # 50K samples of general conversation
     ])
 
     testset = MixtureDataset([
+        Task(args.path_to_data, "arc_easy", "test", keep_mask=True),
+        Task(args.path_to_data, "arc_challenge", "test", keep_mask=True),
         Task(args.path_to_data, "smoltalk", "test", keep_mask=True), 
-        Task(args.path_to_data, "gsm8k", keep_mask=True),
+        Task(args.path_to_data, "gsm8k", "test", keep_mask=True),
     ])
 
     ### Compute Gradient Accumulation Steps ###
@@ -152,7 +154,7 @@ def trainer(args,
 
     ### Load our starting checkpoint from pretraining if we are not resuming our midtraining run! ###
     if (starting_checkpoint is not None) and (resume_from_checkpoint is None):
-        accelerator.print("Starting from Stage 1 Pretraining Checkpoint: ", starting_checkpoint)
+        accelerator.print("Starting from Stage 2 Midtraining Checkpoint: ", starting_checkpoint)
         state_dict = mytorch.load(starting_checkpoint)
         model.load_state_dict(state_dict)
 

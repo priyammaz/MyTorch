@@ -310,13 +310,19 @@ class Pipeline:
             input_ids = mytorch.Tensor(actual_next_tokens, dtype=mytorch.int32, device=self.device).unsqueeze(-1)
             
     def generate(self,
-                 input_ids, 
+                 input_ids=None, 
+                 message=None,
                  num_generations=1, 
                  max_token_gens=None, 
                  temperature=1.0, 
                  topk=None,
                  repetition_penalty=1.2,
                  mask_invalid_tokens=True):
+
+        if (message is not None) and (input_ids is None):
+            ### Tokenize ###
+            input_ids = self.tokenizer.parse_conversation(message, add_generation_prompt=True)
+            input_ids = mytorch.Tensor(input_ids, dtype=mytorch.int32).reshape(1,-1)
 
         if isinstance(input_ids, list):
             input_ids = mytorch.Tensor(input_ids).reshape(1,-1)
