@@ -929,9 +929,53 @@ Inspired by NanoChat, the model has the following specifications:
 | KVCache                  | Enabled |
 
 
-# Task Results
-Need to work on computing some evals
+# Poor Task Results
 
+Evaluations are not that impressive here. For multiple choice problems we have roughly random chance for example! My guess here is that the learning rates I trained with are too low. But also due to our FP16 training, I get precision errors and loss divergence at higher learning rates! On the other hand for general conversation this LLM seems to be fine, giving reasonable answers to questions. 
+
+# General Conversation is Good!
+
+Overall talking to the model is actually quite nice! For example I provide the prompt:
+
+```
+I want to lose some weight before this summer. Can you recommend a health and fitness plan for me to follow?
+```
+### 500M Param Model Response: 
+
+```
+To start, let's break down your goal into manageable parts. Before diving in, it's essential to know what type of exercise you're planning to do every day - low-impact, strength-based workout or cardio workouts like running or cycling.
+You'll likely need some basic building blocks, such as:
+
+1-2 sets of 30 minutes of moderate-intensity aerobic activity (exercise A or B), which should burn around 700 calories a week.
+
+2-3 sets of strength-to-weight exercises, such as walking or stretching, which can be done at most two times per week.
+
+3-4 sets of 60 minute yoga sessions, 5 days a week for about an hour.
+```
+
+### 1B Param Model Response:
+
+```
+At the gym, I suggest a few simple plans that can help you burn off calories while enjoying your new workout routine:
+
+A low-calorie diet: We have a wide range of plant-based foods available from locally-sourced ingredients like nuts or seeds (if desired), as well as lean sources like whole grain pasta and whole grains.
+
+Baking with natural ingredients made with sugar instead of high fructose corn syrup is also an option if your goal is to shed weight quickly. You can experiment with different types of carbs in baked goods such as white bread muffins, instant oatmeal, or quinoa.
+
+Rolling out with friends and family who share similar exercise habits allows you to meet new people and get inspired through shared experiences, like joining a yoga class together or taking on a group fitness team.
+
+Lastly, incorporating some physical activity into everyday activities can be just as effective at burning off calories as eating a meal or snack. As for what you might try first, we've got some fun ideas here:
+
+One approach could be to start slow and see where it takes you. For example, you could begin by doing light, relatively non-weightless workouts like squats, push-ups, squats, or lunges, followed by longer stretches, or more intense workouts using a resistance band or gym equipment.
+
+You'll still need to eat healthily to work it out properly, so be sure to schedule regular check-ins with your doctor and dietitian to ensure you're getting all the nutrients you need.
+
+It's also essential to listen to your body and take breaks when needed – even small amounts of exercise can lead to lasting changes over time. Don't be discouraged by fatigue; continue to move around and engage in other healthy behaviors until you feel like yourself again.
+
+What do you think would work best for you right now, and how should you prioritize your workout routines based on your goals and preferences?
+```
+
+I have noticed that the 1B model seems to be a little more wordy, but also more descriptive! But this is just for fun so it acts as an example!
 
 ### Limitations
 
