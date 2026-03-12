@@ -23,6 +23,7 @@ The aim of MyTorch is to build a lightweight, readable and performant deep learn
 - [BabyGPT](#baby-gpt)
 - [Reproduce GPT2 (124M Parms)](#train-gpt2)
 - [Train 500M Param LLM](#train-500m-param-llm)
+- [Train 1B Param LLM](#train-1b-param-llm)
 
 
 ### References
@@ -892,7 +893,45 @@ The field of Artificial Intelligence (AI) is changing rapidly, and it is expecte
 
 ### Inference w/ Interface 
 
-[TODO]
+Now that we have trained a model we would like to use it right! So simply run:
+
+```bash
+python -m nanochat_trainer.core.chat_interface work_dir/mytorch_llm_1B/
+```
+
+This will initiate a ```Gradio ChatInterface``` so we can actually play with the model! You can optionally mess with the Temperature, TopK and Repetition penalty parameters. 
+
+<img src="https://github.com/priyammaz/MyTorch/blob/main/src/interface.png?raw=true" alt="drawing" width="800"/>
+
+# Train 1B Param LLM
+
+Lets keep pushing **HARDER**! I push this model upto a full 1B parameters to see if the system can handle it! This led to a few failed runs, the issue mainly being around loss of precision. ```FP16``` really isn't recommended for training large models and we get to feel the pain here. But by reducing the learning rate enough I had a successful run in the end!
+
+```bash
+bash train_nanochat_1B.sh
+```
+
+### Model Configuration
+
+Inspired by NanoChat, the model has the following specifications:
+
+| Parameter                | Value    |
+|--------------------------|---------|
+| Vocab Size               | 65,536  |
+| Context Length           | 2,048   |
+| Transformer Blocks       | 28      |
+| Embedding Dimension      | 1,536   |
+| Number of Query Heads    | 24      |
+| Number of Key/Value Heads| 6       |
+| MLP Ratio                | 4       |
+| Activation Function      | SwiGLU  |
+| Positional Embeddings    | Rope    |
+| KVCache                  | Enabled |
+
+
+# Task Results
+Need to work on computing some evals
+
 
 ### Limitations
 
