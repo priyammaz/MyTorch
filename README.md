@@ -975,7 +975,7 @@ It's also essential to listen to your body and take breaks when needed – even 
 What do you think would work best for you right now, and how should you prioritize your workout routines based on your goals and preferences?
 ```
 
-I have noticed that the 1B model seems to be a little more wordy, but also more descriptive! But this is just for fun so it acts as an example!
+I have noticed that the 1B model seems to be a little more wordy, but also more descriptive! But this is just for fun so it acts as an example! We could use post training RL to promote shorter responses, but that is left for another time in the future!
 
 ### Limitations
 
