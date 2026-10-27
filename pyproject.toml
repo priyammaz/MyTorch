@@ -31,6 +31,7 @@ dependencies = [
     "tiktoken",
     "safetensors",
     "cupy-cuda13x",
+    "nvidia-nccl-cu13>=2.27.7,<3",
     "pyyaml",
     "questionary",
     "pytest"
@@ -38,7 +39,6 @@ dependencies = [
 
 [project.optional-dependencies]
 triton = [
-    "torch>=2.0.0",
     "triton>3.3",
 ]
 
