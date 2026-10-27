@@ -30,7 +30,7 @@ dependencies = [
     "tqdm",
     "tiktoken",
     "safetensors",
-    "cupy-cuda12x",
+    "cupy-cuda13x",
     "pyyaml",
     "questionary",
     "pytest"
