@@ -32,14 +32,16 @@ will still occur in the forward pass separately!
 """
 import os
 import numpy as np
+from mytorch._array import Array
 from mytorch import Tensor
 from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
 from mytorch.nn.functional.utils import get_inner_array, get_inner_inner_array
 from ..fused_ops import fused_linear_forward, fused_grouped_matmul, fused_activation_forward, fused_activation_backward
 
-# Flag to default to Cupy matmuls instead of our own fused matmul ###
-DISABLE_FUSED_LINEAR = (os.environ.get("DISABLE_FUSED_LINEAR", "").lower() == "true")
+### cuBLAS (through cupy matmul) is faster than our Triton grouped matmul, so it is the default ###
+### set DISABLE_FUSED_LINEAR=false to use the Triton linear kernels instead (activations are fused either way) ###
+DISABLE_FUSED_LINEAR = (os.environ.get("DISABLE_FUSED_LINEAR", "true").lower() != "false")
 FLAG_ONCE = True
 
 def reshape_for_linear(x):
@@ -106,6 +108,10 @@ def manual_linear(input, weight, bias=None, *args):
 
     ### We will capture our variables as a closure ###
     def _linear_backward(grad_output):
+
+        ### The manual path works on Array: upstream grads can arrive as raw cupy/numpy arrays ###
+        if not isinstance(grad_output, Array):
+            grad_output = Array(grad_output)
             
         ### Our gradients are coming in the shape of (*, O) ###
         ### But our operation happened in the shape of (N x O) ###
@@ -115,12 +121,13 @@ def manual_linear(input, weight, bias=None, *args):
 
         ### Standard Weight Update formula ###
         if weight.requires_grad:
-            grad_W = np.matmul(input_arr.T, grad_output)
+            ### (out, in) C-contiguous directly: accumulating into a transposed (F-order) grad is ~2x slower ###
+            grad_W = np.matmul(grad_output.T, input_arr)
 
             if weight.grad is None:
-                weight.grad = grad_W.T
+                weight.grad = grad_W
             else:
-                weight.grad += grad_W.T
+                weight.grad += grad_W
             grad_W = None
 
         ### Standard Bias Update Formula ###
@@ -168,8 +175,8 @@ def fused_linear(input, weight, bias=None, act_func=None):
     """
 
     global FLAG_ONCE
-    if FLAG_ONCE and DISABLE_FUSED_LINEAR:
-        print("Fused Linear Layers Disabled!!")
+    if FLAG_ONCE and not DISABLE_FUSED_LINEAR:
+        print("Using Triton Linear Layers instead of cuBLAS!!")
         FLAG_ONCE = False
 
     input, dims, reshaped_flag = reshape_for_linear(input)
@@ -178,11 +185,12 @@ def fused_linear(input, weight, bias=None, act_func=None):
     ### If we disable fused linear layers ###
     if DISABLE_FUSED_LINEAR:
 
-        ### basically the same as our manual_linear ###
-        input_arr = get_inner_array(input)
-        weight_arr = get_inner_array(weight).T
+        ### basically the same as our manual_linear, but on raw cupy arrays ###
+        ### since the rest of the fused path passes raw grads around ###
+        input_arr = get_inner_inner_array(input)
+        weight_arr = get_inner_inner_array(weight).T
         if bias is not None:
-            bias_arr = get_inner_array(bias)
+            bias_arr = get_inner_inner_array(bias)
 
         preact_output = np.matmul(input_arr, weight_arr)
         if bias is not None:
@@ -220,6 +228,9 @@ def fused_linear(input, weight, bias=None, act_func=None):
     ### We will capture our variables as a closure ###
     def _linear_backward(grad_output):
 
+        ### Upstream non-fused ops may hand us an Array, the fused path works on raw cupy ###
+        grad_output = getattr(grad_output, "_array", grad_output)
+
         ### If we had an activation func in the forward pass, we first need to backprop
         ### Through it in the backward pass ###
         if act_func is not None: 
@@ -235,15 +246,16 @@ def fused_linear(input, weight, bias=None, act_func=None):
         if weight.requires_grad:
             
             ### Decide which matmul method to use
+            ### (out, in) C-contiguous directly: accumulating into a transposed (F-order) grad is ~2x slower ###
             if DISABLE_FUSED_LINEAR:
-                grad_W = np.matmul(input_arr.T, grad_output)
+                grad_W = np.matmul(grad_output.T, input_arr)
             else:
-                grad_W = fused_grouped_matmul(input_arr.T, grad_output)
+                grad_W = fused_grouped_matmul(grad_output.T, input_arr)
 
             if weight.grad is None:
-                weight.grad = grad_W.T
+                weight.grad = grad_W
             else:
-                weight.grad += grad_W.T
+                weight.grad += grad_W
             grad_W = None
 
         ### Standard Bias Update Formula ###

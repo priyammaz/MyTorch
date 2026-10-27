@@ -3,6 +3,7 @@ from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
 from mytorch.nn.functional.utils import get_inner_array, get_inner_inner_array
 from ..fused_ops import fused_conv1d_forward, fused_conv1d_backward
+from mytorch._array import add_at
 
 def manual_conv1d(input, weight, bias=None, stride=1, padding=0, **args):
 
@@ -78,7 +79,7 @@ def manual_conv1d(input, weight, bias=None, stride=1, padding=0, **args):
             kk_flat = xp.tile(kk.flatten(), B)
             vals = grad_cols.flatten()
 
-            xp.add.at(grad_input, (bb, kk_flat, ii), vals)
+            add_at(grad_input, (bb, kk_flat, ii), vals)
 
             if P > 0:
                 grad_input = grad_input[:, :, P:-P]

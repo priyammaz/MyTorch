@@ -5,6 +5,7 @@ either cupy or numpy so we can resolve that
 in our tensor class. 
 """
 float16    = "float16"
+bfloat16   = "bfloat16" # requires cupy>=14 and `pip install ml_dtypes`
 float32    = "float32"
 float64    = "float64"
 int8       = "int8"

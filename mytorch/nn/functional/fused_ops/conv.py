@@ -22,6 +22,8 @@ import triton.language as tl
 import torch
 from torch.utils.dlpack import from_dlpack
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .utils import get_dtype_flag
+from .utils import TritonPtr
 
 def get_forward_autotune_config():
     """
@@ -286,7 +288,7 @@ def _implicit_gemm_conv2d_fwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast Pointers to Correct Dtype ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_type))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
     weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
@@ -595,7 +597,7 @@ def _implicit_gemm_conv2d_input_bwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     dinput_ptr = tl.cast(dinput_ptr, tl.pointer_type(pointer_type))
     doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
     weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
@@ -780,7 +782,7 @@ def _implicit_gemm_conv2d_weight_bwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     dweight_ptr = tl.cast(dweight_ptr, tl.pointer_type(pointer_type))
     doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
@@ -890,7 +892,7 @@ def _implicit_gemm_conv2d_bias_bwd_kernel(
     k = tl.program_id(0)
     
     ### Cast our Pointers ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     dbias = tl.cast(dbias, tl.pointer_type(pointer_type))
     doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
 
@@ -1001,7 +1003,7 @@ def fused_conv2d_forward(input, weight, bias, stride, padding, dilation, use_dlp
             GEMM_M, 
             GEMM_N, 
             GEMM_K,
-            DTYPE_FLAG=0 if input.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(input.dtype)
         )
 
         if not output.is_contiguous():
@@ -1026,10 +1028,10 @@ def fused_conv2d_forward(input, weight, bias, stride, padding, dilation, use_dlp
         grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
 
         _implicit_gemm_conv2d_fwd_kernel[grid](
-            output.data.ptr, 
-            input.data.ptr, 
-            weight.data.ptr, 
-            bias.data.ptr if bias is not None else None, 
+            TritonPtr(output), 
+            TritonPtr(input), 
+            TritonPtr(weight), 
+            TritonPtr(bias) if bias is not None else None, 
             B, 
             C_in, 
             H_in, 
@@ -1048,7 +1050,7 @@ def fused_conv2d_forward(input, weight, bias, stride, padding, dilation, use_dlp
             GEMM_M, 
             GEMM_N, 
             GEMM_K,
-            DTYPE_FLAG=0 if input.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(input.dtype)
         )
 
         return output
@@ -1132,7 +1134,7 @@ def fused_conv2d_input_bwd(doutput, weight, H_in, W_in, stride, padding, dilatio
             GEMM_M, 
             GEMM_N, 
             GEMM_K,
-            DTYPE_FLAG=0 if doutput.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
         )
 
         return cp.from_dlpack(dinput) 
@@ -1150,9 +1152,9 @@ def fused_conv2d_input_bwd(doutput, weight, H_in, W_in, stride, padding, dilatio
         grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
 
         _implicit_gemm_conv2d_input_bwd_kernel[grid](
-            dinput.data.ptr, 
-            doutput.data.ptr, 
-            weight.data.ptr, 
+            TritonPtr(dinput), 
+            TritonPtr(doutput), 
+            TritonPtr(weight), 
             B, 
             C_in, 
             H_in, 
@@ -1171,7 +1173,7 @@ def fused_conv2d_input_bwd(doutput, weight, H_in, W_in, stride, padding, dilatio
             GEMM_M, 
             GEMM_N, 
             GEMM_K,
-            DTYPE_FLAG=0 if doutput.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
         )
 
         return dinput
@@ -1268,7 +1270,7 @@ def fused_conv2d_weight_bwd(doutput, input, K_h, K_w, stride, padding, dilation,
             GEMM_M, 
             GEMM_N, 
             GEMM_K,
-            DTYPE_FLAG=0 if doutput.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
         )
 
         return cp.from_dlpack(dweight)
@@ -1286,9 +1288,9 @@ def fused_conv2d_weight_bwd(doutput, input, K_h, K_w, stride, padding, dilation,
         grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
 
         _implicit_gemm_conv2d_weight_bwd_kernel[grid](
-            dweight.data.ptr, 
-            doutput.data.ptr, 
-            input.data.ptr, 
+            TritonPtr(dweight), 
+            TritonPtr(doutput), 
+            TritonPtr(input), 
             B, 
             C_in, 
             H_in, 
@@ -1307,7 +1309,7 @@ def fused_conv2d_weight_bwd(doutput, input, K_h, K_w, stride, padding, dilation,
             GEMM_M, 
             GEMM_N, 
             GEMM_K,
-            DTYPE_FLAG=0 if doutput.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
         )
 
         return dweight
@@ -1337,7 +1339,7 @@ def fused_conv2d_bias_bwd(doutput, use_dlpack=True):
             H_out, 
             W_out, 
             BLOCK_SIZE,
-            DTYPE_FLAG=0 if doutput.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
         )
 
         return cp.from_dlpack(dbias)
@@ -1351,14 +1353,14 @@ def fused_conv2d_bias_bwd(doutput, use_dlpack=True):
             dbias = cp.empty((C_out), dtype=doutput.dtype)
 
         _implicit_gemm_conv2d_bias_bwd_kernel[C_out, ](
-            dbias.data.ptr, 
-            doutput.data.ptr, 
+            TritonPtr(dbias), 
+            TritonPtr(doutput), 
             B, 
             C_out, 
             H_out, 
             W_out, 
             BLOCK_SIZE,
-            DTYPE_FLAG=0 if doutput.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
         )
 
         return dbias

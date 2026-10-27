@@ -37,6 +37,8 @@ import cupy as cp
 import triton
 import triton.language as tl
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .utils import get_dtype_flag
+from .utils import TritonPtr
 
 def get_fwd_autotune_configs():
     
@@ -223,7 +225,7 @@ def _attn_fwd_inner(
     offs_kv: tl.constexpr,
     SEQ_LEN_Q,
     SEQ_LEN_KV,
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16, 2 for bfloat16
     USE_CUSTOM_MASK: tl.constexpr, 
     BROADCAST_MASK_HEAD: tl.constexpr, 
     stride_mask_batch,  
@@ -314,7 +316,7 @@ def _attn_fwd_inner(
 
         ### Make sure our Dtype matches our flag By default it will be float32 ###
         ### but we need to fast to fp16 incase thats the precision type we have ###
-        P_block = P_block.to(tl.float32 if DTYPE_FLAG==0 else tl.float16)
+        P_block = P_block.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16))
 
         ### Use our formuala to iteratively update our outputs O_new = PV + O_old * alpha ###
         O_block = O_block * alpha[:, None]
@@ -365,7 +367,7 @@ def _attn_fwd(
     HEAD_DIM: tl.constexpr,
     BLOCK_SIZE_Q: tl.constexpr,
     BLOCK_SIZE_KV: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16, 2 for bfloat16
     USE_CUSTOM_MASK: tl.constexpr,
     BROADCAST_MASK_HEAD: tl.constexpr,
 ):  
@@ -393,10 +395,10 @@ def _attn_fwd(
     block_index_q = tl.program_id(0)
 
     ### Cast our Pointers to the right type ### 
-    Q = tl.cast(Q, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    K = tl.cast(K, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    V = tl.cast(V, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    O = tl.cast(O, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    Q = tl.cast(Q, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    K = tl.cast(K, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    V = tl.cast(V, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    O = tl.cast(O, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
 
     ### Intermediate buffer M is always a float32 for maintaining precision in the backward pass ###
     M = tl.cast(M, tl.pointer_type(tl.float32))
@@ -484,7 +486,7 @@ def _attn_fwd(
     
     ### Prescale our Queries here so we dont need to do it in our inner loop later ###
     Q_block *= softmax_scale
-    Q_block = Q_block.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16)
+    Q_block = Q_block.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16))
 
     O_block, l_i, m_i = _attn_fwd_inner(
         O_block, 
@@ -547,7 +549,7 @@ def attn_backward_preprocess(
     SEQ_LEN_Q,
     EMBED_DIM: tl.constexpr,
     BLOCK_SIZE: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16, 2 for bfloat16
 ):  
     
     """
@@ -558,8 +560,8 @@ def attn_backward_preprocess(
     index_batch_head = tl.program_id(1)
 
     ### Cast Pointers to Correct type ##
-    O_ptr = tl.cast(O_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dO_ptr = tl.cast(dO_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    O_ptr = tl.cast(O_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dO_ptr = tl.cast(dO_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
 
     ### Our intermediate D is always float32 ###
     D_ptr = tl.cast(D_ptr, tl.pointer_type(tl.float32))
@@ -631,11 +633,11 @@ def _attn_bwd_dq(
     rln2: tl.constexpr = 1.442695040888
     
     # Cast pointers
-    Q_ptr = tl.cast(Q_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    K_ptr = tl.cast(K_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    V_ptr = tl.cast(V_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dO_ptr = tl.cast(dO_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dQ_ptr = tl.cast(dQ_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    Q_ptr = tl.cast(Q_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    K_ptr = tl.cast(K_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    V_ptr = tl.cast(V_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dO_ptr = tl.cast(dO_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dQ_ptr = tl.cast(dQ_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
     M_ptr = tl.cast(M_ptr, tl.pointer_type(tl.float32))
     D_ptr = tl.cast(D_ptr, tl.pointer_type(tl.float32))
 
@@ -674,7 +676,7 @@ def _attn_bwd_dq(
     Q_offsets = offs_q[:, None] * stride_Q_len + offs_embed[None, :] * stride_Q_embed
     Q_block = tl.load(Q_ptr + Q_offsets, mask=q_mask[:, None], other=0.)
     Q_block *= softmax_scale * rln2
-    Q_block = Q_block.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16)
+    Q_block = Q_block.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16))
 
     # Load dO block
     dO_block = tl.load(dO_ptr + Q_offsets, mask=q_mask[:, None], other=0.)
@@ -738,7 +740,7 @@ def _attn_bwd_dq(
         dS = P * (dP - D_block) * ln2
         
         # Accumulate dQ: dQ += dS @ K
-        dQ_block = tl.dot(dS.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16), tl.trans(K_T_block), acc=dQ_block)
+        dQ_block = tl.dot(dS.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)), tl.trans(K_T_block), acc=dQ_block)
     
     # Scale dQ
     dQ_block *= softmax_scale * rln2
@@ -794,12 +796,12 @@ def _attn_bwd_dk_dv(
     rln2: tl.constexpr = 1.442695040888
     
     # Cast pointers
-    Q_ptr = tl.cast(Q_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    K_ptr = tl.cast(K_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    V_ptr = tl.cast(V_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dO_ptr = tl.cast(dO_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dK_ptr = tl.cast(dK_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dV_ptr = tl.cast(dV_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    Q_ptr = tl.cast(Q_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    K_ptr = tl.cast(K_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    V_ptr = tl.cast(V_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dO_ptr = tl.cast(dO_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dK_ptr = tl.cast(dK_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dV_ptr = tl.cast(dV_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
     M_ptr = tl.cast(M_ptr, tl.pointer_type(tl.float32))
     D_ptr = tl.cast(D_ptr, tl.pointer_type(tl.float32))
 
@@ -842,7 +844,7 @@ def _attn_bwd_dk_dv(
 
     ### Prescale our Inputs ###
     K *= softmax_scale * rln2
-    K = K.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16)
+    K = K.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16))
 
     ### Create empty tensors (in higher precision) to store our grads in ###
     dK_block = tl.zeros([BLOCK_SIZE_KV, HEAD_DIM], dtype=tl.float32)
@@ -895,7 +897,7 @@ def _attn_bwd_dk_dv(
             P_T_block = tl.where(custom_mask_T, P_T_block, 0.)
 
         ### Compute dV which is P^T @ dO ###
-        dV_block = tl.dot(P_T_block.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16), dO_block, acc=dV_block)
+        dV_block = tl.dot(P_T_block.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)), dO_block, acc=dV_block)
 
         ### dP = dO @ V^T, but we want dP^T so we transpose the right side and get [dO @ V^T]^T = V @ dO^T
         dP_T_block = tl.dot(V, tl.trans(dO_block))      
@@ -903,7 +905,7 @@ def _attn_bwd_dk_dv(
         ### Then our dS = P*(dP - D) but we again have all transposes so we just use our transpoed P and dP
         ### D is just a row vector that is the broadcasted over, so we add an extra dimension to make it (1 x Micro)
         dS_T_block = P_T_block * (dP_T_block - D_block[None, :]) * ln2
-        dK_block = tl.dot(dS_T_block.to(tl.float32 if DTYPE_FLAG == 0 else tl.float16), tl.trans(Q_T_block), acc=dK_block)
+        dK_block = tl.dot(dS_T_block.to(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)), tl.trans(Q_T_block), acc=dK_block)
 
     ### Scale dK ###
     dK_block *= softmax_scale * rln2
@@ -1003,7 +1005,7 @@ def fused_cross_sdpa_forward(Q, K, V,
             SEQ_LEN_Q=SEQ_LEN_Q,
             SEQ_LEN_KV=SEQ_LEN_KV,
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(Q.dtype),
             USE_CUSTOM_MASK=use_custom_mask,
             BROADCAST_MASK_HEAD=broadcast_mask_head
         )
@@ -1045,13 +1047,13 @@ def fused_cross_sdpa_forward(Q, K, V,
             )
 
         _attn_fwd[grid](
-            Q=Q.data.ptr,
-            K=K.data.ptr,
-            V=V.data.ptr,
-            attn_mask=attn_mask.data.ptr,
+            Q=TritonPtr(Q),
+            K=TritonPtr(K),
+            V=TritonPtr(V),
+            attn_mask=TritonPtr(attn_mask),
             softmax_scale=softmax_scale,
-            M=M.data.ptr,
-            O=O.data.ptr,
+            M=TritonPtr(M),
+            O=TritonPtr(O),
             stride_Q_batch=Q.strides[0] // Q.itemsize,
             stride_Q_head=Q.strides[1] // Q.itemsize,
             stride_Q_seq=Q.strides[2] // Q.itemsize,
@@ -1072,7 +1074,7 @@ def fused_cross_sdpa_forward(Q, K, V,
             SEQ_LEN_Q=SEQ_LEN_Q,
             SEQ_LEN_KV=SEQ_LEN_KV,
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == cp.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(Q.dtype),
             USE_CUSTOM_MASK=use_custom_mask,
             BROADCAST_MASK_HEAD=broadcast_mask_head
         )
@@ -1159,7 +1161,7 @@ def fused_cross_sdpa_backward(dO,
             stride_D_head=D.stride(1),
             SEQ_LEN_Q=SEQ_LEN_Q,
             EMBED_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if dO.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(dO.dtype)
         )
       
         grid_dq = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
@@ -1194,7 +1196,7 @@ def fused_cross_sdpa_backward(dO,
             SEQ_LEN_Q=SEQ_LEN_Q, 
             SEQ_LEN_KV=SEQ_LEN_KV, 
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(Q.dtype),
             USE_CUSTOM_MASK=use_custom_mask,
             BROADCAST_MASK_HEAD=broadcast_mask_head
         )
@@ -1232,7 +1234,7 @@ def fused_cross_sdpa_backward(dO,
             SEQ_LEN_Q=SEQ_LEN_Q, 
             SEQ_LEN_KV=SEQ_LEN_KV, 
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(Q.dtype),
             USE_CUSTOM_MASK=use_custom_mask,
             BROADCAST_MASK_HEAD=broadcast_mask_head
         )
@@ -1278,9 +1280,9 @@ def fused_cross_sdpa_backward(dO,
 
         # Compute all the elements Di
         attn_backward_preprocess[preprocess_grid](
-            O_ptr=O.data.ptr, 
-            dO_ptr=dO.data.ptr,
-            D_ptr=D.data.ptr,
+            O_ptr=TritonPtr(O), 
+            dO_ptr=TritonPtr(dO),
+            D_ptr=TritonPtr(D),
             stride_O_heads=O.strides[1] // O.itemsize, 
             stride_O_len=O.strides[2] // O.itemsize, 
             stride_O_embed=O.strides[3] // O.itemsize,
@@ -1290,19 +1292,19 @@ def fused_cross_sdpa_backward(dO,
             stride_D_head=D.strides[1] // D.itemsize, 
             SEQ_LEN_Q=SEQ_LEN_Q,
             EMBED_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if dO.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(dO.dtype)
         )
         
         grid_dq = lambda meta: (triton.cdiv(SEQ_LEN_Q, meta["BLOCK_SIZE_Q"]), BATCH_SIZE * NUM_HEADS)
         _attn_bwd_dq[grid_dq](
-            Q_ptr=Q.data.ptr, 
-            K_ptr=K.data.ptr, 
-            V_ptr=V.data.ptr, 
-            dO_ptr=dO.data.ptr, 
-            dQ_ptr=dQ.data.ptr, 
-            M_ptr=M.data.ptr, 
-            D_ptr=D.data.ptr, 
-            attn_mask_ptr=attn_mask.data.ptr,
+            Q_ptr=TritonPtr(Q), 
+            K_ptr=TritonPtr(K), 
+            V_ptr=TritonPtr(V), 
+            dO_ptr=TritonPtr(dO), 
+            dQ_ptr=TritonPtr(dQ), 
+            M_ptr=TritonPtr(M), 
+            D_ptr=TritonPtr(D), 
+            attn_mask_ptr=TritonPtr(attn_mask),
             softmax_scale=softmax_scale,
             stride_Q_batch=Q.strides[0] // Q.itemsize, 
             stride_Q_head=Q.strides[1] // Q.itemsize, 
@@ -1324,22 +1326,22 @@ def fused_cross_sdpa_backward(dO,
             SEQ_LEN_Q=SEQ_LEN_Q, 
             SEQ_LEN_KV=SEQ_LEN_KV, 
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(Q.dtype),
             USE_CUSTOM_MASK=use_custom_mask,
             BROADCAST_MASK_HEAD=broadcast_mask_head
         )
 
         grid_dk_dv = lambda meta: (triton.cdiv(SEQ_LEN_KV, meta["BLOCK_SIZE_KV"]), BATCH_SIZE * NUM_HEADS, 1)
         _attn_bwd_dk_dv[grid_dk_dv](
-            Q_ptr=Q.data.ptr, 
-            K_ptr=K.data.ptr, 
-            V_ptr=V.data.ptr, 
-            dO_ptr=dO.data.ptr, 
-            dK_ptr=dK.data.ptr, 
-            dV_ptr=dV.data.ptr, 
-            M_ptr=M.data.ptr, 
-            D_ptr=D.data.ptr,
-            attn_mask_ptr=attn_mask.data.ptr,
+            Q_ptr=TritonPtr(Q), 
+            K_ptr=TritonPtr(K), 
+            V_ptr=TritonPtr(V), 
+            dO_ptr=TritonPtr(dO), 
+            dK_ptr=TritonPtr(dK), 
+            dV_ptr=TritonPtr(dV), 
+            M_ptr=TritonPtr(M), 
+            D_ptr=TritonPtr(D),
+            attn_mask_ptr=TritonPtr(attn_mask),
             softmax_scale=softmax_scale,
             stride_Q_batch=Q.strides[0] // Q.itemsize, 
             stride_Q_head=Q.strides[1] // Q.itemsize, 
@@ -1361,7 +1363,7 @@ def fused_cross_sdpa_backward(dO,
             SEQ_LEN_Q=SEQ_LEN_Q, 
             SEQ_LEN_KV=SEQ_LEN_KV, 
             HEAD_DIM=HEAD_DIM_Q,
-            DTYPE_FLAG=0 if Q.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(Q.dtype),
             USE_CUSTOM_MASK=use_custom_mask,
             BROADCAST_MASK_HEAD=broadcast_mask_head
         )

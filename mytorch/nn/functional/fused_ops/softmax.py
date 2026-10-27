@@ -6,7 +6,9 @@ import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
+from .utils import TritonPtr
 from .flags import DLPACK_DISABLE
+from .utils import get_dtype_flag
 
 def naive_softmax(x):
    
@@ -32,7 +34,7 @@ def softmax_kernel_forward(
     input_ptr, 
     input_row_stride, 
     output_row_stride, 
-    DTYPE_FLAG: tl.constexpr, # Flag for if our data is float32 or float16
+    DTYPE_FLAG: tl.constexpr, # Flag for if our data is float32, float16 or bfloat16
     n_cols: tl.constexpr,  
     BLOCK_SIZE: tl.constexpr):
 
@@ -250,7 +252,7 @@ def softmax_kernel_forward(
     ### SO THIS IS A QUICK TOGGLE TO CAST THE DTYPE ###
     ### CODE REFERENCE: https://github.com/triton-lang/triton/issues/2943
 
-    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
 
@@ -324,7 +326,7 @@ def softmax_kernel_backward(
 
     row_idx = tl.program_id(0)
 
-    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     s_ptr = tl.cast(s_ptr, tl.pointer_type(pointer_dtype))
     grad_ptr = tl.cast(grad_ptr, tl.pointer_type(pointer_dtype))
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
@@ -365,7 +367,7 @@ def fused_softmax_forward(x, use_dlpack=True):
         x = torch.utils.dlpack.from_dlpack(x)
         y = torch.empty_like(x)
 
-        dtype_flag = 0 if x.dtype == torch.float32 else 1  # 0=float32, 1=float16
+        dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
         row_stride = x.stride(0)
 
         grid = (n_rows,)
@@ -390,12 +392,12 @@ def fused_softmax_forward(x, use_dlpack=True):
         row_stride = x.strides[0] // x.itemsize
 
         # Map dtype to Triton flag
-        dtype_flag = 0 if x.dtype == cp.float32 else 1  # 0=float32, 1=float16
+        dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
 
         grid = (n_rows,)
         softmax_kernel_forward[grid](
-            y.data.ptr,       # output_ptr
-            x.data.ptr,       # input_ptr
+            TritonPtr(y),       # output_ptr
+            TritonPtr(x),       # input_ptr
             row_stride,       # input_row_stride
             row_stride,       # output_row_stride
             dtype_flag,       # dtype_flag (constexpr)
@@ -417,7 +419,7 @@ def fused_softmax_backward(grad, s, use_dlpack=True):
 
         grad_input = torch.empty_like(grad)
         row_stride = grad.stride(0)
-        dtype_flag = 0 if grad.dtype == torch.float32 else 1
+        dtype_flag = get_dtype_flag(grad.dtype)
 
         grid = (n_rows,)
         softmax_kernel_backward[grid](
@@ -439,15 +441,15 @@ def fused_softmax_backward(grad, s, use_dlpack=True):
 
         row_stride = grad.strides[0] // grad.itemsize
 
-        dtype_flag = 0 if grad.dtype == cp.float32 else 1
+        dtype_flag = get_dtype_flag(grad.dtype)
 
         grid = (n_rows,)
         softmax_kernel_backward[grid](
-            grad_input.data.ptr,  # output_ptr
+            TritonPtr(grad_input),  # output_ptr
             row_stride,           # output_row_stride
-            s.data.ptr,           # s_ptr
+            TritonPtr(s),           # s_ptr
             row_stride,           # s_row_stride
-            grad.data.ptr,        # grad_ptr
+            TritonPtr(grad),        # grad_ptr
             row_stride,           # grad_row_stride
             dtype_flag,           # dtype_flag (constexpr)
             n_cols,               # n_cols (constexpr)
@@ -467,7 +469,7 @@ if __name__ == "__main__":
         n_rows, n_cols = x.shape
         y = torch.empty_like(x)
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
-        dtype_flag = 0 if x.dtype == torch.float32 else 1
+        dtype_flag = get_dtype_flag(x.dtype)
         grid = (n_rows,)
         softmax_kernel_forward[grid](
             y, x,
@@ -480,7 +482,7 @@ if __name__ == "__main__":
         n_rows, n_cols = grad.shape
         grad_input = torch.empty_like(grad)
         BLOCK_SIZE = triton.next_power_of_2(n_cols)
-        dtype_flag = 0 if grad.dtype == torch.float32 else 1
+        dtype_flag = get_dtype_flag(grad.dtype)
         grid = (n_rows,)
         softmax_kernel_backward[grid](
             grad_input, grad_input.shape[1],

@@ -21,6 +21,149 @@ except ImportError:
     NUM_AVAIL_GPUS = 0
     warnings.warn("Cupy not installed!!!")
 
+### Registers the bfloat16 dtype with numpy so cupy (>=14) can use "bfloat16" ###
+try:
+    import ml_dtypes
+    BFLOAT16_AVAILABLE = True
+except ImportError:
+    BFLOAT16_AVAILABLE = False
+
+def _is_bf16(x):
+    return str(getattr(x, "dtype", "")) == "bfloat16"
+
+def _keep_bf16(result, inputs_bf16):
+    ### cupy promotes bfloat16 to float32/float64 in some functions (np.var, np.mean w/ scalars...) ###
+    ### so if our inputs were bfloat16 we cast floating results back ###
+    if inputs_bf16 and str(result.dtype) in ("float32", "float64"):
+        return result.astype("bfloat16")
+    return result
+
+def _bf16_batched_matmul(a, b):
+    """
+    cupy (14.x) can do 2D bfloat16 matmul through cuBLAS but its batched path treats bfloat16
+    as an integer type and fails, so we call cuBLAS gemmStridedBatchedEx ourselves.
+    """
+    from cupy.cuda import cublas
+    a = a if a.ndim > 1 else a[None, :]
+    b = b if b.ndim > 1 else b[:, None]
+    n, k = a.shape[-2:]
+    k2, m = b.shape[-2:]
+    if k != k2:
+        raise ValueError(f"matmul shape mismatch {a.shape} and {b.shape}")
+
+    ### Broadcast batch dims and flatten them to (B, *, *) contiguous buffers ###
+    batch_shape = np.broadcast_shapes(a.shape[:-2], b.shape[:-2])
+    a = cp.ascontiguousarray(cp.broadcast_to(a, batch_shape + (n, k))).reshape(-1, n, k)
+    b = cp.ascontiguousarray(cp.broadcast_to(b, batch_shape + (k, m))).reshape(-1, k, m)
+    batch = a.shape[0]
+    out = cp.empty((batch, n, m), dtype="bfloat16")
+
+    ### cuBLAS is column-major, so row-major C = A @ B is computed as C^T = B^T @ A^T ###
+    alpha, beta = np.array(1.0, np.float32), np.array(0.0, np.float32)
+    cublas.gemmStridedBatchedEx(
+        cp.cuda.device.get_cublas_handle(), cublas.CUBLAS_OP_N, cublas.CUBLAS_OP_N,
+        m, n, k, alpha.ctypes.data,
+        b.data.ptr, _CUDA_R_16BF, m, k * m,
+        a.data.ptr, _CUDA_R_16BF, k, n * k,
+        beta.ctypes.data,
+        out.data.ptr, _CUDA_R_16BF, m, n * m,
+        batch, cublas.CUBLAS_COMPUTE_32F, cublas.CUBLAS_GEMM_DEFAULT,
+    )
+    return out.reshape(batch_shape + (n, m))
+
+_CUDA_R_16BF = 14
+
+def _matmul_needs_bf16_path(x, y):
+    return (_is_bf16(x) or _is_bf16(y)) and isinstance(x, cp.ndarray) and isinstance(y, cp.ndarray) \
+        and (x.ndim > 2 or y.ndim > 2)
+
+_SCATTER_DTYPES = ("float32", "float16", "bfloat16")
+_sorted_segment_add = None
+
+def _get_sorted_segment_add():
+    ### Lazy: fused_ops imports torch/triton, and _array is imported before everything else ###
+    global _sorted_segment_add
+    if _sorted_segment_add is None:
+        try:
+            from mytorch.nn.functional.fused_ops.scatter import sorted_segment_add
+            _sorted_segment_add = sorted_segment_add
+        except ImportError:
+            _sorted_segment_add = False
+    return _sorted_segment_add
+
+def _is_basic_index(i):
+    return i is None or i is Ellipsis or isinstance(i, (int, np.integer, slice))
+
+def _num_leading_int_arrays(indices):
+    """k if indices look like (int_array x k, then only full slices), else 0"""
+    k = 0
+    for i in indices:
+        if isinstance(i, cp.ndarray) and i.dtype.kind in "iu":
+            k += 1
+        else:
+            break
+    if k and all(isinstance(i, slice) and i == slice(None) for i in indices[k:]):
+        return k
+    return 0
+
+def add_at(target, indices, values):
+    """
+    In place target[indices] += values where repeated indices are summed (xp.add.at semantics).
+    This is the backward of indexing, so we pick the cheapest correct path:
+    """
+    if isinstance(target, np.ndarray):
+        return np.add.at(target, indices, values)
+
+    index_tuple = indices if isinstance(indices, tuple) else (indices,)
+    if all(_is_basic_index(i) for i in index_tuple):
+        target[indices] += values
+        return
+    if len(index_tuple) == 1 and isinstance(index_tuple[0], cp.ndarray) and index_tuple[0].dtype == cp.bool_ \
+            and target.flags.c_contiguous:
+        ### Selected rows are unique, target[mask] += v would do a masked get AND a masked set ###
+        mask = index_tuple[0]
+        rows = target.reshape((-1,) + target.shape[mask.ndim:])
+        flat_index = cp.flatnonzero(mask)
+        rows[flat_index] += values
+        return
+
+    k = _num_leading_int_arrays(index_tuple)
+    values_dtype = str(getattr(values, "dtype", ""))
+    ### Kernel needs rows it can address: C contiguous (any k), or a 1D/2D strided view like a transposed grad ###
+    addressable = target.flags.c_contiguous or (k == 1 and target.ndim <= 2 and all(st >= 0 for st in target.strides))
+    if k and addressable and str(target.dtype) in _SCATTER_DTYPES \
+            and values_dtype in _SCATTER_DTYPES and _get_sorted_segment_add():
+        row_shape = target.shape[k:]
+        rows = target if k == 1 else target.reshape((-1,) + row_shape)
+        if k == 1:
+            flat_index = index_tuple[0].ravel()
+        else:
+            flat_index = cp.ravel_multi_index(cp.broadcast_arrays(*index_tuple[:k]), target.shape[:k], mode="wrap").ravel()
+        ### cupy wraps out of bound / negative indices in the forward, so we do too ###
+        flat_index = flat_index % rows.shape[0]
+        values = cp.broadcast_to(values, tuple(np.broadcast_shapes(*[i.shape for i in index_tuple[:k]])) + row_shape)
+        _sorted_segment_add(rows, flat_index, values.reshape((flat_index.shape[0],) + row_shape))
+        return
+
+    if _is_bf16(target):
+        tmp = target.astype(cp.float32)
+        cp.add.at(tmp, indices, values.astype(cp.float32) if hasattr(values, "astype") else values)
+        target[...] = tmp.astype("bfloat16")
+        return
+    return cp.add.at(target, indices, values)
+
+def _coerce_index(index):
+    ### Module level on purpose: a recursive closure inside __getitem__ would ###
+    ### reference itself and create cyclic garbage on every indexing call ###
+    if isinstance(index, tuple):
+        return tuple(_coerce_index(i) for i in index)
+    if isinstance(index, Array):
+        return index._array
+    # Handle mytorch.Tensor (assumes it has .data as Array)
+    if hasattr(index, 'data') and isinstance(index.data, Array):
+        return index.data._array
+    return index
+
 class Array:
     _binary_ufuncs = {
         "__add__": "add", "__radd__": "add",
@@ -255,6 +398,10 @@ class Array:
             return other, "cpu"
         if CUDA_AVAILABLE and isinstance(other, cp.ndarray):
             return other, f"cuda:{other.device.id}"
+        ### cupy promotes bfloat16 op python-float to float32, so make scalars bfloat16 ###
+        if self._xp is not np and isinstance(other, (int, float)) and not isinstance(other, bool) and _is_bf16(self._array):
+            with cp.cuda.Device(self._dev_id):
+                return cp.full((), other, dtype="bfloat16"), None
         return other, None
 
     @classmethod
@@ -278,7 +425,10 @@ class Array:
 
             if xp is cp:
                 with cp.cuda.Device(self._dev_id):
-                    res = func(*_in)
+                    if ufunc_name == "matmul" and _matmul_needs_bf16_path(*_in):
+                        res = _bf16_batched_matmul(*_in)
+                    else:
+                        res = func(*_in)
             else:
                 res = func(*_in)
 
@@ -370,9 +520,12 @@ class Array:
 
         ### Get all devices (should all be the same) ###
         devices = set()
+        bf16_inputs = []
         def handler(x):
             if isinstance(x, Array):
                 devices.add(x._device)
+                if _is_bf16(x._array):
+                    bf16_inputs.append(True)
                 return x._array
             elif isinstance(x, (list, tuple)):
                 return type(x)(handler(y) for y in x)
@@ -415,7 +568,7 @@ class Array:
 
         ### Wrap back into Array if result is an array ###
         if isinstance(result, (np.ndarray, cp.ndarray if CUDA_AVAILABLE else type(None))):
-            return Array(result, device=device)
+            return Array(_keep_bf16(result, bool(bf16_inputs)), device=device)
         
         return result
     
@@ -450,7 +603,17 @@ class Array:
         if "cuda" in device:
             _, dev_id = self.__parse_cuda_str(device)
             with cp.cuda.Device(dev_id):
-                result = getattr(ufunc, method)(*arrays, **kwargs)
+                ### cupy promotes bfloat16 op python-float to float32, so make scalars bfloat16 ###
+                ### (cp.full is a device-side fill, no host->device sync) ###
+                if any(_is_bf16(a) for a in arrays):
+                    arrays = [cp.full((), a, dtype="bfloat16") if isinstance(a, (int, float)) and not isinstance(a, bool) else a
+                              for a in arrays]
+                if ufunc.__name__ == "matmul" and method == "__call__" and not kwargs and _matmul_needs_bf16_path(*arrays):
+                    result = _bf16_batched_matmul(*arrays)
+                elif ufunc.__name__ == "add" and method == "at" and _is_bf16(arrays[0]):
+                    result = add_at(*arrays, **kwargs)
+                else:
+                    result = getattr(ufunc, method)(*arrays, **kwargs)
         else:
             result = getattr(ufunc, method)(*arrays, **kwargs)
 
@@ -461,16 +624,6 @@ class Array:
 
     def __getitem__(self, idx):
     
-        def _coerce_index(index):
-            if isinstance(index, tuple):
-                return tuple(_coerce_index(i) for i in index)
-            if isinstance(index, Array):
-                return index._array
-            # Handle mytorch.Tensor (assumes it has .data as Array)
-            if hasattr(index, 'data') and isinstance(index.data, Array):
-                return index.data._array
-            return index
-        
         idx = _coerce_index(idx)
     
         if self.xp == np:
@@ -487,6 +640,20 @@ class Array:
             value = value._array
         self._array[idx] = value
 
+    @property
+    def __cuda_array_interface__(self):
+        """
+        cupy rebuilds any foreign array (e.g. `raw_cupy * Array`, cp.concatenate([Array, ...])) from this
+        interface. A bfloat16 typestr is '<V2', which reads back as a structured void dtype, so we advertise
+        the registered 'bfloat16' name instead (same memory, no copy). Numpy backed arrays raise AttributeError.
+        """
+        iface = self._array.__cuda_array_interface__
+        if _is_bf16(self._array):
+            iface = dict(iface)
+            iface["typestr"] = "bfloat16"
+            iface.pop("descr", None)
+        return iface
+
     def __getattr__(self, name):
         """
         To get all the attributes of np or cp that we did not 
@@ -494,6 +661,18 @@ class Array:
         """
         if hasattr(self._array, name):
             attr = getattr(self._array, name)
+
+            ### Methods like .copy(), .sum(), .reshape() would otherwise leak ###
+            ### raw np/cp arrays, so wrap array results back into Array ###
+            ### (.get() is the explicit GPU -> numpy escape hatch, leave it raw) ###
+            if callable(attr) and name != "get":
+                array_types = (np.ndarray, cp.ndarray) if CUDA_AVAILABLE else (np.ndarray,)
+                def _wrapped(*args, **kwargs):
+                    result = attr(*args, **kwargs)
+                    if isinstance(result, array_types):
+                        return Array(result, device=self._device)
+                    return result
+                return _wrapped
             return attr
         raise AttributeError(f"'Array' object has no attribute '{name}'")
     

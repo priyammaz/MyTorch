@@ -198,11 +198,9 @@ class FeedForward(nn.Module):
         ### Do our swiglu activation ###
         swiglu_proj = self.up_proj(x)
 
-        ### Chunk for gating ###
-        swiglu_a, swiglu_b = swiglu_proj.chunk(2, dim=-1)
-        
-        ### Apply Activation ###
-        x_swiglu_out = self.activation(swiglu_a, swiglu_b)
+        ### Apply Activation on the packed [gate, value] projection ###
+        ### (same as chunk(2, dim=-1) + swiglu, but the fused op needs no chunk copies in backward) ###
+        x_swiglu_out = self.activation(swiglu_proj)
 
         ### Dropout ###
         x_swiglu_out = self.intermediate_dropout(x_swiglu_out)

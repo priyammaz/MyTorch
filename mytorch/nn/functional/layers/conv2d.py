@@ -3,6 +3,7 @@ from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
 from mytorch.nn.functional.utils import get_inner_array, get_inner_inner_array
 from ..fused_ops import fused_conv2d_forward, fused_conv2d_backward
+from mytorch._array import add_at
 
 def manual_conv2d(input, weight, bias=None, stride=1, padding=0, **args):
 
@@ -476,7 +477,7 @@ def manual_conv2d(input, weight, bias=None, stride=1, padding=0, **args):
 
             # print(bb_flat.shape, kk_flat.shape, ii_flat.shape, jj_flat.shape, values_flat.shape, grad_input.shape)
             # (147456,) (147456,) (147456,) (147456,) (147456,) (16, 256, 6, 6) and 16x256x6x6 = 147456
-            xp.add.at(grad_input, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
+            add_at(grad_input, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
 
             ### Remove padding that didnt exist before the conv ###
             if P > 0:

@@ -8,7 +8,9 @@ import cupy as cp
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
+from .utils import TritonPtr
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .utils import get_dtype_flag
 
 @triton.jit
 def tanh(x):
@@ -27,7 +29,7 @@ def cross_entropy_forward(
     labels_ptr, 
     NUM_CLASSES: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr, # 0 if float32, 1 if float16
+    DTYPE_FLAG: tl.constexpr, # 0 if float32, 1 if float16, 2 if bfloat16
     SOFTCAP: tl.constexpr,
     USE_SOFTCAP: tl.constexpr
 ):
@@ -92,7 +94,7 @@ def cross_entropy_forward(
     row_idx = tl.program_id(0)
 
     ### Cast Pointers ###
-    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
     loss_ptr = tl.cast(loss_ptr, tl.pointer_type(tl.float32))
     logsumexp_ptr = tl.cast(logsumexp_ptr, tl.pointer_type(tl.float32))
     labels_ptr = tl.cast(labels_ptr, tl.pointer_type(tl.int32))
@@ -172,7 +174,7 @@ def cross_entropy_backward(
     logits_row_stride,     # Element stride for rows
     logsumexp_ptr,         # (N,) precomputed logsumexp
     labels_ptr,            # (N,) labels (int32)
-    scale,                 # scaler
+    scale_ptr,             # (1,) float32 scale living on the GPU (so the caller never has to sync)
     NUM_CLASSES: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
     DTYPE_FLAG: tl.constexpr,
@@ -211,7 +213,7 @@ def cross_entropy_backward(
     block_idx = tl.program_id(1)
     
     # Cast pointers
-    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    logits_ptr = tl.cast(logits_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
     logsumexp_ptr = tl.cast(logsumexp_ptr, tl.pointer_type(tl.float32))
     labels_ptr = tl.cast(labels_ptr, tl.pointer_type(tl.int32))
     
@@ -255,6 +257,7 @@ def cross_entropy_backward(
     y = tl.where(label_idx != -100, y, 0.0)
     
     # Scale grads 
+    scale = tl.load(tl.cast(scale_ptr, tl.pointer_type(tl.float32)))
     y = y * scale
 
     # Store to correct location
@@ -288,7 +291,7 @@ def fused_cross_entropy_forward(logits, labels, softcap=None, use_dlpack=True):
             labels, 
             C, 
             BLOCK_SIZE,
-            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(logits.dtype),
             SOFTCAP=softcap, 
             USE_SOFTCAP=True if softcap is not None else False
         )
@@ -307,14 +310,14 @@ def fused_cross_entropy_forward(logits, labels, softcap=None, use_dlpack=True):
 
         grid = (N,)
         cross_entropy_forward[grid](
-                logits.data.ptr, 
+                TritonPtr(logits), 
                 row_stride, 
-                loss.data.ptr, 
-                logsumexp.data.ptr, 
-                labels.data.ptr, 
+                TritonPtr(loss), 
+                TritonPtr(logsumexp), 
+                TritonPtr(labels), 
                 C, 
                 BLOCK_SIZE,
-                DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1,
+                DTYPE_FLAG=get_dtype_flag(logits.dtype),
                 SOFTCAP=softcap, 
                 USE_SOFTCAP=True if softcap is not None else False
             )       
@@ -338,8 +341,15 @@ def fused_cross_entropy_backward(
     """
     N, C = logits.shape
 
+    ### scale can be a python float or a GPU scalar array, we keep it on the GPU to avoid a host sync ###
+    if isinstance(scale, cp.ndarray):
+        scale = cp.ascontiguousarray(scale.astype(cp.float32, copy=False).reshape(1))
+    else:
+        scale = cp.full((1,), scale, dtype=cp.float32)
+
     if not DLPACK_DISABLE and use_dlpack:
 
+        scale = torch.utils.dlpack.from_dlpack(scale)
         logits = torch.utils.dlpack.from_dlpack(logits)
         labels = torch.utils.dlpack.from_dlpack(labels)
         logsumexp = torch.utils.dlpack.from_dlpack(logsumexp)
@@ -356,7 +366,7 @@ def fused_cross_entropy_backward(
             labels,
             scale, 
             C, 
-            DTYPE_FLAG=0 if logits.dtype == torch.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(logits.dtype),
             SOFTCAP=softcap, 
             USE_SOFTCAP=True if softcap is not None else False
         )
@@ -366,13 +376,13 @@ def fused_cross_entropy_backward(
     else:
         grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
         cross_entropy_backward[grid](
-            logits.data.ptr,
+            TritonPtr(logits),
             logits.strides[0] // logits.itemsize,
-            logsumexp.data.ptr, 
-            labels.data.ptr, 
-            scale,
+            TritonPtr(logsumexp), 
+            TritonPtr(labels), 
+            TritonPtr(scale),
             C, 
-            DTYPE_FLAG=0 if logits.dtype == cp.float32 else 1,
+            DTYPE_FLAG=get_dtype_flag(logits.dtype),
             SOFTCAP=softcap, 
             USE_SOFTCAP=True if softcap is not None else False
         )

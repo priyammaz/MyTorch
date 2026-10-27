@@ -43,6 +43,11 @@ while [[ $# -gt 0 ]]; do
             ;;
         --mixed_precision)
             MIXED_PRECISION=true
+            ### optional value: `--mixed_precision bf16` (defaults to fp16) ###
+            if [[ "$2" == "fp16" || "$2" == "bf16" ]]; then
+                MIXED_PRECISION="$2"
+                shift
+            fi
             ;;
         --gradient_checkpointing)
             GRADIENT_CHECKPOINTING=true
@@ -55,7 +60,7 @@ while [[ $# -gt 0 ]]; do
             ;;
         *)
             echo "Error: Unknown argument: $1"
-            echo "Usage: $0 [owt|shakespeare] [--num_gpus N] [--host HOST] [--port PORT] [--triton_autotune] [--fused] [--mixed_precision] [--disable_dlpack] [--log_wandb]"
+            echo "Usage: $0 [owt|shakespeare] [--num_gpus N] [--host HOST] [--port PORT] [--triton_autotune] [--fused] [--mixed_precision [fp16|bf16]] [--disable_dlpack] [--log_wandb]"
             exit 1
             ;;
     esac
@@ -87,6 +92,8 @@ if [[ "$FUSED" == true ]]; then
 fi
 if [[ "$MIXED_PRECISION" == true ]]; then
     EXTRA_ARGS+=" --mixed_precision"
+elif [[ "$MIXED_PRECISION" == "fp16" || "$MIXED_PRECISION" == "bf16" ]]; then
+    EXTRA_ARGS+=" --mixed_precision $MIXED_PRECISION"
 fi
 if [[ "$GRADIENT_CHECKPOINTING" == true ]]; then
     EXTRA_ARGS+=" --enable_gradient_checkpointing"

@@ -149,13 +149,19 @@ def fused_rotary_embbedding(q, k, cos, sin):
     return q_out, k_out
 
 def apply_rotary_pos_embed(q, k, cos, sin, unsqueeze_dim=2, auto=True, fused=False):
-    if auto:
-        return auto_apply_rotary_pos_embed(q, k, cos, sin, unsqueeze_dim)
-    else:
-        _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
-        if not _use_fused:
-            raise Exception("Fused Rotary Embeddings not Supported!! Install Triton, or use Auto method")
+    """
+    fused=True uses the Triton kernel (one launch per q/k instead of ~10 ops, and nothing saved for backward).
+    It rotates q and k IN PLACE and expects the (B x L x H x D) layout (unsqueeze_dim=2). Otherwise we use the
+    auto (composed ops) version.
+    """
+    _use_fused = ((fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED) and unsqueeze_dim == 2
+    if _use_fused:
         return fused_rotary_embbedding(q, k, cos, sin)
+    if fused:
+        CHECKS.warn_triton_missing()
+    if not auto:
+        raise Exception("Fused Rotary Embeddings not Supported!! Install Triton, or use Auto method")
+    return auto_apply_rotary_pos_embed(q, k, cos, sin, unsqueeze_dim)
         
 if __name__ == "__main__":
 

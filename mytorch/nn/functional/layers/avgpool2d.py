@@ -1,4 +1,5 @@
 from mytorch import Tensor
+from mytorch._array import add_at
 
 def averagepool2d(input, kernel_size, stride=None, padding=0):
     """
@@ -102,7 +103,7 @@ def averagepool2d(input, kernel_size, stride=None, padding=0):
         jj_flat = xp.tile(j.reshape(-1), B)
 
         ### Single vectorized addition ###
-        xp.add.at(grad_input, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
+        add_at(grad_input, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
 
         if P > 0:
             grad_input = grad_input[:, :, P:-P, P:-P]

@@ -5,10 +5,15 @@ in the backward indexing op (__getitem__)
 Code inspiration came from Liger Kernels: https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/experimental/embedding.py
 """
 
+import os
 import torch
 import cupy as cp
 import triton
 import triton.language as tl
+from .utils import get_dtype_flag
+
+### Set MYTORCH_CHECK_EMBEDDING_INDICES=true to validate indices (costs a GPU sync per call) ###
+CHECK_INDICES = os.environ.get("MYTORCH_CHECK_EMBEDDING_INDICES", "false").lower() == "true"
 
 @triton.jit
 def embedding_forward_kernel(
@@ -27,8 +32,8 @@ def embedding_forward_kernel(
     
     ### Cast Pointers ###
     indices_ptr = tl.cast(indices_ptr, tl.pointer_type(tl.int32))
-    embeddings_ptr = tl.cast(embeddings_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    embeddings_ptr = tl.cast(embeddings_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
 
     ### Get the indexes of what embeddings we are loading ###
     start_m = pid_m * BLOCK_SIZE_M
@@ -65,7 +70,7 @@ def embedding_backward_kernel(
     embedding_dim: tl.constexpr, 
     BLOCK_SIZE_M: tl.constexpr, 
     BLOCK_SIZE_N: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr, # 0 for float32, 1 for float16, 2 for bfloat16
 ):
     
     pid_m = tl.program_id(0)
@@ -73,8 +78,8 @@ def embedding_backward_kernel(
 
     ### Cast Pointers ###
     indices_ptr = tl.cast(indices_ptr, tl.pointer_type(tl.int32))
-    grad_weight_ptr = tl.cast(grad_weight_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    grad_output_ptr = tl.cast(grad_output_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    grad_weight_ptr = tl.cast(grad_weight_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    grad_output_ptr = tl.cast(grad_output_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
     
     ### Get the indexes of what embeddings we are loading ###
     start_m = pid_m * BLOCK_SIZE_M
@@ -110,8 +115,10 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
     ### Only support int32 indexes ###
     indices = indices.astype("int32", copy=False)
 
-    assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
-    assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
+    ### Bounds checks force a GPU sync every call, so they are opt in ###
+    if CHECK_INDICES:
+        assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
+        assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
 
     if use_dlpack:
 
@@ -161,7 +168,7 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
             embedding_dim=embed_dim, 
             BLOCK_SIZE_M=BLOCK_SIZE_M,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=0 if embeddings.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
         )
         output = output.contiguous()
         return cp.from_dlpack(output.reshape(*original_indices_shape, -1))
@@ -209,7 +216,7 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
             embedding_dim=embed_dim, 
             BLOCK_SIZE_M=BLOCK_SIZE_M,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=0 if embeddings.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
         )
 
         embeds = output.reshape(*original_indices_shape, -1)
@@ -218,11 +225,20 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
     
 def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
 
+    ### tl.atomic_add is extremely slow for bfloat16, so accumulate in float32 and cast back ###
+    if str(embeddings.dtype) == "bfloat16":
+        grad_weight = fused_embedding_backward(grad_output.astype(cp.float32),
+                                               cp.empty(embeddings.shape, dtype=cp.float32),
+                                               indices, use_dlpack=use_dlpack)
+        return grad_weight.astype("bfloat16")
+
     ### Only support int32 indexes ###
     indices = indices.astype("int32", copy=False)
 
-    assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
-    assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
+    ### Bounds checks force a GPU sync every call, so they are opt in ###
+    if CHECK_INDICES:
+        assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
+        assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
     
     if use_dlpack:
 
@@ -260,7 +276,7 @@ def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
             embedding_dim=embed_dim,
             BLOCK_SIZE_M=BLOCK_SIZE_M,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=0 if embeddings.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
         )
 
         return cp.from_dlpack(grad_weight)
@@ -298,7 +314,7 @@ def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
             embedding_dim=embed_dim,
             BLOCK_SIZE_M=BLOCK_SIZE_M,
             BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=0 if embeddings.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
         )
 
         return grad_weight

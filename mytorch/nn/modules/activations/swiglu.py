@@ -7,5 +7,6 @@ class SwiGLU(Module):
         self.auto = auto
         self.fused = fused
     
-    def forward(self, input_a, input_b):
+    def forward(self, input_a, input_b=None):
+        """silu(a) * b, or pass one packed projection [a, b] (last dim) as input_a"""
         return F.swiglu(input_a, input_b, auto=self.auto, fused=self.fused)

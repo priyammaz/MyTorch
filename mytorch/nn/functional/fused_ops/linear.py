@@ -21,6 +21,8 @@ import triton
 import triton.language as tl
 from .activations import activation_switcher_forward, _avail_activations
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .utils import get_dtype_flag
+from .utils import TritonPtr
 
 def get_cuda_autotune_config():
 
@@ -61,7 +63,7 @@ def fused_linear_forward_kernel(
     GROUP_SIZE_M: tl.constexpr, 
     DTYPE_FLAG: tl.constexpr
 ):
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
     weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
     preact_ptr = tl.cast(preact_ptr, tl.pointer_type(pointer_type))
@@ -128,7 +130,7 @@ def fused_linear_forward(a, w, b=None, act_func="relu", use_dlpack=True):
     B, I = a.shape
     I2, O = w.shape
     assert I == I2, "Inner dimensions must match"
-    assert a.dtype in (cp.float16, cp.float32), "Only float16/float32 supported"
+    get_dtype_flag(a.dtype)  # raises on unsupported dtypes
     assert a.dtype == w.dtype, f"Mismatched dtypes: {a.dtype} vs {w.dtype}"
     if b is not None:
         assert b.shape == (O,), f"Bias shape must be ({O},)"
@@ -184,7 +186,7 @@ def fused_linear_forward(a, w, b=None, act_func="relu", use_dlpack=True):
             preact_torch.stride(0), 
             preact_torch.stride(1),
             act_func,
-            DTYPE_FLAG=0 if a_torch.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(a_torch.dtype)
         )
 
 
@@ -213,11 +215,11 @@ def fused_linear_forward(a, w, b=None, act_func="relu", use_dlpack=True):
         )
 
         fused_linear_forward_kernel[grid](
-            a.data.ptr,
-            w.data.ptr,
-            preact_cp.data.ptr,
-            postact_cp.data.ptr,
-            b.data.ptr if b is not None else None,
+            TritonPtr(a),
+            TritonPtr(w),
+            TritonPtr(preact_cp),
+            TritonPtr(postact_cp),
+            TritonPtr(b) if b is not None else None,
             B, O, I,
             a.strides[0] // a.itemsize,
             a.strides[1] // a.itemsize,
@@ -225,7 +227,7 @@ def fused_linear_forward(a, w, b=None, act_func="relu", use_dlpack=True):
             w.strides[1] // w.itemsize,
             preact_cp.strides[0] // preact_cp.itemsize,
             preact_cp.strides[1] // preact_cp.itemsize,
-            DTYPE_FLAG=0 if a.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(a.dtype)
         )
 
         return preact_cp

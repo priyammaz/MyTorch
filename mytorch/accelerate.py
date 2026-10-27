@@ -6,6 +6,7 @@ if we are doing Mixed/Full precision training! If everything is disabled
 its just a fancy way to log and checkpoint essentially!
 """
 import os
+import math
 import shutil
 import cupy as cp
 import numpy as np
@@ -27,6 +28,20 @@ except:
     WANDB_AVAILABLE = False
 
 terminal_width = shutil.get_terminal_size().columns
+
+def _parse_mixed_precision(value):
+    """
+    Maps the mixed_precision argument (or MYTORCHRUN_MIXED_PRECISION env value) to the
+    half precision dtype we train in. True/"fp16" -> float16, "bf16" -> bfloat16, False/"No" -> None
+    """
+    name = str(value).lower()
+    if name in ("false", "no", "none", "0", ""):
+        return None
+    if name in ("true", "yes", "fp16", "float16"):
+        return "float16"
+    if name in ("bf16", "bfloat16"):
+        return "bfloat16"
+    raise ValueError(f"mixed_precision must be one of False, 'fp16' or 'bf16', got {value}")
 
 class GradScaler:
     def __init__(self, 
@@ -162,14 +177,18 @@ class Accelerator:
         cp.random.seed(seed=42 + self.rank)
 
         ### Mixed Precision ### 
+        ### mixed_precision can be False, True/"fp16" or "bf16" ###
         env_val = os.environ.get("MYTORCHRUN_MIXED_PRECISION", False)
-        if env_val is False:
-            self.mixed_precision = mixed_precision
-        else:
-            self.mixed_precision = False if env_val == "No" else True
+        self.half_dtype = _parse_mixed_precision(mixed_precision if env_val is False else env_val)
+        self.mixed_precision = self.half_dtype is not None
         self.skip_optimizer_step = False
-        if self.mixed_precision:
+        self._final_grads = []
+        if self.half_dtype == "float16":
             self.scaler = GradScaler()
+        elif self.half_dtype == "bfloat16":
+            ### bf16 has the same range as fp32 so there is nothing to dynamically scale, ###
+            ### a fixed scale of 1 still gives us the NaN/Inf step skipping for free ###
+            self.scaler = GradScaler(init_scale=1.0, growth_factor=1.0, backoff_factor=1.0)
 
         ### Store Grad Norm for every grad sync ###
         ### this lets us keep an eye on model training health ###
@@ -195,7 +214,7 @@ class Accelerator:
         config = {
             "distributed": "Multi-GPU Training" if self.comm is not None else False, 
             "num_gpus": self.world_size, 
-            "mixed_precision": self.mixed_precision,
+            "mixed_precision": self.half_dtype if self.mixed_precision else False,
             "gpu_indices": gpu_indices,
             "master_addr": self.master_addr, 
             "master_port": self.master_port
@@ -281,11 +300,11 @@ class Accelerator:
 
                 self.fp32_params.append(fp32_param)
 
-            ### Now cast all our parameters to float16 ###
+            ### Now cast all our parameters to float16/bfloat16 ###
             for param in self.model._parameters_no_dedup():
-                param.data._array = param.data._array.astype("float16")
+                param.data._array = param.data._array.astype(self.half_dtype)
             for param in self.model._buffers_no_dedup():
-                param.data._array = param.data._array.astype("float16")
+                param.data._array = param.data._array.astype(self.half_dtype)
        
         return self.model
     
@@ -344,7 +363,7 @@ class Accelerator:
                 ### Only Step After Grad Accumulations are Done ###
                 if accelerator.step_counter % accelerator.gradient_accumulation_steps == 0:
                     ### In mixed precision we may have to skip a step ###
-                    if accelerator.mixed_precision and accelerator.skip_optimizer_step:
+                    if accelerator.skip_optimizer_step:
                         ### Reset the flag and do nothing ###
                         accelerator.skip_optimizer_step = False
                         return 
@@ -357,22 +376,27 @@ class Accelerator:
                     ### now for the next iteration! It is important to use the copy() operation ###
                     ### as we dont want to cast our fp32_copy to fp16! ###
                     if accelerator.mixed_precision:
-                        for fp32_param, param in zip(accelerator.fp32_params, accelerator.model._parameters_no_dedup()):
-                            param.data[:] = fp32_param.data.astype(cp.float16, copy=True)
+                        for param, fp32_param in accelerator._unique_params():
+                            ### single in-place cast+copy kernel, no temporary half precision copy ###
+                            cp.copyto(param.data._array, fp32_param.data._array, casting="unsafe")
 
             def zero_grad(self, *args, **kwargs):   
 
                 if accelerator.step_counter % accelerator.gradient_accumulation_steps == 0:
                     self.base_optimizer.zero_grad(*args, **kwargs)
 
+                    ### _final_grads references every (fp32) grad the optimizer used, drop it too or those ###
+                    ### grads stay allocated until the next accumulation boundary ###
+                    accelerator._final_grads = []
+
                     ### If in Mixed Precision ###
                     ### Remember, our optimizer looks at the copy of full precision weights ###
                     ### our model still looks at our half precision weights, so we need to manually ###
                     ### zero them out here ###
                     if accelerator.mixed_precision:
-                        for param in accelerator.model.parameters():
-                            if hasattr(param, "grad") and param.grad is not None:
-                                param.grad[:] = 0.0
+                        ### Setting to None (instead of zero filling) frees the memory and avoids a kernel per param ###
+                        for param, _ in accelerator._unique_params():
+                            param.grad = None
 
                         ### We have updated our model, reset flag for the next scaling ###
                         accelerator.scaler.reset_unscaled_flag()
@@ -665,17 +689,22 @@ class Accelerator:
 
         return new_loader
 
+    def _unique_params(self):
+        """
+        Yields (param, fp32_param) once per unique parameter (tied weights appear twice in
+        _parameters_no_dedup). fp32_param is None when we are not in mixed precision.
+        """
+        seen = set()
+        params = self.model._parameters_no_dedup()
+        pairs = zip(params, self.fp32_params) if self.mixed_precision else ((p, None) for p in params)
+        for param, fp32_param in pairs:
+            if id(param) in seen:
+                continue
+            seen.add(id(param))
+            yield param, fp32_param
+
     def backward(self, loss):
 
-        ### Sanity check to skip updated if we have a NAN Loss ###
-        if cp.isnan(loss.data._array).any() or cp.isinf(loss.data._array).any():
-            if self.is_main_process:
-                warnings.warn(f"Warning: NaN/Inf loss detected at step {self.step_counter}. Skipping backward.")
-            self.step_counter += 1
-            if self.step_counter % self.gradient_accumulation_steps == 0:
-                self.skip_optimizer_step = True
-            return
-        
         ### If we are not in mixed precision mode, go ahead and scale. If we are in fp16 here ###
         ### and we divide by too many grad steps, we can underflow. We will do it for mixed precision ###
         ## later on! ###
@@ -691,103 +720,98 @@ class Accelerator:
             ### to keep us from underflowing ###
             loss = self.scaler.scale_loss(loss)
 
-            ### Set flag that our grads here are scaled (False to unscaled) ###
-            self.scaler.reset_unscaled_flag()
-
         ### Normal backward ###
+        ### NOTE: we deliberately dont check the loss for NaN/Inf here, that would force a GPU sync every ###
+        ### micro-step. A NaN/Inf loss gives NaN/Inf grads which the grad norm check below catches ###
         loss.backward()
         self.step_counter += 1
 
         ### We only update every self.gradient_accumulation_steps ###
         if self.step_counter % self.gradient_accumulation_steps == 0:
-            
-            ### Flag for if we want to skip updating incase of nan grads ###
-            skip_step = False
+            self._finalize_grads()
+
+    def _all_reduce_sum_(self, array):
+        """
+        In place NCCL all-reduce (sum). cupyx's NCCL wrapper doesnt know bfloat16 yet, but NCCL itself
+        does, so for bfloat16 we call the underlying communicator directly
+        """
+        if str(array.dtype) == "bfloat16":
+            from cupy.cuda import nccl
+            self.comm._comm.allReduce(array.data.ptr, array.data.ptr, array.size, nccl.NCCL_BFLOAT16,
+                                      nccl.NCCL_SUM, cp.cuda.get_current_stream().ptr)
+        else:
+            self.comm.all_reduce(array, array, op="sum")
+
+    def _broadcast_(self, array, root=0):
+        """In place NCCL broadcast that also handles bfloat16 (see _all_reduce_sum_)"""
+        if str(array.dtype) == "bfloat16":
+            from cupy.cuda import nccl
+            self.comm._comm.broadcast(array.data.ptr, array.data.ptr, array.size, nccl.NCCL_BFLOAT16,
+                                      root, cp.cuda.get_current_stream().ptr)
+        else:
+            self.comm.broadcast(array, root=root)
+
+    def _finalize_grads(self):
+        """
+        Runs once per optimizer step (after the last accumulation micro-step):
+          1. all-reduce grads across GPUs (in place)
+          2. unscale (1/world_size, 1/accumulation, 1/loss_scale) and, in mixed precision, cast to our
+             fp32 master grads in a single kernel per parameter
+          3. compute the global grad norm on the GPU with one host sync, which doubles as our
+             NaN/Inf check (any NaN/Inf grad makes the norm NaN/Inf)
+        """
+        params = [(p, f) for p, f in self._unique_params() if p.grad is not None]
+
+        ### All-reduce in place (sum), we divide by world size in the unscale below ###
+        if self.comm is not None:
+            for param, _ in params:
+                grad = param.grad._array if hasattr(param.grad, "_array") else param.grad
+                if not grad.flags.c_contiguous:
+                    grad = cp.ascontiguousarray(grad)
+                    param.grad = grad
+                self._all_reduce_sum_(grad)
+
+        inv_scale = 1.0 / self.world_size
+        if self.mixed_precision:
+            inv_scale /= self.gradient_accumulation_steps * self.scaler.scale
+
+        ### Unscale (and cast to fp32 master grads in mixed precision) ###
+        final_grads = []
+        for param, fp32_param in params:
+            grad = param.grad._array if hasattr(param.grad, "_array") else param.grad
             if self.mixed_precision:
+                fp32_param.grad = cp.multiply(grad, cp.float32(inv_scale), dtype=cp.float32)
+                final_grads.append(fp32_param.grad)
+            else:
+                if inv_scale != 1.0:
+                    grad *= inv_scale
+                final_grads.append(grad)
 
-                ### Scale down our accumulated gradients ###
-                for param in self.model.parameters():
-                    if hasattr(param, "grad") and param.grad is not None:
-                        param.grad /= self.gradient_accumulation_steps
+        ### Global grad norm, one GPU sync for the whole step ###
+        if final_grads:
+            sq_norms = cp.stack([cp.vdot(g.ravel(order="K"), g.ravel(order="K")).astype(cp.float64) for g in final_grads])
+            total_norm = math.sqrt(float(sq_norms.sum()))
+        else:
+            total_norm = 0.0
 
-                ### Now we can unscale our gradients ###
-                self.scaler.unscale_grads(self.model.parameters())
+        ### Grads are identical across ranks after the all-reduce, so every rank agrees on found_inf ###
+        found_inf = not math.isfinite(total_norm)
+        if self.mixed_precision:
+            self.scaler.update(found_inf)
 
-                ### Check for NAN/Inf on our unscaled grads ###
-                found_inf = 0.0
-                for param in self.model.parameters():
-                    if hasattr(param, "grad") and param.grad is not None:
-                        if cp.any(cp.isinf(param.grad)) or cp.any(cp.isnan(param.grad)):
-                            found_inf = 1.0
-                            break
+        if found_inf:
+            ### We wont be updating this step, drop the grads ###
+            for param, fp32_param in params:
+                param.grad = None
+                if fp32_param is not None:
+                    fp32_param.grad = None
+            if self.is_main_process:
+                msg = f" Reducing Scale to {self.scaler.scale}." if self.mixed_precision else ""
+                warnings.warn(f"Warning: NaN/Inf Grad detected at step {self.step_counter}.{msg} Skipping step.")
 
-                ### Gather from all devices ###
-                found_inf_arr = cp.array([found_inf])
-                if self.comm is not None:
-                    out = cp.empty_like(found_inf_arr)
-                    self.comm.all_reduce(found_inf_arr, out, op="max")
-                    found_inf = out[0] > 0.0
-                
-                if found_inf:
-                    
-                    ### If we found inf, just go ahead and zero out ###
-                    ### all the grad as we wont be updating in this step ###
-                    for param in self.model.parameters():
-                        if hasattr(param, "grad") and param.grad is not None:
-                            param.grad[:] = 0.0
-                    
-                    ### Let out scaler know to adjust the scaling accordingly ###
-                    self.scaler.update(True)
-                    skip_step = True
-
-                    if self.is_main_process:
-                        warnings.warn(f"Warning: NaN/Inf Grad detected at step {self.step_counter}. Reducing Scale to {self.scaler.scale} and Skipping backward.")
-
-                else:
-                    ### If no issues, just update our scaler accordingly ###
-                    self.scaler.update(False)
-
-            ### Allreduce Gradients ###
-            if self.comm is not None:
-                for param in self.model.parameters():
-                    if hasattr(param, "grad") and param.grad is not None:
-
-                        ### Quick check. In our backward pass there are two options:
-                        ### - Auto backward which will use our Array type
-                        ### - Manual backward which will use either cp.ndarray or np.ndarray. But 
-                        ###   we are in distributed training here so we only care about cp.ndarray
-
-                        ### This means if we have an Array type we need to get the "_array" that hold the 
-                        ### actual underlying data in Cupy for NCCL all_reduce. But if its already a 
-                        ### cp.ndarray theres nothing to get, so we just have a quick sanity check here
-                        self.comm.all_reduce(param.grad._array/self.world_size if hasattr(param.grad, "_array") else param.grad/self.world_size, # <- in_array
-                                             param.grad._array/self.world_size if hasattr(param.grad, "_array") else param.grad/self.world_size, # <- out_array
-                                             op="sum")
-                        
-            ### Cast Grads back to FP32 to Update our FP32 Copy of Weights ###
-            if self.mixed_precision and not skip_step:
-        
-                ### Dictionary of parameter pointers and their grads ###
-                seen_params = {}
-                
-                for fp32_param, param in zip(self.fp32_params, self.model._parameters_no_dedup()):
-                    if hasattr(param, "grad") and param.grad is not None:
-                        
-                        ### Get pointer to parameter ###
-                        param_ptr = int(param.data._array.data.ptr)
-                        
-                        ### If we've seen this gradient before, reuse the same fp32 grad ###
-                        if param_ptr in seen_params:
-                            fp32_param.grad = seen_params[param_ptr].astype(cp.float32)
-                        else:
-                            ### Create new fp32 gradient and store it ###
-                            fp32_grad = param.grad.astype(cp.float32)
-                            fp32_param.grad = fp32_grad
-                            seen_params[param_ptr] = fp32_grad
-                    else:
-                        fp32_param.grad = None
-  
-            self.skip_optimizer_step = skip_step
+        self._final_grads = [] if found_inf else final_grads
+        self._grad_norm = total_norm
+        self.skip_optimizer_step = found_inf
 
     def clip_grad_norm_(self, max_norm=1.0):
         
@@ -798,55 +822,17 @@ class Accelerator:
         ### If we skipped our optimizer step earlier in backward() we will also skip our clipping ###
         if self.skip_optimizer_step:
             return None
-        
-        ### If we are in Mixed Precision Mode ###
-        ### This wont actually do anything as we already unscaled our grads ###
-        ### in the backward pass. Assuming we are just called clipping after backward ###
-        ### this is basically a no-op
-        if self.mixed_precision:
-            self.scaler.unscale_grads(self.model.parameters())
-        
-        ### Compute local norm squared ###
-        # local_norm_sq = 0.0
-        # for param in self.model.parameters():
-        #     if hasattr(param, "grad") and param.grad is not None:
-        #         norm = float(cp.sum(param.grad ** 2))
-        #         local_norm_sq += norm
 
-        ### Same as above but avoids multiple kernel launches ###
-        local_norm_sq = 0.0
-        grads = [param.grad for param in self.model.parameters() if hasattr(param, "grad") and param.grad is not None]
-        if grads:
-            flat_grads = cp.concatenate([g.reshape(-1) for g in grads])
-            local_norm_sq = float(cp.sum(flat_grads ** 2))
-        else:
-            local_norm_sq = 0.0
- 
-        ### AllReduce to get global norm squared ###
-        if self.comm is not None:
-            local_norm_sq_arr = cp.array([local_norm_sq])
-            global_norm_sq_arr = cp.empty_like(local_norm_sq_arr)
-            self.comm.all_reduce(local_norm_sq_arr, global_norm_sq_arr, op="sum")
-            total_norm = float(cp.sqrt(global_norm_sq_arr[0]))
-        else:
-            total_norm = float(cp.sqrt(local_norm_sq))
+        ### The global norm was already computed (after all-reduce/unscaling) in backward() ###
+        total_norm = self._grad_norm
 
-        ### Clip based on GLOBAL norm ###
+        ### Clip based on GLOBAL norm, directly on the grads the optimizer will use ###
         clip_coef = max_norm / (total_norm + 1e-6)
         if clip_coef < 1.0:
-            for param in self.model.parameters():
-                if hasattr(param, "grad") and param.grad is not None:
-                    param.grad *= clip_coef
+            for grad in self._final_grads:
+                grad *= clip_coef
 
-        ### Copy to fp32_params ###
-        if self.mixed_precision:
-            for fp32_param, param in zip(self.fp32_params, self.model.parameters()):
-                if hasattr(param, "grad") and param.grad is not None:
-                    fp32_param.grad = param.grad.astype(cp.float32)
-                else:
-                    fp32_param.grad = None
-        
-        self._grad_norm = total_norm
+        return total_norm
 
     def gather_for_metrics(self, value):
         assert isinstance(value, Tensor), "Value must be a Tensor"
@@ -857,7 +843,7 @@ class Accelerator:
         
         ### Cast to float32 for stability in allreduce ###
         data = value.data._array if hasattr(value.data, "_array") else value.data
-        data_f32 = data.astype(cp.float32) if data.dtype == cp.float16 else data
+        data_f32 = data.astype(cp.float32) if str(data.dtype) in ("float16", "bfloat16") else data
         
         out = cp.zeros_like(data_f32)
         self.comm.all_reduce(data_f32, out, op="sum")
@@ -988,7 +974,7 @@ class Accelerator:
                 ### in fp16 and our fp32 buffer
                 if self.mixed_precision:
                     self.fp32_params[i].data._array[:] = cp.asarray(weights, dtype=cp.float32)
-                    param.data._array[:] = self.fp32_params[i].data._array.astype(cp.float16)
+                    param.data._array[:] = self.fp32_params[i].data._array.astype(self.half_dtype)
                 
                 else:
                     param.data._array[:] = cp.asarray(weights, dtype=param.data._array.dtype)   
@@ -996,7 +982,7 @@ class Accelerator:
             ### Ensure all GPUs have same starting point ###
             if self.comm is not None:
                 for param in self.model.parameters():
-                    self.comm.broadcast(param.data._array, root=0)
+                    self._broadcast_(param.data._array, root=0)
                 if self.mixed_precision:
                     for fp32_param in self.fp32_params:
                         self.comm.broadcast(fp32_param.data._array, root=0)

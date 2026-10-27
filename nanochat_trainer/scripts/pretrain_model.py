@@ -213,7 +213,7 @@ def trainer(args, path_to_experiment, resume_from_checkpoint=None):
             inputs, targets = inputs.to(accelerator.device), targets.to(accelerator.device)
      
             # Forward pass
-            _, loss = model(inputs, targets)
+            loss = model(inputs, targets)[1]
 
             # Backward
             accelerator.backward(loss)

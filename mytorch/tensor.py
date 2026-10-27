@@ -22,7 +22,15 @@ class no_grad:
             with self:
                 return func(*args, **kwargs)
         return wrapper
-    
+
+def _raw_index(i):
+    ### Tensor -> Array -> raw numpy/cupy array, anything else (ints, slices, None...) is left alone ###
+    if isinstance(i, Tensor):
+        i = i.data
+    if isinstance(i, ap.Array):
+        i = i._array
+    return i
+
 class Tensor:
     
     _build_graph = True
@@ -198,30 +206,32 @@ class Tensor:
 
         self.grad = grad
  
-        # Build topo-order
-        visited = set()
+        # Build topo-order with an iterative DFS (post-order) rather than recursively
+        visited = {id(self)}
         topo_order = []
 
-        def build_topo(t):
-            if id(t) in visited:
-                return
-            visited.add(id(t))
-            parents = getattr(t, "_parents", ())
-            if parents is None:
-                parents = []
+        # store as references and iterators instead
+        stack = [(self, iter(self._parents or ()))]
+        while stack:
+            t, parents = stack[-1]
             for parent_ref in parents:
                 parent = parent_ref()
-                if parent is not None:
-                    build_topo(parent)
-            topo_order.append(t)
+                if parent is not None and id(parent) not in visited:
+                    visited.add(id(parent))
+                    stack.append((parent, iter(parent._parents or ())))
+                    break
+            else:
+                stack.pop()
+                topo_order.append(t)
 
-        build_topo(self)
-
-        # Iterate in reverse topological order
         if time_backward:
             timings = defaultdict(float) 
 
-        for t in reversed(topo_order):
+
+        ### Pop as we go so each tensor (and the activations its closure saved) can be ###
+        ### freed as soon as its backward has run, instead of at the end of backward ###
+        while topo_order:
+            t = topo_order.pop()
             grad_fn = t.grad_fn
             if grad_fn is not None:
                 grad_fn_name = getattr(t, "grad_fn_name", grad_fn.__class__.__name__)
@@ -1316,34 +1326,25 @@ class Tensor:
         Supports slices, ints, arrays, and tuple-of-arrays indexing.
         """
         
-        # Convert Tensor indices to cp arrays
-        if isinstance(idx, Tensor):
-            idx = idx.data
-
+        ### Unwrap Tensor/Array indices to raw numpy/cupy arrays once, lists become int64 arrays ###
         if isinstance(idx, (list, tuple)):
             idx = tuple(
-                (i.data.astype(self.xp.int64) if isinstance(i, Tensor) else self.xp.array(i, dtype=self.xp.int64))
-                if isinstance(i, (list, Tensor)) else i
+                self.xp.array(i, dtype=self.xp.int64) if isinstance(i, list) else _raw_index(i)
                 for i in idx
             )
-        
-        out_data = self.data[idx]
+        else:
+            idx = _raw_index(idx)
+
+        out_data = self.data._array[idx]
 
         def _index_backward(input_grad):
 
             if self.requires_grad:
                 if self.grad is None:
                     self.grad = ap.Array.zeros_like(self.data, dtype=self.data.dtype)
-  
-                # Convert index to raw array if needed
-                actual_idx = idx
-                if isinstance(idx, Tensor):
-                    actual_idx = idx.data
-                if isinstance(actual_idx, ap.Array):
-                    actual_idx = actual_idx._array
 
-                # Elementwise assignment for fancy indexing
-                np.add.at(self.grad, actual_idx, input_grad)
+                ### Scatter add (repeated indices are summed), picks the fastest path for the index type ###
+                ap.add_at(getattr(self.grad, "_array", self.grad), idx, getattr(input_grad, "_array", input_grad))
 
         requires_grad = self.requires_grad and Tensor.build_graph_enabled()
         out = Tensor(out_data,
@@ -1615,33 +1616,42 @@ class Tensor:
         chunk_size = size // chunks
         out_tensors = []
 
+        ### All chunks from this call share ONE full size grad buffer. Previously every chunk made its own ###
+        ### zeroed full size buffer and added it into input.grad (for qkv attention that is 3 zero fills + 2 ###
+        ### full size adds per layer), now its a single zero fill and each chunk only touches its own slice ###
+        shared = {"grad_buffer": None}
+
         for i in range(chunks):
             start, end = i * chunk_size, (i + 1) * chunk_size
 
             # Slice the underlying array directly
             idx = [slice(None)] * input.ndim
             idx[dim] = slice(start, end)
-            slice_data = input.data[tuple(idx)]
+            idx = tuple(idx)
+            slice_data = input.data[idx]
 
-            def _chunk_backward(input_grad, start=start, end=end):
+            def _chunk_backward(input_grad, start=start, end=end, idx=idx):
                 if input.requires_grad:
-                    grad = input.xp.zeros_like(input.data, dtype=input.data.dtype)
-                    
-                    # Ensure input_grad has the correct shape
-                    grad_slice_shape = list(grad.shape)
-                    grad_slice_shape[dim] = end - start
-                    grad_slice = input_grad.reshape(grad_slice_shape)
 
-                    # Insert gradient slice into the right position
-                    grad_idx = [slice(None)] * grad.ndim
-                    grad_idx[dim] = slice(start, end)
-                    grad[tuple(grad_idx)] = grad_slice
-
-                    # Accumulate gradients
+                    ### First chunk to receive a grad allocates the buffer shared by all chunks ###
                     if input.grad is None:
-                        input.grad = grad
+                        shared["grad_buffer"] = ap.Array.zeros_like(input.data, dtype=input.data.dtype)
+                        input.grad = shared["grad_buffer"]
+
+                    # Ensure input_grad has the correct shape
+                    grad_slice_shape = list(input.shape)
+                    grad_slice_shape[dim] = end - start
+                    grad_slice = getattr(input_grad, "_array", input_grad).reshape(grad_slice_shape)
+
+                    ### Only this chunk's slice (a view, so no extra copies) ###
+                    grad_view = getattr(input.grad, "_array", input.grad)[idx]
+
+                    ### Our own buffer: every chunk owns a disjoint slice, so a plain copy. If the grad buffer came ###
+                    ### from somewhere else (input has other consumers) accumulate into just this slice ###
+                    if input.grad is shared["grad_buffer"]:
+                        grad_view[...] = grad_slice
                     else:
-                        input.grad += grad
+                        grad_view += grad_slice
 
             requires_grad = input.requires_grad and Tensor.build_graph_enabled()
             out = Tensor(
@@ -1919,7 +1929,7 @@ class Tensor:
             
             if self.requires_grad:
 
-                grad = self.xp.zeros_like(self.data, dtype=self.data.dtype)
+                grad = ap.Array.zeros_like(self.data, dtype=self.data.dtype)
 
                 # Broadcast input_grad if needed
                 if dim is not None and not keepdims:

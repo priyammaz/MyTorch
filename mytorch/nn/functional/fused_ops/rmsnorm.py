@@ -8,7 +8,9 @@ import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
+from .utils import TritonPtr
 from .flags import DLPACK_DISABLE
+from .utils import get_dtype_flag
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
@@ -27,7 +29,7 @@ def rms_norm_forward_kernel(
     row_idx = tl.program_id(0)
 
     ### Cast Pointers ###
-    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
     if rstd_ptr is not None:
@@ -101,7 +103,7 @@ def rmsnorm_kernel_backward(
     row_idx = tl.program_id(0)
     
     ### Map Pointers To Correct Dtype ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     dx_ptr = tl.cast(dx_ptr, tl.pointer_type(pointer_type))
     dy_ptr = tl.cast(dy_ptr, tl.pointer_type(pointer_type))
     x_ptr = tl.cast(x_ptr, tl.pointer_type(pointer_type))
@@ -189,7 +191,7 @@ def fused_rmsnorm_forward(x, gamma, eps=1e-5, training=True, use_dlpack=True):
         y_row_stride = y.stride(0)
         
         # Map dtype to Triton flag
-        dtype_flag = 0 if x.dtype == torch.float32 else 1
+        dtype_flag = get_dtype_flag(x.dtype)
         
         # Launch kernel
         grid = (n_rows,)
@@ -227,17 +229,17 @@ def fused_rmsnorm_forward(x, gamma, eps=1e-5, training=True, use_dlpack=True):
         y_row_stride = y.strides[0] // y.itemsize
         
         # Map dtype to Triton flag
-        dtype_flag = 0 if x.dtype == cp.float32 else 1
+        dtype_flag = get_dtype_flag(x.dtype)
         
         # Launch kernel
         grid = (n_rows,)
         rms_norm_forward_kernel[grid](
-            y.data.ptr,
+            TritonPtr(y),
             y_row_stride,
-            rstd.data.ptr if rstd is not None else None,  
-            x.data.ptr,
+            TritonPtr(rstd) if rstd is not None else None,  
+            TritonPtr(x),
             x_row_stride,
-            gamma.data.ptr if gamma is not None else None,
+            TritonPtr(gamma) if gamma is not None else None,
             DTYPE_FLAG=dtype_flag,
             eps=eps,
             n_cols=n_cols,
@@ -286,7 +288,7 @@ def fused_rmsnorm_backward(x, rstd, dy, gamma=None, use_dlpack=True):
         stride_dy = dy.stride(0)
 
         # Dtype flag
-        dtype_flag = 0 if dy.dtype == torch.float32 else 1
+        dtype_flag = get_dtype_flag(dy.dtype)
 
         # Launch kernel
         grid = (n_rows,)
@@ -313,16 +315,16 @@ def fused_rmsnorm_backward(x, rstd, dy, gamma=None, use_dlpack=True):
         stride_x = x.strides[0] // x.itemsize
         stride_dx = dx.strides[0] // dx.itemsize
         stride_dy = dy.strides[0] // dy.itemsize
-        dtype_flag = 0 if dy.dtype == cp.float32 else 1
+        dtype_flag = get_dtype_flag(dy.dtype)
         grid = (n_rows,)
 
         rmsnorm_kernel_backward[grid](
-            dx.data.ptr,
-            dy.data.ptr,
-            x.data.ptr,
-            gamma.data.ptr if gamma is not None else None,
-            rstd.data.ptr,
-            dgamma.data.ptr if gamma is not None else None,
+            TritonPtr(dx),
+            TritonPtr(dy),
+            TritonPtr(x),
+            TritonPtr(gamma) if gamma is not None else None,
+            TritonPtr(rstd),
+            TritonPtr(dgamma) if gamma is not None else None,
             stride_dx,
             stride_dy,
             stride_x,
