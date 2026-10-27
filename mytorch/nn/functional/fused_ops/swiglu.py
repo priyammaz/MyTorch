@@ -5,14 +5,12 @@ Fixed to match Liger Kernel implementation exactly
 https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/swiglu.py
 """
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .activations import silu_forward_kernel, silu_backward_kernel
 from .utils import calc_num_warps
 from .utils import TritonPtr
 from .utils import get_dtype_flag
-from .flags import DLPACK_DISABLE
 
 @triton.jit
 def silu(x):
@@ -122,54 +120,28 @@ def fused_swiglu_forward(a, b, use_dlpack=True):
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
     num_warps = calc_num_warps(BLOCK_SIZE)
 
-    if not DLPACK_DISABLE and use_dlpack:
+    a = _rows(a, n_cols)
+    b = _rows(b, n_cols)
+    n_rows = a.shape[0]
 
-        a = _rows(torch.utils.dlpack.from_dlpack(a), n_cols)
-        b = _rows(torch.utils.dlpack.from_dlpack(b), n_cols)
-        n_rows = a.shape[0]
-
-        c = torch.empty((n_rows, n_cols), dtype=a.dtype, device=a.device)
+    with cp.cuda.Device(a.device.id):
+        c = cp.empty((n_rows, n_cols), dtype=a.dtype)
 
         swiglu_forward_kernel[(n_rows,)](
-            a,
-            b,
-            c,
-            a.stride(0),
-            b.stride(0),
-            c.stride(0),
+            TritonPtr(a),
+            TritonPtr(b),
+            TritonPtr(c),
+            a.strides[0] // a.itemsize,
+            b.strides[0] // b.itemsize,
+            c.strides[0] // c.itemsize,
             n_cols=n_cols,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=num_warps,
             DTYPE_FLAG=get_dtype_flag(a.dtype)
         )
-        
-        # Return a and b as well (views of the inputs when no copy was needed) for the backward
-        return cp.from_dlpack(a), cp.from_dlpack(b), cp.from_dlpack(c.view(*ori_shape))
 
-    else:
-
-        a = _rows(a, n_cols)
-        b = _rows(b, n_cols)
-        n_rows = a.shape[0]
-
-        with cp.cuda.Device(a.device.id):
-            c = cp.empty((n_rows, n_cols), dtype=a.dtype)
-
-            swiglu_forward_kernel[(n_rows,)](
-                TritonPtr(a),
-                TritonPtr(b),
-                TritonPtr(c),
-                a.strides[0] // a.itemsize,
-                b.strides[0] // b.itemsize,
-                c.strides[0] // c.itemsize,
-                n_cols=n_cols,
-                BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=num_warps,
-                DTYPE_FLAG=get_dtype_flag(a.dtype)
-            )
-
-        # Return a and b as well (views of the inputs when no copy was needed) for the backward
-        return a, b, c.reshape(ori_shape)
+    # Return a and b as well (views of the inputs when no copy was needed) for the backward
+    return a, b, c.reshape(ori_shape)
 
 def fused_swiglu_backward(output_grad, a, b, use_dlpack=True):
     """
@@ -183,132 +155,24 @@ def fused_swiglu_backward(output_grad, a, b, use_dlpack=True):
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
     num_warps = calc_num_warps(BLOCK_SIZE)
 
-    if not DLPACK_DISABLE and use_dlpack:
-    
-        a = _rows(torch.utils.dlpack.from_dlpack(a), n_cols)
-        b = _rows(torch.utils.dlpack.from_dlpack(b), n_cols)
-        dc = _rows(torch.utils.dlpack.from_dlpack(output_grad), n_cols)
-        n_rows = dc.shape[0]
+    a = _rows(a, n_cols)
+    b = _rows(b, n_cols)
+    dc = _rows(output_grad, n_cols)
+    n_rows = dc.shape[0]
 
+    with cp.cuda.Device(a.device.id):
         swiglu_backward_kernel[(n_rows,)](
-            dc,
-            a,
-            b,
-            dc.stride(0),
-            a.stride(0),
-            b.stride(0),
+            TritonPtr(dc),
+            TritonPtr(a),
+            TritonPtr(b),
+            dc.strides[0] // dc.itemsize,
+            a.strides[0] // a.itemsize,
+            b.strides[0] // b.itemsize,
             n_cols=n_cols,
             BLOCK_SIZE=BLOCK_SIZE,
             num_warps=num_warps,
             DTYPE_FLAG=get_dtype_flag(a.dtype)
         )
-        
-        # a and b now contain gradients
-        return cp.from_dlpack(a).reshape(ori_shape), cp.from_dlpack(b).reshape(ori_shape)
 
-    else:
-
-        a = _rows(a, n_cols)
-        b = _rows(b, n_cols)
-        dc = _rows(output_grad, n_cols)
-        n_rows = dc.shape[0]
-
-        with cp.cuda.Device(a.device.id):
-            swiglu_backward_kernel[(n_rows,)](
-                TritonPtr(dc),
-                TritonPtr(a),
-                TritonPtr(b),
-                dc.strides[0] // dc.itemsize,
-                a.strides[0] // a.itemsize,
-                b.strides[0] // b.itemsize,
-                n_cols=n_cols,
-                BLOCK_SIZE=BLOCK_SIZE,
-                num_warps=num_warps,
-                DTYPE_FLAG=get_dtype_flag(a.dtype)
-            )
-
-        # a and b now contain gradients
-        return a.reshape(ori_shape), b.reshape(ori_shape)
-
-if __name__ == "__main__":
-    import torch
-    import torch.nn.functional as F
-
-    def pytorch_swiglu_forward(a, b):
-        return F.silu(a) * b
-
-    def test_forward(shapes, dtype=cp.float32, device='cuda', atol=1e-2, rtol=1e-2):
-        
-        for shape in shapes:
-            print(f"\nShape: {shape}")
-            
-            # Create random inputs
-            a = cp.random.normal(size=shape).astype(dtype)
-            b = cp.random.normal(size=shape).astype(dtype)
-
-            a_torch = torch.tensor(a.get())
-            b_torch = torch.tensor(b.get())
-            
-            # PyTorch reference
-            pytorch_out = pytorch_swiglu_forward(a_torch.clone(), b_torch.clone())
-            
-            # Triton implementation
-            _, _, triton_out = fused_swiglu_forward(a, b)
-    
-            is_close = cp.allclose(cp.asarray(pytorch_out.detach().cpu().numpy()), triton_out, atol=atol, rtol=rtol)
-
-            if not is_close:
-                print("FAILED")
-                print(f"PyTorch sample: {pytorch_out.flatten()[:5]}")
-                print(f"Triton sample:  {triton_out.flatten()[:5]}")
-            
-            print("FORWARD SUCCESS")
-
-    def test_backward(shapes, dtype=cp.float32, device='cuda', atol=1e-2, rtol=1e-2):
-        
-        for shape in shapes:
-            print(f"\nShape: {shape}")
-            
-            # Create random inputs
-            a = cp.random.normal(size=shape).astype(dtype)
-            b = cp.random.normal(size=shape).astype(dtype)
-            grad_output = cp.random.normal(size=shape).astype(dtype)
-            
-            
-            # PyTorch reference (using autograd)
-            a_torch = torch.tensor(a.get(), requires_grad=True)
-            b_torch = torch.tensor(b.get(), requires_grad=True)
-            out_pt = pytorch_swiglu_forward(a_torch, b_torch)
-            out_pt.backward(torch.tensor(grad_output.get()))
-            
-            # Triton implementation
-            a_triton, b_triton, out_triton = fused_swiglu_forward(a, b)
-            grad_a_triton, grad_b_triton = fused_swiglu_backward(grad_output, a_triton, b_triton)
-            
-            # Compare gradients
-            is_close_a = cp.allclose(cp.asarray(a_torch.grad.detach().cpu().numpy()), grad_a_triton, atol=atol, rtol=rtol)
-            is_close_b = cp.allclose(cp.asarray(b_torch.grad.detach().cpu().numpy()), grad_b_triton, atol=atol, rtol=rtol)
-
-            if not is_close_a or not is_close_b:
-                print("FAILED")
-                if not is_close_a:
-                    print(f"    PyTorch grad_a sample: {a_torch.grad.flatten()[:5]}")
-                    print(f"    Triton grad_a sample:  {grad_a_triton.flatten()[:5]}")
-                if not is_close_b:
-                    print(f"    PyTorch grad_b sample: {b_torch.grad.flatten()[:5]}")
-                    print(f"    Triton grad_b sample:  {grad_b_triton.flatten()[:5]}")
-
-            print("BACKWARD SUCCESS")
-
-    # Test shapes
-    test_shapes = [
-        (10,4,128),
-        (2,12,1424)
-    ]
-    
-    # Test forward pass
-    test_forward(test_shapes, dtype=cp.float16)
-    
-    # Test backward pass
-    test_backward(test_shapes, dtype=cp.float16)
-    
+    # a and b now contain gradients
+    return a.reshape(ori_shape), b.reshape(ori_shape)

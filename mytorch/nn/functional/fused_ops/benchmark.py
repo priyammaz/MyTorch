@@ -3,8 +3,6 @@ This will be a collection of benchmarks and numerical verifications
 of all of our operations! Triton is also optimized for mixed precision
 ops, so although we support float32 ops we will only benchmark float16! 
 """
-
-import torch
 import cupy as cp
 import triton
 import argparse
@@ -16,6 +14,10 @@ from .conv import fused_conv2d_forward, fused_conv2d_backward
 from .layernorm import fused_layernorm_forward, fused_layernorm_backward
 from .flash_attention import fused_sdpa_forward, fused_sdpa_backward
 
+try:
+    import torch # BENCHMARKS HAVE A TORCH DEP
+except:
+    raise ImportError("Cannot Run Benchmarks without Torch!")
 
 ##############
 ### MATMUL ###

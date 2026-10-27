@@ -4,12 +4,10 @@ As well as from https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_ker
 """
 
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
 from .utils import TritonPtr
-from .flags import DLPACK_DISABLE
 from .utils import get_dtype_flag
 
 def layernorm_naive(x, weight, bias=None, eps=1e-5):
@@ -233,51 +231,27 @@ def fused_layernorm_forward(x, gamma=None, beta=None, eps=1e-5, training=True, u
     dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
     grid = (n_rows,)
 
-    if not DLPACK_DISABLE and use_dlpack:
+    # Allocate outputs (saved statistics are always float32)
+    y = cp.empty_like(x)
+    mean = cp.empty((n_rows,), dtype=cp.float32) if training else None
+    inv_var = cp.empty((n_rows,), dtype=cp.float32) if training else None
 
-        x = torch.utils.dlpack.from_dlpack(x)
-        if gamma is not None:
-            gamma = torch.utils.dlpack.from_dlpack(gamma)
-        if beta is not None:
-            beta = torch.utils.dlpack.from_dlpack(beta)
+    layernorm_kernel_forward_training[grid](
+        TritonPtr(y),
+        TritonPtr(inv_var) if inv_var is not None else None,
+        TritonPtr(mean) if mean is not None else None,
+        TritonPtr(x),
+        TritonPtr(gamma) if gamma is not None else None,
+        TritonPtr(beta) if beta is not None else None,
+        x.strides[0] // x.itemsize, y.strides[0] // y.itemsize,
+        dtype_flag, eps, n_cols, BLOCK_SIZE,
+    )
 
-        # Allocate outputs (saved statistics are always float32)
-        y = torch.empty_like(x)
-        inv_var = torch.empty(n_rows, dtype=torch.float32, device=x.device) if training else None
-        mean = torch.empty(n_rows, dtype=torch.float32, device=x.device) if training else None
-
-        layernorm_kernel_forward_training[grid](
-            y, inv_var, mean, x, gamma, beta,
-            x.stride(0), y.stride(0),
-            dtype_flag, eps, n_cols, BLOCK_SIZE,
-        )
-         
-        y = cp.from_dlpack(y)
-        if training:
-            return y, cp.from_dlpack(mean), cp.from_dlpack(inv_var)
-        return y
-        
-    else:
-        # Allocate outputs (saved statistics are always float32)
-        y = cp.empty_like(x)
-        mean = cp.empty((n_rows,), dtype=cp.float32) if training else None
-        inv_var = cp.empty((n_rows,), dtype=cp.float32) if training else None
-
-        layernorm_kernel_forward_training[grid](
-            TritonPtr(y),
-            TritonPtr(inv_var) if inv_var is not None else None,
-            TritonPtr(mean) if mean is not None else None,
-            TritonPtr(x),
-            TritonPtr(gamma) if gamma is not None else None,
-            TritonPtr(beta) if beta is not None else None,
-            x.strides[0] // x.itemsize, y.strides[0] // y.itemsize,
-            dtype_flag, eps, n_cols, BLOCK_SIZE,
-        )
-
-        if training:
-            return y, mean, inv_var
-        return y
-        
+    if training:
+        return y, mean, inv_var
+    
+    return y
+    
 def fused_layernorm_backward(x, mean, inv_var, dy, gamma=None, beta=None, use_dlpack=True):
     n_rows, n_cols = dy.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
@@ -289,146 +263,22 @@ def fused_layernorm_backward(x, mean, inv_var, dy, gamma=None, beta=None, use_dl
     gamma_dtype = gamma.dtype if gamma is not None else None
     beta_dtype = beta.dtype if beta is not None else None
 
-    if not DLPACK_DISABLE and use_dlpack:
-        x = torch.utils.dlpack.from_dlpack(x)
-        dy = torch.utils.dlpack.from_dlpack(dy)
-        mean = torch.utils.dlpack.from_dlpack(mean)
-        inv_var = torch.utils.dlpack.from_dlpack(inv_var)
-        gamma = torch.utils.dlpack.from_dlpack(gamma) if gamma is not None else None
+    dx = cp.empty_like(dy)
+    dgamma_blocks = cp.empty((n_blocks, n_cols), dtype=cp.float32) if gamma is not None else None
+    dbeta_blocks = cp.empty((n_blocks, n_cols), dtype=cp.float32) if beta is not None else None
 
-        dx = torch.empty_like(dy)
-        dgamma_blocks = torch.empty((n_blocks, n_cols), dtype=torch.float32, device=dy.device) if gamma is not None else None
-        dbeta_blocks = torch.empty((n_blocks, n_cols), dtype=torch.float32, device=dy.device) if beta is not None else None
+    layernorm_kernel_backward[grid](
+        TritonPtr(x),
+        TritonPtr(gamma) if gamma is not None else None,
+        TritonPtr(mean), TritonPtr(inv_var), TritonPtr(dx),
+        TritonPtr(dgamma_blocks) if gamma is not None else None,
+        TritonPtr(dbeta_blocks) if beta is not None else None,
+        TritonPtr(dy),
+        x.strides[0] // x.itemsize, dx.strides[0] // dx.itemsize, dy.strides[0] // dy.itemsize,
+        n_rows, n_cols, BLOCK_SIZE, ROWS_PER_BLOCK, dtype_flag,
+    )
 
-        layernorm_kernel_backward[grid](
-            x, gamma, mean, inv_var, dx, dgamma_blocks, dbeta_blocks, dy,
-            x.stride(0), dx.stride(0), dy.stride(0), n_rows, n_cols, BLOCK_SIZE, ROWS_PER_BLOCK, dtype_flag,
-        )
-
-        dx = cp.from_dlpack(dx)
-        dgamma = cp.from_dlpack(dgamma_blocks.sum(0)).astype(gamma_dtype, copy=False) if gamma is not None else None
-        dbeta = cp.from_dlpack(dbeta_blocks.sum(0)).astype(beta_dtype, copy=False) if beta is not None else None
-
-    else:
-        dx = cp.empty_like(dy)
-        dgamma_blocks = cp.empty((n_blocks, n_cols), dtype=cp.float32) if gamma is not None else None
-        dbeta_blocks = cp.empty((n_blocks, n_cols), dtype=cp.float32) if beta is not None else None
-
-        layernorm_kernel_backward[grid](
-            TritonPtr(x),
-            TritonPtr(gamma) if gamma is not None else None,
-            TritonPtr(mean), TritonPtr(inv_var), TritonPtr(dx),
-            TritonPtr(dgamma_blocks) if gamma is not None else None,
-            TritonPtr(dbeta_blocks) if beta is not None else None,
-            TritonPtr(dy),
-            x.strides[0] // x.itemsize, dx.strides[0] // dx.itemsize, dy.strides[0] // dy.itemsize,
-            n_rows, n_cols, BLOCK_SIZE, ROWS_PER_BLOCK, dtype_flag,
-        )
-
-        dgamma = dgamma_blocks.sum(0).astype(gamma_dtype, copy=False) if gamma is not None else None
-        dbeta = dbeta_blocks.sum(0).astype(beta_dtype, copy=False) if beta is not None else None
+    dgamma = dgamma_blocks.sum(0).astype(gamma_dtype, copy=False) if gamma is not None else None
+    dbeta = dbeta_blocks.sum(0).astype(beta_dtype, copy=False) if beta is not None else None
 
     return dx, dgamma, dbeta
-
-if __name__ == "__main__":
-
-    import torch
-    import triton
-    import numpy as np
-    import cupy as cp
-
-    torch.manual_seed(42)
-    np.random.seed(42)
-
-    def test():
-        # Test configuration
-        batch_size = 4
-        hidden_size = 8
-        eps = 1e-5
-        dtype = np.float16
-            
-        # Create input and weights
-        x_np = np.random.randn(batch_size, hidden_size).astype(dtype)
-        gamma_np = np.random.randn(hidden_size).astype(dtype)
-        beta_np = np.random.randn(hidden_size).astype(dtype)
-        grad_output_np = np.random.randn(batch_size, hidden_size).astype(dtype)
-
-        # CuPy (for your Triton kernels)
-        x_cp = cp.array(x_np)
-        gamma_cp = cp.array(gamma_np)
-        beta_cp = cp.array(beta_np)
-        
-        # PyTorch
-        x_torch = torch.tensor(x_np, device='cuda', requires_grad=True)
-        gamma_torch = torch.tensor(gamma_np, device='cuda', requires_grad=True)
-        beta_torch = torch.tensor(beta_np, device='cuda', requires_grad=True)
-        
-        y_triton, mean_triton, inv_var_triton = fused_layernorm_forward(
-            x_cp, gamma_cp, beta_cp, eps=eps, training=True, use_dlpack=True
-        )
-        
-        # PyTorch forward
-        torch_ln = torch.nn.LayerNorm(hidden_size, eps=eps).cuda()
-        torch_ln.weight.data = gamma_torch.clone()
-        torch_ln.bias.data = beta_torch.clone()
-        y_torch = torch_ln(x_torch)
-        
-        # Compare
-        y_triton_np = cp.asnumpy(y_triton)
-        y_torch_np = y_torch.detach().cpu().numpy()
-        
-        forward_diff = np.abs(y_triton_np - y_torch_np)
-        forward_match = np.allclose(y_triton_np, y_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"Output max diff: {forward_diff.max():.2e}")
-        
-        # FIX: Create upstream gradient with SAME dtype as input!
-        grad_output_cp = cp.array(grad_output_np)
-        grad_output_torch = torch.tensor(grad_output_np, device='cuda')
-        
-        # Your Triton backward
-        dx_triton, dgamma_triton, dbeta_triton = fused_layernorm_backward(
-            x_cp, mean_triton, inv_var_triton, grad_output_cp, 
-            gamma_cp, beta_cp, use_dlpack=True
-        )
-        
-        # PyTorch backward
-        y_torch.backward(grad_output_torch)
-        dx_torch = x_torch.grad
-        dgamma_torch = torch_ln.weight.grad
-        dbeta_torch = torch_ln.bias.grad
-        
-        # Compare dx
-        dx_triton_np = cp.asnumpy(dx_triton)
-        dx_torch_np = dx_torch.detach().cpu().numpy()
-        dx_diff = np.abs(dx_triton_np - dx_torch_np)
-        dx_match = np.allclose(dx_triton_np, dx_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"\ndx max diff: {dx_diff.max():.2e}")
-        print(f"dx relative error: {(dx_diff / (np.abs(dx_torch_np) + 1e-8)).mean():.2e}")
-        
-        # Compare dgamma
-        dgamma_triton_np = cp.asnumpy(dgamma_triton)
-        dgamma_torch_np = dgamma_torch.detach().cpu().numpy()
-        dgamma_diff = np.abs(dgamma_triton_np - dgamma_torch_np)
-        dgamma_match = np.allclose(dgamma_triton_np, dgamma_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"\ndgamma max diff: {dgamma_diff.max():.2e}")
-        print(f"dgamma relative error: {(dgamma_diff / (np.abs(dgamma_torch_np) + 1e-8)).mean():.2e}")
-        
-        # Compare dbeta
-        dbeta_triton_np = cp.asnumpy(dbeta_triton)
-        dbeta_torch_np = dbeta_torch.detach().cpu().numpy()
-        dbeta_diff = np.abs(dbeta_triton_np - dbeta_torch_np)
-        dbeta_match = np.allclose(dbeta_triton_np, dbeta_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"\ndbeta max diff: {dbeta_diff.max():.2e}")
-        print(f"dbeta relative error: {(dbeta_diff / (np.abs(dbeta_torch_np) + 1e-8)).mean():.2e}")
-        
-        print(f"\nForward:  {'PASS' if forward_match else 'FAIL'}")
-        print(f"dx:       {'PASS' if dx_match else 'FAIL'}")
-        print(f"dgamma:   {'PASS' if dgamma_match else 'FAIL'}")
-        print(f"dbeta:    {'PASS' if dbeta_match else 'FAIL'}")
-        print(f"\nOverall:  {'ALL TESTS PASSED' if all([forward_match, dx_match, dgamma_match, dbeta_match]) else 'SOME TESTS FAILED'}")
-        
-    test()

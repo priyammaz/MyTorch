@@ -4,12 +4,10 @@ Layernorm, just simpler. I used the LigerKernel as a reference!
 https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/rms_norm.py
 """
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
 from .utils import TritonPtr
-from .flags import DLPACK_DISABLE
 from .utils import get_dtype_flag
 
 @triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
@@ -176,80 +174,38 @@ def fused_rmsnorm_forward(x, gamma, eps=1e-5, training=True, use_dlpack=True):
     n_rows, n_cols = x.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    if not DLPACK_DISABLE and use_dlpack:
- 
-        x = torch.utils.dlpack.from_dlpack(x)
-        if gamma is not None:
-            gamma = torch.utils.dlpack.from_dlpack(gamma)
+    y = cp.empty_like(x)
 
-        # Allocate outputs
-        y = torch.empty_like(x)
-        rstd = torch.empty(n_rows, dtype=x.dtype, device=x.device) if training else None
-        
-        # Compute strides
-        x_row_stride = x.stride(0)
-        y_row_stride = y.stride(0)
-        
-        # Map dtype to Triton flag
-        dtype_flag = get_dtype_flag(x.dtype)
-        
-        # Launch kernel
-        grid = (n_rows,)
-        rms_norm_forward_kernel[grid](
-            y, 
-            y_row_stride,
-            rstd,
-            x, 
-            x_row_stride,
-            gamma,
-            DTYPE_FLAG=dtype_flag,
-            eps=eps,
-            n_cols=n_cols,
-            BLOCK_SIZE=BLOCK_SIZE
-        )
-
-        # Convert back to CuPy
-        y = cp.from_dlpack(y)
-
-        if training:
-            rstd = cp.from_dlpack(rstd)
-            return y, rstd
-        
-        return y
+    with cp.cuda.Device(x.device):
+        rstd = cp.empty((n_rows,), dtype=x.dtype)
     
-    else:
-       
-        y = cp.empty_like(x)
-
-        with cp.cuda.Device(x.device):
-            rstd = cp.empty((n_rows,), dtype=x.dtype)
-        
-        # Compute strides in elements
-        x_row_stride = x.strides[0] // x.itemsize
-        y_row_stride = y.strides[0] // y.itemsize
-        
-        # Map dtype to Triton flag
-        dtype_flag = get_dtype_flag(x.dtype)
-        
-        # Launch kernel
-        grid = (n_rows,)
-        rms_norm_forward_kernel[grid](
-            TritonPtr(y),
-            y_row_stride,
-            TritonPtr(rstd) if rstd is not None else None,  
-            TritonPtr(x),
-            x_row_stride,
-            TritonPtr(gamma) if gamma is not None else None,
-            DTYPE_FLAG=dtype_flag,
-            eps=eps,
-            n_cols=n_cols,
-            BLOCK_SIZE=BLOCK_SIZE
-        )
-        
-        if training:
-            return y, rstd
-        return y
-        
+    # Compute strides in elements
+    x_row_stride = x.strides[0] // x.itemsize
+    y_row_stride = y.strides[0] // y.itemsize
+    
+    # Map dtype to Triton flag
+    dtype_flag = get_dtype_flag(x.dtype)
+    
+    # Launch kernel
+    grid = (n_rows,)
+    rms_norm_forward_kernel[grid](
+        TritonPtr(y),
+        y_row_stride,
+        TritonPtr(rstd) if rstd is not None else None,  
+        TritonPtr(x),
+        x_row_stride,
+        TritonPtr(gamma) if gamma is not None else None,
+        DTYPE_FLAG=dtype_flag,
+        eps=eps,
+        n_cols=n_cols,
+        BLOCK_SIZE=BLOCK_SIZE
+    )
+    
+    if training:
+        return y, rstd
+    
+    return y
+    
 def fused_rmsnorm_backward(x, rstd, dy, gamma=None, use_dlpack=True):
     """
     Backward pass for fused RMSNorm using Triton kernel.
@@ -268,161 +224,35 @@ def fused_rmsnorm_backward(x, rstd, dy, gamma=None, use_dlpack=True):
     n_rows, n_cols = dy.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    if not DLPACK_DISABLE and use_dlpack:
-        # Convert to torch
-        x = torch.utils.dlpack.from_dlpack(x)
-        dy = torch.utils.dlpack.from_dlpack(dy)
-        rstd = torch.utils.dlpack.from_dlpack(rstd)
-        gamma = torch.utils.dlpack.from_dlpack(gamma) if gamma is not None else None
+    # CuPy path
+    grad_dtype = cp.float32
+    
+    dx = cp.empty_like(dy)
+    dgamma = cp.zeros((n_cols,), dtype=grad_dtype) if gamma is not None else None
 
-        # KEY: Use FP32 for gradient accumulation
-        grad_dtype = torch.float32
-        
-        # Allocate grads
-        dx = torch.empty_like(dy)
-        dgamma = torch.zeros(n_cols, dtype=grad_dtype, device=dy.device) if gamma is not None else None
+    stride_x = x.strides[0] // x.itemsize
+    stride_dx = dx.strides[0] // dx.itemsize
+    stride_dy = dy.strides[0] // dy.itemsize
+    dtype_flag = get_dtype_flag(dy.dtype)
+    grid = (n_rows,)
 
-        # Compute strides
-        stride_x = x.stride(0)
-        stride_dx = dx.stride(0)
-        stride_dy = dy.stride(0)
-
-        # Dtype flag
-        dtype_flag = get_dtype_flag(dy.dtype)
-
-        # Launch kernel
-        grid = (n_rows,)
-        rmsnorm_kernel_backward[grid](
-            dx, dy, x, gamma, rstd, dgamma,
-            stride_dx, stride_dy, stride_x,
-            dtype_flag, n_cols, BLOCK_SIZE,
-        )
-
-        # Convert back to CuPy
-        dx = cp.from_dlpack(dx)
-        
-        # Convert dgamma back to original dtype
-        if gamma is not None:
-            dgamma = cp.from_dlpack(dgamma.to(gamma.dtype))
-
-    else:
-        # CuPy path
-        grad_dtype = cp.float32
-        
-        dx = cp.empty_like(dy)
-        dgamma = cp.zeros((n_cols,), dtype=grad_dtype) if gamma is not None else None
-
-        stride_x = x.strides[0] // x.itemsize
-        stride_dx = dx.strides[0] // dx.itemsize
-        stride_dy = dy.strides[0] // dy.itemsize
-        dtype_flag = get_dtype_flag(dy.dtype)
-        grid = (n_rows,)
-
-        rmsnorm_kernel_backward[grid](
-            TritonPtr(dx),
-            TritonPtr(dy),
-            TritonPtr(x),
-            TritonPtr(gamma) if gamma is not None else None,
-            TritonPtr(rstd),
-            TritonPtr(dgamma) if gamma is not None else None,
-            stride_dx,
-            stride_dy,
-            stride_x,
-            dtype_flag,
-            n_cols,
-            BLOCK_SIZE,
-        )
-        
-        # Convert back to original dtype
-        if gamma is not None:
-            dgamma = dgamma.astype(gamma.dtype)
+    rmsnorm_kernel_backward[grid](
+        TritonPtr(dx),
+        TritonPtr(dy),
+        TritonPtr(x),
+        TritonPtr(gamma) if gamma is not None else None,
+        TritonPtr(rstd),
+        TritonPtr(dgamma) if gamma is not None else None,
+        stride_dx,
+        stride_dy,
+        stride_x,
+        dtype_flag,
+        n_cols,
+        BLOCK_SIZE,
+    )
+    
+    # Convert back to original dtype
+    if gamma is not None:
+        dgamma = dgamma.astype(gamma.dtype)
    
     return dx, dgamma
-
-if __name__ == "__main__":
-    import numpy as np
-    def test_rmsnorm(dtype=np.float16, batch_size=4, hidden_size=8, eps=1e-6):
- 
-        torch.manual_seed(42)
-        np.random.seed(42)
-        
-        # Create input and weights
-        x_np = np.random.randn(batch_size, hidden_size).astype(dtype)
-        gamma_np = np.random.randn(hidden_size).astype(dtype)
-        
-        # CuPy (for Triton kernels)
-        x_cp = cp.array(x_np)
-        gamma_cp = cp.array(gamma_np)
-        
-        # PyTorch
-        torch_dtype = torch.float32 if dtype == np.float32 else torch.float16
-        x_torch = torch.tensor(x_np, device='cuda', dtype=torch_dtype, requires_grad=True)
-        gamma_torch = torch.tensor(gamma_np, device='cuda', dtype=torch_dtype, requires_grad=True)
-        
-        # Triton forward
-        y_triton, rstd_triton = fused_rmsnorm_forward(
-            x_cp, gamma_cp, eps=eps, training=True, use_dlpack=True
-        )
-        torch_rmsnorm = torch.nn.RMSNorm(hidden_size, eps=eps, elementwise_affine=True).cuda()
-
-        torch_rmsnorm.weight.data = gamma_torch.clone()
-        y_torch = torch_rmsnorm(x_torch)
-        
-
-        y_triton_np = cp.asnumpy(y_triton)
-        y_torch_np = y_torch.detach().cpu().numpy()
-        
-        forward_diff = np.abs(y_triton_np - y_torch_np)
-        forward_match = np.allclose(y_triton_np, y_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"Output max diff: {forward_diff.max():.2e}")
-        
-        # Create upstream gradient - SAME dtype as input!
-        grad_output_np = np.random.randn(batch_size, hidden_size).astype(dtype)
-        grad_output_cp = cp.array(grad_output_np)
-        grad_output_torch = torch.tensor(grad_output_np, device='cuda', dtype=torch_dtype)
-        
-        # Triton backward
-        dx_triton, dgamma_triton = fused_rmsnorm_backward(
-            x_cp, rstd_triton, grad_output_cp, gamma_cp, use_dlpack=True
-        )
-        
-        # PyTorch backward
-        y_torch.backward(grad_output_torch)
-        dx_torch = x_torch.grad
-        dgamma_torch = torch_rmsnorm.weight.grad
-        
-        # Compare dx
-        dx_triton_np = cp.asnumpy(dx_triton)
-        dx_torch_np = dx_torch.detach().cpu().numpy()
-        dx_diff = np.abs(dx_triton_np - dx_torch_np)
-        dx_rel_diff = dx_diff / (np.abs(dx_torch_np) + 1e-8)
-        dx_match = np.allclose(dx_triton_np, dx_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"\ndx max diff: {dx_diff.max():.2e}")
-        print(f"dx max relative diff: {dx_rel_diff.max():.2e}")
-        
-        # Compare dgamma
-        dgamma_triton_np = cp.asnumpy(dgamma_triton)
-        dgamma_torch_np = dgamma_torch.detach().cpu().numpy()
-        dgamma_diff = np.abs(dgamma_triton_np - dgamma_torch_np)
-        dgamma_rel_diff = dgamma_diff / (np.abs(dgamma_torch_np) + 1e-8)
-        dgamma_match = np.allclose(dgamma_triton_np, dgamma_torch_np, rtol=1e-2, atol=1e-2)
-        
-        print(f"\ndgamma max diff: {dgamma_diff.max():.2e}")
-        print(f"dgamma max relative diff: {dgamma_rel_diff.max():.2e}")
-
-        print(f"Forward:  {'PASS' if forward_match else 'FAIL'}")
-        print(f"dx:       {'PASS' if dx_match else 'FAIL'}")
-        print(f"dgamma:   {'PASS' if dgamma_match else 'FAIL'}")
-        
-        all_pass = forward_match and dx_match and dgamma_match
-        print(f"\nOverall:  {'ALL TESTS PASSED' if all_pass else 'SOME TESTS FAILED'}")
-        
-        return all_pass
-
-
-    test_fp32 = test_rmsnorm(dtype=np.float32, batch_size=64, hidden_size=8)
-    test_fp16 = test_rmsnorm(dtype=np.float16, batch_size=64, hidden_size=8)
-    test_fp16_large = test_rmsnorm(dtype=np.float16, batch_size=367, hidden_size=768)
-    

@@ -3,11 +3,11 @@ Fused activation inspiration from Attorch!
 https://github.com/BobMcDear/attorch/tree/main/attorch
 """
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .utils import get_dtype_flag, to_torch_dtype
 from .utils import TritonPtr
+from .autotuner_bench import do_bench_cudagraph
 
 def element_wise_kernel_configs():
     return [
@@ -174,6 +174,7 @@ def activation_switcher_backward(name, out_grad, input):
 @triton.autotune(
     configs=element_wise_kernel_configs(),
     key=['n_elements'],
+    do_bench=do_bench_cudagraph
 )
 @triton.jit
 def generic_activation_kernel_forward(
@@ -201,6 +202,7 @@ def generic_activation_kernel_forward(
 @triton.autotune(
     configs=element_wise_kernel_configs(),
     key=['n_elements'],
+    do_bench=do_bench_cudagraph
 )
 @triton.jit
 def generic_activation_kernel_backward(
@@ -244,49 +246,24 @@ def fused_activation_forward(input, act_func, use_dlpack=True):
     orig_dtype = input.dtype
     input = input.reshape(-1)
     n_elements = input.shape[0]
-    
-    if use_dlpack:
+ 
+    ### Make Sure Contiguous ###
+    if not input.flags.c_contiguous:
+        input = cp.ascontiguousarray(input)
 
-        ### Convert to Torch ###
-        input = torch.utils.dlpack.from_dlpack(input)
+    output = cp.empty_like(input, dtype=orig_dtype)
 
-        ### Make Sure Contiguous ###
-        if not input.is_contiguous():
-            input = input.contiguous()
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    generic_activation_kernel_forward[grid](
+        name=act_func,
+        input_ptr=TritonPtr(input), 
+        output_ptr=TritonPtr(output), 
+        n_elements=n_elements,
+        DTYPE_FLAG=get_dtype_flag(input.dtype),
+        OUTPUT_DTYPE_FLAG=get_dtype_flag(orig_dtype)
+    )
 
-        output = torch.empty_like(input, dtype=to_torch_dtype(orig_dtype))
-
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        generic_activation_kernel_forward[grid](
-            name=act_func,
-            input_ptr=input, 
-            output_ptr=output, 
-            n_elements=n_elements,
-            DTYPE_FLAG=get_dtype_flag(input.dtype),
-            OUTPUT_DTYPE_FLAG=get_dtype_flag(orig_dtype)
-        )
-
-        return cp.from_dlpack(output.reshape(orig_shape))
-
-    else:
-
-        ### Make Sure Contiguous ###
-        if not input.flags.c_contiguous:
-            input = cp.ascontiguousarray(input)
-
-        output = cp.empty_like(input, dtype=orig_dtype)
-
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        generic_activation_kernel_forward[grid](
-            name=act_func,
-            input_ptr=TritonPtr(input), 
-            output_ptr=TritonPtr(output), 
-            n_elements=n_elements,
-            DTYPE_FLAG=get_dtype_flag(input.dtype),
-            OUTPUT_DTYPE_FLAG=get_dtype_flag(orig_dtype)
-        )
-
-        return output.reshape(orig_shape)
+    return output.reshape(orig_shape)
 
 def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
     
@@ -298,94 +275,25 @@ def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
     input = input.reshape(-1)
     output_grad = output_grad.reshape(-1)
     n_elements = input.shape[0]
-    
-    if use_dlpack:
 
-        ### Convert to Torch ###
-        input = torch.utils.dlpack.from_dlpack(input)
-        output_grad = torch.utils.dlpack.from_dlpack(output_grad)
+    ### Make Sure Contiguous ###
+    if not input.flags.c_contiguous:
+        input = cp.ascontiguousarray(input)
+    if not output_grad.flags.c_contiguous:
+        output_grad = cp.ascontiguousarray(output_grad)
 
-        ### Make Sure Contiguous ###
-        if not input.is_contiguous():
-            input = input.contiguous()
-        if not output_grad.is_contiguous():
-            output_grad = output_grad.contiguous()
+    input_grad = cp.empty_like(input, dtype=orig_dtype)
 
-        input_grad = torch.empty_like(input, dtype=to_torch_dtype(orig_dtype))
+    grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
+    generic_activation_kernel_backward[grid](
+        name=act_func,
+        input_ptr=TritonPtr(input), 
+        input_grad_ptr=TritonPtr(input_grad),
+        output_grad_ptr=TritonPtr(output_grad), 
+        n_elements=n_elements,
+        DTYPE_FLAG= get_dtype_flag(output_grad.dtype),
+        INPUT_GRAD_DTYPE_FLAG = get_dtype_flag(input_grad.dtype),
+        INPUT_DTYPE_FLAG = get_dtype_flag(input.dtype),
+    )
 
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        generic_activation_kernel_backward[grid](
-            name=act_func,
-            input_ptr=input, 
-            input_grad_ptr=input_grad,
-            output_grad_ptr=output_grad, 
-            n_elements=n_elements,
-            DTYPE_FLAG= get_dtype_flag(output_grad.dtype),
-            INPUT_GRAD_DTYPE_FLAG = get_dtype_flag(input_grad.dtype),
-            INPUT_DTYPE_FLAG = get_dtype_flag(input.dtype),
-        )
-  
-        return cp.from_dlpack(input_grad.reshape(orig_shape))
-
-    else:
-
-        ### Make Sure Contiguous ###
-        if not input.flags.c_contiguous:
-            input = cp.ascontiguousarray(input)
-        if not output_grad.flags.c_contiguous:
-            output_grad = cp.ascontiguousarray(output_grad)
-
-        input_grad = cp.empty_like(input, dtype=orig_dtype)
-
-        grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
-        generic_activation_kernel_backward[grid](
-            name=act_func,
-            input_ptr=TritonPtr(input), 
-            input_grad_ptr=TritonPtr(input_grad),
-            output_grad_ptr=TritonPtr(output_grad), 
-            n_elements=n_elements,
-            DTYPE_FLAG= get_dtype_flag(output_grad.dtype),
-            INPUT_GRAD_DTYPE_FLAG = get_dtype_flag(input_grad.dtype),
-            INPUT_DTYPE_FLAG = get_dtype_flag(input.dtype),
-        )
-
-        return input_grad.reshape(orig_shape)
-
-if __name__ == "__main__":
-
-
-    test_input_gelu = torch.tensor([-3.0, -1.5, -0.5, 0.0, 0.5, 1.5, 3.0], dtype=torch.float16).cuda()
-    test_input_gelu_cp = cp.array(test_input_gelu.detach().cpu().numpy())
-    print(test_input_gelu)
-
-    # Forward pass with custom kernel
-    output_custom_gelu = fused_activation_forward(test_input_gelu_cp, "gelu", use_dlpack=False)
-    print("\nCustom GELU Forward:")
-    print(output_custom_gelu)
-
-    # Forward pass with PyTorch
-    output_torch_gelu = torch.nn.functional.gelu(test_input_gelu, approximate="tanh")
-    print("\nPyTorch GELU Forward:")
-    print(output_torch_gelu)
-
-    # Create upstream gradient
-    upstream_grad_gelu = torch.ones_like(test_input_gelu)
-    upstream_grad_gelu_cp = cp.array(upstream_grad_gelu.detach().cpu().numpy())
-
-    print("\nUpstream Gradient:")
-    print(upstream_grad_gelu)
-
-    # Backward pass with custom kernel
-    input_grad_custom_gelu = fused_activation_backward(test_input_gelu_cp, upstream_grad_gelu_cp, "gelu", use_dlpack=False)
-    print("\nCustom GELU Backward:")
-    print(input_grad_custom_gelu)
-
-    # Backward pass with PyTorch
-    test_input_torch_gelu = test_input_gelu.clone().requires_grad_(True)
-    output_torch_grad_gelu = torch.nn.functional.gelu(test_input_torch_gelu, approximate="tanh")
-    output_torch_grad_gelu.backward(upstream_grad_gelu)
-    print("\nPyTorch GELU Backward:")
-    print(test_input_torch_gelu.grad)
-
-    print("Forward Match:", cp.allclose(output_custom_gelu, cp.array(output_torch_gelu.detach().cpu().numpy()), atol=1e-2))
-    print("Backward Match:", cp.allclose(input_grad_custom_gelu, cp.array(test_input_torch_gelu.grad.detach().cpu().numpy()), atol=1e-2))
+    return input_grad.reshape(orig_shape)

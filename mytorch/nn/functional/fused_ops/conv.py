@@ -19,11 +19,8 @@ Even PyTorch calls CUDNN internally as its just so much faster! And thats why NV
 import cupy as cp
 import triton
 import triton.language as tl
-import torch
-from torch.utils.dlpack import from_dlpack
-from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
-from .utils import get_dtype_flag
-from .utils import TritonPtr
+from .flags import AUTOTUNE_MODE
+from .autotuner_bench import do_bench_cudagraph
 
 def get_forward_autotune_config():
     """
@@ -115,7 +112,8 @@ def get_dweight_autotune_config():
 
 @triton.autotune(
     configs=get_forward_autotune_config(),
-    key=['B', 'C_in', 'H_in', 'W_in', 'C_out', 'H_out', 'W_out', 'K_h', 'K_w', 'str_h', 'str_w', 'pad_h', 'pad_w', 'dil_h', 'dil_w']
+    key=['B', 'C_in', 'H_in', 'W_in', 'C_out', 'H_out', 'W_out', 'K_h', 'K_w', 'str_h', 'str_w', 'pad_h', 'pad_w', 'dil_h', 'dil_w'], 
+    do_bench=do_bench_cudagraph
 )
 @triton.jit
 def _implicit_gemm_conv2d_fwd_kernel(
@@ -288,7 +286,7 @@ def _implicit_gemm_conv2d_fwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast Pointers to Correct Dtype ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_type))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
     weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
@@ -536,7 +534,8 @@ def _implicit_gemm_conv2d_fwd_kernel(
 
 @triton.autotune(
     configs=get_dinput_autotune_config(),
-    key=['B', 'C_in', 'H_in', 'W_in', 'C_out', 'H_out', 'W_out', 'K_h', 'K_w', 'str_h', 'str_w', 'pad_h', 'pad_w', 'dil_h', 'dil_w']
+    key=['B', 'C_in', 'H_in', 'W_in', 'C_out', 'H_out', 'W_out', 'K_h', 'K_w', 'str_h', 'str_w', 'pad_h', 'pad_w', 'dil_h', 'dil_w'],
+    do_bench=do_bench_cudagraph
 )
 @triton.jit
 def _implicit_gemm_conv2d_input_bwd_kernel(
@@ -597,7 +596,7 @@ def _implicit_gemm_conv2d_input_bwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     dinput_ptr = tl.cast(dinput_ptr, tl.pointer_type(pointer_type))
     doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
     weight_ptr = tl.cast(weight_ptr, tl.pointer_type(pointer_type))
@@ -711,7 +710,8 @@ def _implicit_gemm_conv2d_input_bwd_kernel(
 
 @triton.autotune(
     configs=get_dweight_autotune_config(),
-    key=['B', 'C_in', 'H_in', 'W_in', 'C_out', 'H_out', 'W_out', 'K_h', 'K_w', 'str_h', 'str_w', 'pad_h', 'pad_w', 'dil_h', 'dil_w']
+    key=['B', 'C_in', 'H_in', 'W_in', 'C_out', 'H_out', 'W_out', 'K_h', 'K_w', 'str_h', 'str_w', 'pad_h', 'pad_w', 'dil_h', 'dil_w'],
+    do_bench=do_bench_cudagraph
 )
 @triton.jit
 def _implicit_gemm_conv2d_weight_bwd_kernel(
@@ -782,7 +782,7 @@ def _implicit_gemm_conv2d_weight_bwd_kernel(
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     dweight_ptr = tl.cast(dweight_ptr, tl.pointer_type(pointer_type))
     doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_type))
@@ -892,7 +892,7 @@ def _implicit_gemm_conv2d_bias_bwd_kernel(
     k = tl.program_id(0)
     
     ### Cast our Pointers ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
     dbias = tl.cast(dbias, tl.pointer_type(pointer_type))
     doutput_ptr = tl.cast(doutput_ptr, tl.pointer_type(pointer_type))
 
@@ -961,99 +961,47 @@ def fused_conv2d_forward(input, weight, bias, stride, padding, dilation, use_dlp
     GEMM_N = C_out
     GEMM_K = C_in * K_h * K_w
 
-    if not DLPACK_DISABLE and use_dlpack:
+    if not input.flags.c_contiguous:
+        input = cp.ascontiguousarray(input)
+    if not weight.flags.c_contiguous:
+        weight = cp.ascontiguousarray(weight)
+    if bias is not None:
+        if not bias.flags.c_contiguous:
+            bias = cp.ascontiguousarray(bias)
 
-        input = from_dlpack(input)
-        weight = from_dlpack(weight)
-        if bias is not None:
-            bias = from_dlpack(bias)
-        
-        if not input.is_contiguous():
-            input = input.contiguous()
-        if not weight.is_contiguous():
-            weight = weight.contiguous()
-        if bias is not None:
-            if not bias.is_contiguous():
-                bias = bias.contiguous()
-
-        ### We know what the output shape should be already as well!
-        output = torch.empty((B, C_out, H_out, W_out), dtype=input.dtype, device=input.device)
-        grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
-
-        _implicit_gemm_conv2d_fwd_kernel[grid](
-            output, 
-            input, 
-            weight, 
-            bias, 
-            B, 
-            C_in, 
-            H_in, 
-            W_in, 
-            C_out, 
-            H_out, 
-            W_out, 
-            K_h, 
-            K_w, 
-            str_h, 
-            str_w, 
-            pad_h, 
-            pad_w, 
-            dil_h, 
-            dil_w,
-            GEMM_M, 
-            GEMM_N, 
-            GEMM_K,
-            DTYPE_FLAG=get_dtype_flag(input.dtype)
-        )
-
-        if not output.is_contiguous():
-            output = output.contiguous()
-
-        return cp.from_dlpack(output) 
+    ### We know what the output shape should be already as well!
+    with cp.cuda.Device(input.device.id):
+        output = cp.empty((B, C_out, H_out, W_out), dtype=input.dtype)
     
-    else:
+    grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
 
-        if not input.flags.c_contiguous:
-            input = cp.ascontiguousarray(input)
-        if not weight.flags.c_contiguous:
-            weight = cp.ascontiguousarray(weight)
-        if bias is not None:
-            if not bias.flags.c_contiguous:
-                bias = cp.ascontiguousarray(bias)
+    _implicit_gemm_conv2d_fwd_kernel[grid](
+        output.data.ptr, 
+        input.data.ptr, 
+        weight.data.ptr, 
+        bias.data.ptr if bias is not None else None, 
+        B, 
+        C_in, 
+        H_in, 
+        W_in, 
+        C_out, 
+        H_out, 
+        W_out, 
+        K_h, 
+        K_w, 
+        str_h, 
+        str_w, 
+        pad_h, 
+        pad_w, 
+        dil_h, 
+        dil_w,
+        GEMM_M, 
+        GEMM_N, 
+        GEMM_K,
+        DTYPE_FLAG=0 if input.dtype == cp.float32 else 1
+    )
 
-        ### We know what the output shape should be already as well!
-        with cp.cuda.Device(input.device.id):
-            output = cp.empty((B, C_out, H_out, W_out), dtype=input.dtype)
-        
-        grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
-
-        _implicit_gemm_conv2d_fwd_kernel[grid](
-            TritonPtr(output), 
-            TritonPtr(input), 
-            TritonPtr(weight), 
-            TritonPtr(bias) if bias is not None else None, 
-            B, 
-            C_in, 
-            H_in, 
-            W_in, 
-            C_out, 
-            H_out, 
-            W_out, 
-            K_h, 
-            K_w, 
-            str_h, 
-            str_w, 
-            pad_h, 
-            pad_w, 
-            dil_h, 
-            dil_w,
-            GEMM_M, 
-            GEMM_N, 
-            GEMM_K,
-            DTYPE_FLAG=get_dtype_flag(input.dtype)
-        )
-
-        return output
+    return output
 
 def fused_conv2d_input_bwd(doutput, weight, H_in, W_in, stride, padding, dilation, use_dlpack=True):
 
@@ -1096,87 +1044,43 @@ def fused_conv2d_input_bwd(doutput, weight, H_in, W_in, stride, padding, dilatio
     GEMM_M = B * H_in * W_in
     GEMM_N = C_in
     GEMM_K = C_out * K_h * K_w
-
-    if not DLPACK_DISABLE and use_dlpack:
-
-        doutput = from_dlpack(doutput)
-        weight = from_dlpack(weight)
-
-        if not doutput.is_contiguous():
-            doutput = doutput.contiguous()
-        if not weight.is_contiguous():
-            weight = weight.contiguous()
-
-
-        dinput = torch.empty((B, C_in, H_in, W_in), dtype=doutput.dtype, device=doutput.device)
         
-        grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
+    if not doutput.flags.c_contiguous:
+        doutput = cp.ascontiguousarray(doutput)
+    if not weight.flags.c_contiguous:
+        weight = cp.ascontiguousarray(weight)
 
-        _implicit_gemm_conv2d_input_bwd_kernel[grid](
-            dinput, 
-            doutput, 
-            weight, 
-            B, 
-            C_in, 
-            H_in, 
-            W_in, 
-            C_out, 
-            H_out, 
-            W_out, 
-            K_h,
-            K_w, 
-            str_h, 
-            str_w, 
-            pad_h, 
-            pad_w, 
-            dil_h, 
-            dil_w,
-            GEMM_M, 
-            GEMM_N, 
-            GEMM_K,
-            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
-        )
+    with cp.cuda.Device(doutput.device.id):
+        dinput = cp.empty((B, C_in, H_in, W_in), dtype=doutput.dtype)
+    
+    grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
 
-        return cp.from_dlpack(dinput) 
+    _implicit_gemm_conv2d_input_bwd_kernel[grid](
+        dinput.data.ptr, 
+        doutput.data.ptr, 
+        weight.data.ptr, 
+        B, 
+        C_in, 
+        H_in, 
+        W_in, 
+        C_out, 
+        H_out, 
+        W_out, 
+        K_h,
+        K_w, 
+        str_h, 
+        str_w, 
+        pad_h, 
+        pad_w, 
+        dil_h, 
+        dil_w,
+        GEMM_M, 
+        GEMM_N, 
+        GEMM_K,
+        DTYPE_FLAG=0 if doutput.dtype == cp.float32 else 1
+    )
 
-    else:
-        
-        if not doutput.flags.c_contiguous:
-            doutput = cp.ascontiguousarray(doutput)
-        if not weight.flags.c_contiguous:
-            weight = cp.ascontiguousarray(weight)
-
-        with cp.cuda.Device(doutput.device.id):
-            dinput = cp.empty((B, C_in, H_in, W_in), dtype=doutput.dtype)
-        
-        grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
-
-        _implicit_gemm_conv2d_input_bwd_kernel[grid](
-            TritonPtr(dinput), 
-            TritonPtr(doutput), 
-            TritonPtr(weight), 
-            B, 
-            C_in, 
-            H_in, 
-            W_in, 
-            C_out, 
-            H_out, 
-            W_out, 
-            K_h,
-            K_w, 
-            str_h, 
-            str_w, 
-            pad_h, 
-            pad_w, 
-            dil_h, 
-            dil_w,
-            GEMM_M, 
-            GEMM_N, 
-            GEMM_K,
-            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
-        )
-
-        return dinput
+    return dinput
 
 def fused_conv2d_weight_bwd(doutput, input, K_h, K_w, stride, padding, dilation, use_dlpack=True):
 
@@ -1233,86 +1137,43 @@ def fused_conv2d_weight_bwd(doutput, input, K_h, K_w, stride, padding, dilation,
     GEMM_M = C_out
     GEMM_N = C_in * K_h * K_w
     GEMM_K = B * H_out * W_out
-
-    if not DLPACK_DISABLE and use_dlpack:
-
-        doutput = from_dlpack(doutput)
-        input = from_dlpack(input)
-
-        if not doutput.is_contiguous():
-            doutput = doutput.contiguous()
-        if not input.is_contiguous():
-            input = input.contiguous()
-
-        dweight = torch.empty((C_out, C_in, K_h, K_w), dtype=doutput.dtype, device=doutput.device)
         
-        grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
-
-        _implicit_gemm_conv2d_weight_bwd_kernel[grid](
-            dweight, 
-            doutput, 
-            input, 
-            B, 
-            C_in, 
-            H_in, 
-            W_in, 
-            C_out, 
-            H_out, 
-            W_out, 
-            K_h, 
-            K_w, 
-            str_h, 
-            str_w, 
-            pad_h, 
-            pad_w, 
-            dil_h, 
-            dil_w,
-            GEMM_M, 
-            GEMM_N, 
-            GEMM_K,
-            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
-        )
-
-        return cp.from_dlpack(dweight)
+    if not input.flags.c_contiguous:
+        input = cp.ascontiguousarray(input)
+    if not doutput.flags.c_contiguous:
+        doutput = cp.ascontiguousarray(doutput)
+        
+    with cp.cuda.Device(input.device.id):
+        dweight = cp.empty((C_out, C_in, K_h, K_w), dtype=doutput.dtype)
     
-    else:
-        
-        if not input.flags.c_contiguous:
-            input = cp.ascontiguousarray(input)
-        if not doutput.flags.c_contiguous:
-            doutput = cp.ascontiguousarray(doutput)
-            
-        with cp.cuda.Device(input.device.id):
-            dweight = cp.empty((C_out, C_in, K_h, K_w), dtype=doutput.dtype)
-        
-        grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
+    grid = lambda META: (triton.cdiv(GEMM_M, META['BLOCK_SIZE_M']) * triton.cdiv(GEMM_N, META['BLOCK_SIZE_N']), )
 
-        _implicit_gemm_conv2d_weight_bwd_kernel[grid](
-            TritonPtr(dweight), 
-            TritonPtr(doutput), 
-            TritonPtr(input), 
-            B, 
-            C_in, 
-            H_in, 
-            W_in, 
-            C_out, 
-            H_out, 
-            W_out, 
-            K_h, 
-            K_w, 
-            str_h, 
-            str_w, 
-            pad_h, 
-            pad_w, 
-            dil_h, 
-            dil_w,
-            GEMM_M, 
-            GEMM_N, 
-            GEMM_K,
-            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
-        )
+    _implicit_gemm_conv2d_weight_bwd_kernel[grid](
+        dweight.data.ptr, 
+        doutput.data.ptr, 
+        input.data.ptr, 
+        B, 
+        C_in, 
+        H_in, 
+        W_in, 
+        C_out, 
+        H_out, 
+        W_out, 
+        K_h, 
+        K_w, 
+        str_h, 
+        str_w, 
+        pad_h, 
+        pad_w, 
+        dil_h, 
+        dil_w,
+        GEMM_M, 
+        GEMM_N, 
+        GEMM_K,
+        DTYPE_FLAG=0 if doutput.dtype == cp.float32 else 1
+    )
 
-        return dweight
+    return dweight
 
 def fused_conv2d_bias_bwd(doutput, use_dlpack=True):
     B, C_out, H_out, W_out = doutput.shape
@@ -1322,48 +1183,24 @@ def fused_conv2d_bias_bwd(doutput, use_dlpack=True):
     ### just a simple reduction op (probably dont even keen a kernel for it!)
     BLOCK_SIZE = triton.next_power_of_2(H_out * W_out)
 
-    if not DLPACK_DISABLE and use_dlpack:
+    if not doutput.flags.c_contiguous:
+        doutput = cp.ascontiguousarray(doutput)
 
-        doutput = from_dlpack(doutput)
+    with cp.cuda.Device(doutput.device.id):
+        dbias = cp.empty((C_out), dtype=doutput.dtype)
 
-        if not doutput.is_contiguous():
-            doutput = doutput.contiguous()
+    _implicit_gemm_conv2d_bias_bwd_kernel[C_out, ](
+        dbias.data.ptr, 
+        doutput.data.ptr, 
+        B, 
+        C_out, 
+        H_out, 
+        W_out, 
+        BLOCK_SIZE,
+        DTYPE_FLAG=0 if doutput.dtype == cp.float32 else 1
+    )
 
-        dbias = torch.empty((C_out), dtype=doutput.dtype, device=doutput.device)
-
-        _implicit_gemm_conv2d_bias_bwd_kernel[C_out, ](
-            dbias, 
-            doutput, 
-            B, 
-            C_out, 
-            H_out, 
-            W_out, 
-            BLOCK_SIZE,
-            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
-        )
-
-        return cp.from_dlpack(dbias)
-    
-    else:
-
-        if not doutput.flags.c_contiguous:
-            doutput = cp.ascontiguousarray(doutput)
-
-        with cp.cuda.Device(doutput.device.id):
-            dbias = cp.empty((C_out), dtype=doutput.dtype)
-
-        _implicit_gemm_conv2d_bias_bwd_kernel[C_out, ](
-            TritonPtr(dbias), 
-            TritonPtr(doutput), 
-            B, 
-            C_out, 
-            H_out, 
-            W_out, 
-            BLOCK_SIZE,
-            DTYPE_FLAG=get_dtype_flag(doutput.dtype)
-        )
-
-        return dbias
+    return dbias
 
 def fused_conv2d_backward(doutput, input, weight, bias, H_in, W_in, K_h, K_w, stride, padding, dilation, use_dlpack=True):
     

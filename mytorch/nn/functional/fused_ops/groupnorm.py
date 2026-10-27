@@ -11,13 +11,17 @@ https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/group_no
 """
 
 import cupy as cp
-import torch
-import torch.nn as nn
 import triton
 import triton.language as tl
 from triton.language.math import rsqrt
 from utils import calc_num_warps
 
+try:
+    import torch
+    import torch.nn as nn
+except ImportError:
+    print("GroupNorm Currently Has a Torch Dependency!")
+    
 def groupnorm_naive(x, weight, bias=None, num_groups=32, eps=1e-5):
     """
     Naive GroupNorm implementation for testing

@@ -5,16 +5,8 @@ This is the backward of advanced indexing (Tensor.__getitem__ with integer array
 embeddings (F.embedding is just weight[indices]). It follows PyTorch's embedding_dense_backward:
 
 1. argsort the indices so duplicates become contiguous runs
-2. one GPU program per sorted position; only the first position of each run does work. It sums the run
+2. one GPU program per sorted position, only the first position of each run does work. It sums the run
    sequentially (in float32) and adds that sum into rows[index] exactly once
-
-Every destination row has a single writer, so there are no races and no tl.atomic_add. We never allocate
-a (num_rows x row_size) scratch buffer or cast the destination, and it works in float32/float16/bfloat16
-directly, which also lets us accumulate straight into an existing gradient (e.g. tied embeddings).
-
-Cost is proportional to the number of indices. Very long runs of one index are summed by a single
-program so they are the slow case (a batch that is 100% one token is ~10x slower than PyTorch, real
-text is on par)
 """
 
 import cupy as cp
@@ -111,25 +103,3 @@ def sorted_segment_add(rows, index, values):
             SRC_DTYPE_FLAG=get_dtype_flag(values.dtype),
         )
     return rows
-
-
-if __name__ == "__main__":
-    import cupyx
-
-    for dtype in ["float32", "float16", "bfloat16"]:
-        for num_rows, row_shape, n, transposed in [(10, (16,), 64, False), (50257, (768,), 8192, False), (100, (), 5000, False),
-                                                   (7, (3, 5000), 40, False), (50257, (768,), 8192, True), (300, (5,), 999, True)]:
-            index = cp.random.randint(0, num_rows, n)
-            values = cp.random.standard_normal((n,) + row_shape, dtype=cp.float32).astype(dtype)
-            rows = cp.random.standard_normal((num_rows,) + row_shape, dtype=cp.float32).astype(dtype)
-            if transposed:
-                rows = cp.ascontiguousarray(rows.T).T
-
-            expected = rows.astype(cp.float32)
-            cupyx.scatter_add(expected, index, values.astype(cp.float32))
-            sorted_segment_add(rows, index, values)
-
-            err = float(cp.abs(rows.astype(cp.float32) - expected.astype(dtype).astype(cp.float32)).max())
-            assert err == 0.0 or (dtype == "float32" and err < 1e-3), (dtype, num_rows, row_shape, err)
-            print(f"{dtype:9s} rows={num_rows:6d} row_shape={str(row_shape):10s} n={n:5d} transposed={transposed!s:5s} maxerr={err:.2e}")
-    print("sorted_segment_add matches cupyx.scatter_add")

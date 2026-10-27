@@ -2,12 +2,10 @@
 Inspired by https://github.com/lucidrains/triton-transformer/blob/main/triton_transformer/softmax.py
 """
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
 from .utils import TritonPtr
-from .flags import DLPACK_DISABLE
 from .utils import get_dtype_flag
 
 def naive_softmax(x):
@@ -362,266 +360,48 @@ def fused_softmax_forward(x, use_dlpack=True):
     n_rows, n_cols = x.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    if not DLPACK_DISABLE and use_dlpack:
+    y = cp.empty_like(x)
 
-        x = torch.utils.dlpack.from_dlpack(x)
-        y = torch.empty_like(x)
+    # Compute strides in elements
+    row_stride = x.strides[0] // x.itemsize
 
-        dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
-        row_stride = x.stride(0)
+    # Map dtype to Triton flag
+    dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
 
-        grid = (n_rows,)
-        softmax_kernel_forward[grid](
-            y,       # output_ptr
-            x,       # input_ptr
-            row_stride,       # input_row_stride
-            row_stride,       # output_row_stride
-            dtype_flag,       # dtype_flag (constexpr)
-            n_cols,           # n_cols (constexpr)
-            BLOCK_SIZE        # BLOCK_SIZE (constexpr)
-        )
-        
-        return cp.from_dlpack(y)
+    grid = (n_rows,)
+    softmax_kernel_forward[grid](
+        TritonPtr(y),       # output_ptr
+        TritonPtr(x),       # input_ptr
+        row_stride,       # input_row_stride
+        row_stride,       # output_row_stride
+        dtype_flag,       # dtype_flag (constexpr)
+        n_cols,           # n_cols (constexpr)
+        BLOCK_SIZE        # BLOCK_SIZE (constexpr)
+    )
 
-
-    else:
-
-        y = cp.empty_like(x)
-
-        # Compute strides in elements
-        row_stride = x.strides[0] // x.itemsize
-
-        # Map dtype to Triton flag
-        dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
-
-        grid = (n_rows,)
-        softmax_kernel_forward[grid](
-            TritonPtr(y),       # output_ptr
-            TritonPtr(x),       # input_ptr
-            row_stride,       # input_row_stride
-            row_stride,       # output_row_stride
-            dtype_flag,       # dtype_flag (constexpr)
-            n_cols,           # n_cols (constexpr)
-            BLOCK_SIZE        # BLOCK_SIZE (constexpr)
-        )
-
-        return y
+    return y
 
 def fused_softmax_backward(grad, s, use_dlpack=True):
 
     n_rows, n_cols = grad.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
 
-    if not DLPACK_DISABLE and use_dlpack:
-        
-        grad = torch.utils.dlpack.from_dlpack(grad)
-        s = torch.utils.dlpack.from_dlpack(s)
+    grad_input = cp.empty_like(grad)
 
-        grad_input = torch.empty_like(grad)
-        row_stride = grad.stride(0)
-        dtype_flag = get_dtype_flag(grad.dtype)
+    row_stride = grad.strides[0] // grad.itemsize
 
-        grid = (n_rows,)
-        softmax_kernel_backward[grid](
-            grad_input,           # output_ptr
-            row_stride,           # output_row_stride
-            s,                    # s_ptr
-            row_stride,           # s_row_stride
-            grad,                 # grad_ptr
-            row_stride,           # grad_row_stride
-            dtype_flag,           # dtype_flag (constexpr)
-            n_cols,               # n_cols (constexpr)
-            BLOCK_SIZE            # BLOCK_SIZE (constexpr)
-        )
+    dtype_flag = get_dtype_flag(grad.dtype)
 
-        return cp.from_dlpack(grad_input)
-
-    else:
-        grad_input = cp.empty_like(grad)
-
-        row_stride = grad.strides[0] // grad.itemsize
-
-        dtype_flag = get_dtype_flag(grad.dtype)
-
-        grid = (n_rows,)
-        softmax_kernel_backward[grid](
-            TritonPtr(grad_input),  # output_ptr
-            row_stride,           # output_row_stride
-            TritonPtr(s),           # s_ptr
-            row_stride,           # s_row_stride
-            TritonPtr(grad),        # grad_ptr
-            row_stride,           # grad_row_stride
-            dtype_flag,           # dtype_flag (constexpr)
-            n_cols,               # n_cols (constexpr)
-            BLOCK_SIZE            # BLOCK_SIZE (constexpr)
-        )
-        return grad_input
-
-if __name__ == "__main__":
-
-    import torch
-    import time
-    import matplotlib.pyplot as plt
-
-    ### TORCH KERNELS FOR COMPARISON ###
-    # PyTorch wrappers
-    def fused_torch_softmax_forward(x):
-        n_rows, n_cols = x.shape
-        y = torch.empty_like(x)
-        BLOCK_SIZE = triton.next_power_of_2(n_cols)
-        dtype_flag = get_dtype_flag(x.dtype)
-        grid = (n_rows,)
-        softmax_kernel_forward[grid](
-            y, x,
-            x.shape[1], y.shape[1],
-            dtype_flag, n_cols, BLOCK_SIZE
-        )
-        return y
-
-    def fused_torch_softmax_backward(grad, s):
-        n_rows, n_cols = grad.shape
-        grad_input = torch.empty_like(grad)
-        BLOCK_SIZE = triton.next_power_of_2(n_cols)
-        dtype_flag = get_dtype_flag(grad.dtype)
-        grid = (n_rows,)
-        softmax_kernel_backward[grid](
-            grad_input, grad_input.shape[1],
-            s, s.shape[1],
-            grad, grad.shape[1],
-            dtype_flag, n_cols, BLOCK_SIZE
-        )
-        return grad_input
-        
-    def test_forward(N, M, n_trials=500):
-        print(f"=== N={N}, M={M} ===")
-
-        x_torch = torch.randn(N, M, device='cuda', dtype=torch.float32)
-        x_cupy = cp.array(x_torch.detach().cpu().numpy(), dtype=cp.float32)
-
-        # FLOPs estimate
-        flops = 5 * N * M
-
-        ### PyTorch softmax ###
-        torch.cuda.synchronize()
-        t0 = time.time()
-        for _ in range(n_trials):
-            y_pt = torch.softmax(x_torch, dim=-1)
-        torch.cuda.synchronize()
-        t_pt = (time.time() - t0) / n_trials
-        flops_pt = flops / t_pt / 1e9  # GFLOPS
-
-        ### Naive CuPy ###
-        cp.cuda.runtime.deviceSynchronize()
-        t0 = time.time()
-        for _ in range(n_trials):
-            y_naive = naive_softmax(x_cupy)
-        cp.cuda.runtime.deviceSynchronize()
-        t_naive = (time.time() - t0) / n_trials
-        flops_naive = flops / t_naive / 1e9
-
-
-        ### Triton LayerNorm on CuPy ###
-        # Warmup: run once to JIT compile kernel and load it on GPU
-        _ = fused_softmax_forward(x_cupy)
-        cp.cuda.runtime.deviceSynchronize()
-
-        t0 = time.time()
-        for _ in range(n_trials):
-            y_triton_cupy = fused_softmax_forward(x_cupy)
-        cp.cuda.runtime.deviceSynchronize()
-        t_triton_cupy = (time.time() - t0) / n_trials
-        flops_triton_cupy = flops / t_triton_cupy / 1e9
-
-        # Verify correctness
-        max_diff_naive = cp.max(cp.abs(y_naive - cp.array(torch.softmax(x_torch, dim=-1).cpu().numpy()))).item()
-        max_diff_triton_cupy = cp.max(cp.abs(y_triton_cupy - cp.array(torch.softmax(x_torch, dim=-1).cpu().numpy()))).item()
-
-        print(f"PyTorch softmax:   {t_pt*1000:.2f} ms, {flops_pt:.2f} GFLOP/s")
-        print(f"Naive CuPy:        {t_naive*1000:.2f} ms, {flops_naive:.2f} GFLOP/s, max diff {max_diff_naive:.3e}")
-        print(f"Triton CuPy:       {t_triton_cupy*1000:.2f} ms, {flops_triton_cupy:.2f} GFLOP/s, max diff {max_diff_triton_cupy:.3e}")
-        print("-"*50)
-
-        return {
-            "M": M,
-            "pt_time": t_pt*1000, "pt_flops": flops_pt,
-            "naive_time": t_naive*1000, "naive_flops": flops_naive,
-            "triton_cupy_time": t_triton_cupy*1000, "triton_cupy_flops": flops_triton_cupy,
-        }
-
-    sizes = torch.arange(128, 16385, 128)
-    sizes = [(4096, 128), (4096, 256), (4096, 512), (4096, 1024), (4096, 2048), (4096, 4096),(4096, 8192)]
-
-    results = []
-    for N, M in sizes:
-        results.append(test_forward(N, M, n_trials=10))
-
-    # Convert to plotting arrays
-    Ms = [r["M"] for r in results][1:]
-
-    plt.figure(figsize=(10,5))
-    # --- Time plot ---
-    plt.subplot(1,2,1)
-    plt.plot(Ms, [r["pt_time"] for r in results][1:], "-o", label="Pytorch", linewidth=5)
-    plt.plot(Ms, [r["naive_time"] for r in results][1:], "-o", label="Naive CuPy", linewidth=5)
-    plt.plot(Ms, [r["triton_cupy_time"] for r in results][1:], "-o", label="Triton CuPy", linewidth=5)
-    plt.xlabel("Sequence length (M)")
-    plt.ylabel("Time (ms)")
-    plt.title("Softmax Runtime vs Sequence Length")
-    plt.legend()
-    plt.grid(True)
-
-    # --- FLOPs plot ---
-    plt.subplot(1,2,2)
-    plt.plot(Ms, [r["pt_flops"] for r in results][1:], "-o", label="Pytorch", linewidth=5)
-    plt.plot(Ms, [r["naive_flops"] for r in results][1:], "-o", label="Naive CuPy", linewidth=5)
-    plt.plot(Ms, [r["triton_cupy_flops"] for r in results][1:], "-o", label="Triton CuPy", linewidth=5)
-    plt.xlabel("Sequence length (M)")
-    plt.ylabel("Throughput (GFLOP/s)")
-    plt.title("Softmax FLOPs vs Sequence Length")
-    plt.legend()
-    plt.grid(True)
-
-    plt.tight_layout()
-    plt.savefig("benchmark/softmax.png")
-    plt.show()
-
-    def test_backward(N=1024, M=512):
-        print(f"=== Backward Test: N={N}, M={M} ===")
-
-        # --------------------------
-        # Torch setup
-        # --------------------------
-        x_torch = torch.randn(N, M, device="cuda", dtype=torch.float32, requires_grad=True)
-        y_pt = torch.softmax(x_torch, dim=-1)
-
-        grad_out_torch = torch.randn_like(x_torch)
-
-        # Torch backward
-        y_pt.backward(grad_out_torch)
-        grad_pt = x_torch.grad.detach()
-
-        # --------------------------
-        # CuPy setup
-        # --------------------------
-        x_cupy = cp.array(x_torch.detach().cpu().numpy(), dtype=cp.float32)
-        s_cupy = cp.array(y_pt.detach().cpu().numpy(), dtype=cp.float32)
-        grad_out_cupy = cp.array(grad_out_torch.detach().cpu().numpy(), dtype=cp.float32)
-
-        # Triton backward (CuPy)
-        grad_triton_cupy = fused_softmax_backward(grad_out_cupy, s_cupy)
-
-        # --------------------------
-        # Compare results
-        # --------------------------
-        grad_triton_torch = torch.from_numpy(cp.asnumpy(grad_triton_cupy)).to("cuda")
-
-        max_diff = (grad_triton_torch - grad_pt).abs().max().item()
-        print(f"Max abs diff: {max_diff:.3e}")
-        print("-"*50)
-
-        return max_diff
-
-
-    # Run test for a few sizes
-    for N, M in [(4, 8), (128, 256), (1024, 512), (1024, 2048)]:
-        test_backward(N, M)
+    grid = (n_rows,)
+    softmax_kernel_backward[grid](
+        TritonPtr(grad_input),  # output_ptr
+        row_stride,           # output_row_stride
+        TritonPtr(s),           # s_ptr
+        row_stride,           # s_row_stride
+        TritonPtr(grad),        # grad_ptr
+        row_stride,           # grad_row_stride
+        dtype_flag,           # dtype_flag (constexpr)
+        n_cols,               # n_cols (constexpr)
+        BLOCK_SIZE            # BLOCK_SIZE (constexpr)
+    )
+    return grad_input

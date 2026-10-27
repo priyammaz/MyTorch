@@ -6,7 +6,6 @@ Code inspiration came from Liger Kernels: https://github.com/linkedin/Liger-Kern
 """
 
 import os
-import torch
 import cupy as cp
 import triton
 import triton.language as tl
@@ -120,109 +119,54 @@ def fused_embedding_forward(embeddings, indices, use_dlpack=True):
         assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
         assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
 
-    if use_dlpack:
+    ### Get the original shape ###
+    original_indices_shape = indices.shape
 
-        ### Get the original shape ###
-        original_indices_shape = indices.shape
+    ### Flatten ###
+    indices = indices.reshape(-1)
 
-        ### Flatten ###
-        indices = indices.reshape(-1)
+    ### Check Contiguous ###
+    if not embeddings.flags.c_contiguous:
+        embeddings = cp.ascontiguousarray(embeddings)
+    if not indices.flags.c_contiguous:
+        indices = cp.ascontiguousarray(indices)
 
-        ### Convert to torch ###
-        embeddings = torch.utils.dlpack.from_dlpack(embeddings)
-        indices = torch.utils.dlpack.from_dlpack(indices)
-        
-        ### Check Contiguous ###
-        if not embeddings.is_contiguous():
-            embeddings = embeddings.contiguous()
-        if not indices.is_contiguous():
-            indices = indices.contiguous()
-
-        ### Create an empty output to copy embeds into ###
-        output = torch.empty(
-            indices.shape[0], # Number of tokens in total  
-            embeddings.shape[1], # Embed dim per token
-            device=indices.device, 
+    ### Create an empty output to copy embeds into ###
+    with cp.cuda.Device(indices.device.id):
+        output = cp.empty(
+            (indices.shape[0], embeddings.shape[1]),
             dtype=embeddings.dtype
         )
 
-        ### Get our dimensions ###
-        n_elements = indices.shape[0]
-        embed_dim = embeddings.shape[1]
+    ### Get our dimensions ###
+    n_elements = indices.shape[0]
+    embed_dim = embeddings.shape[1]
 
-        ### Vocab size is typically much larger than the embed_dim so lets set our ###
-        ### block size based on the embed dim! ###
-        BLOCK_SIZE_M = triton.next_power_of_2(min(128, embed_dim))
-        BLOCK_SIZE_N = triton.next_power_of_2(min(128, embed_dim))
-        
-        grid = (
-            triton.cdiv(n_elements, BLOCK_SIZE_M),
-            triton.cdiv(embed_dim, BLOCK_SIZE_N)
-        )
-
-        embedding_forward_kernel[grid](
-            embeddings_ptr=embeddings, 
-            indices_ptr=indices, 
-            output_ptr=output, 
-            n_elements=n_elements, 
-            embedding_dim=embed_dim, 
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
-        )
-        output = output.contiguous()
-        return cp.from_dlpack(output.reshape(*original_indices_shape, -1))
+    ### Vocab size is typically much larger than the embed_dim so lets set our ###
+    ### block size based on the embed dim! ###
+    BLOCK_SIZE_M = triton.next_power_of_2(min(128, embed_dim))
+    BLOCK_SIZE_N = triton.next_power_of_2(min(128, embed_dim))
     
-    else:
+    grid = (
+        triton.cdiv(n_elements, BLOCK_SIZE_M),
+        triton.cdiv(embed_dim, BLOCK_SIZE_N)
+    )
 
-        ### Get the original shape ###
-        original_indices_shape = indices.shape
+    embedding_forward_kernel[grid](
+        embeddings_ptr=embeddings.data.ptr, 
+        indices_ptr=indices.data.ptr, 
+        output_ptr=output.data.ptr, 
+        n_elements=n_elements, 
+        embedding_dim=embed_dim, 
+        BLOCK_SIZE_M=BLOCK_SIZE_M,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
+    )
 
-        ### Flatten ###
-        indices = indices.reshape(-1)
+    embeds = output.reshape(*original_indices_shape, -1)
 
-        ### Check Contiguous ###
-        if not embeddings.flags.c_contiguous:
-            embeddings = cp.ascontiguousarray(embeddings)
-        if not indices.flags.c_contiguous:
-            indices = cp.ascontiguousarray(indices)
+    return embeds
 
-        ### Create an empty output to copy embeds into ###
-        with cp.cuda.Device(indices.device.id):
-            output = cp.empty(
-                (indices.shape[0], embeddings.shape[1]),
-                dtype=embeddings.dtype
-            )
-
-        ### Get our dimensions ###
-        n_elements = indices.shape[0]
-        embed_dim = embeddings.shape[1]
-
-        ### Vocab size is typically much larger than the embed_dim so lets set our ###
-        ### block size based on the embed dim! ###
-        BLOCK_SIZE_M = triton.next_power_of_2(min(128, embed_dim))
-        BLOCK_SIZE_N = triton.next_power_of_2(min(128, embed_dim))
-        
-        grid = (
-            triton.cdiv(n_elements, BLOCK_SIZE_M),
-            triton.cdiv(embed_dim, BLOCK_SIZE_N)
-        )
-
-        embedding_forward_kernel[grid](
-            embeddings_ptr=embeddings.data.ptr, 
-            indices_ptr=indices.data.ptr, 
-            output_ptr=output.data.ptr, 
-            n_elements=n_elements, 
-            embedding_dim=embed_dim, 
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
-        )
-
-        embeds = output.reshape(*original_indices_shape, -1)
-
-        return embeds
-    
 def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
 
     ### tl.atomic_add is extremely slow for bfloat16, so accumulate in float32 and cast back ###
@@ -240,114 +184,38 @@ def fused_embedding_backward(grad_output, embeddings, indices, use_dlpack=True):
         assert (indices >= 0).all(), f"Negative indices found: {indices.min()}"
         assert (indices < embeddings.shape[0]).all(), f"Index out of bounds: max={indices.max()}, vocab={embeddings.shape[0]}"
     
-    if use_dlpack:
+    ### Flatten ###
+    indices = indices.reshape(-1)
 
-        ### Flatten ###
-        indices = indices.reshape(-1)
-        
-        grad_output = torch.utils.dlpack.from_dlpack(grad_output)
-        embeddings = torch.utils.dlpack.from_dlpack(embeddings)
-        indices = torch.utils.dlpack.from_dlpack(indices)
+    if not grad_output.flags.c_contiguous:
+        grad_output = cp.ascontiguousarray(grad_output)
+    if not embeddings.flags.c_contiguous:
+        embeddings = cp.ascontiguousarray(embeddings)
+    if not indices.flags.c_contiguous:
+        indices = cp.ascontiguousarray(indices)
 
-        if not grad_output.is_contiguous():
-            grad_output = grad_output.contiguous()
-        if not embeddings.is_contiguous():
-            embeddings = embeddings.contiguous()
-        if not indices.is_contiguous():
-            indices = indices.contiguous()
+    grad_weight = cp.zeros_like(embeddings)
 
-        grad_weight = torch.zeros_like(embeddings)
+    n_elements = indices.shape[0]
+    embed_dim = embeddings.shape[1]
 
-        n_elements = indices.shape[0]
-        embed_dim = embeddings.shape[1]
+    BLOCK_SIZE_M = triton.next_power_of_2(min(128, embed_dim))
+    BLOCK_SIZE_N = triton.next_power_of_2(min(128, embed_dim))
 
-        BLOCK_SIZE_M = triton.next_power_of_2(min(128, embed_dim))
-        BLOCK_SIZE_N = triton.next_power_of_2(min(128, embed_dim))
-        grid = (
-            triton.cdiv(n_elements, BLOCK_SIZE_M),
-            triton.cdiv(embed_dim, BLOCK_SIZE_N),
-        )
+    grid = (
+        triton.cdiv(n_elements, BLOCK_SIZE_M),
+        triton.cdiv(embed_dim, BLOCK_SIZE_N),
+    )
 
-        embedding_backward_kernel[grid](
-            grad_output,
-            grad_weight,
-            indices,
-            n_elements,
-            embedding_dim=embed_dim,
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
-        )
+    embedding_backward_kernel[grid](
+        grad_output.data.ptr,
+        grad_weight.data.ptr,
+        indices.data.ptr,
+        n_elements,
+        embedding_dim=embed_dim,
+        BLOCK_SIZE_M=BLOCK_SIZE_M,
+        BLOCK_SIZE_N=BLOCK_SIZE_N,
+        DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
+    )
 
-        return cp.from_dlpack(grad_weight)
-    
-    else:
-
-        ### Flatten ###
-        indices = indices.reshape(-1)
-
-        if not grad_output.flags.c_contiguous:
-            grad_output = cp.ascontiguousarray(grad_output)
-        if not embeddings.flags.c_contiguous:
-            embeddings = cp.ascontiguousarray(embeddings)
-        if not indices.flags.c_contiguous:
-            indices = cp.ascontiguousarray(indices)
-
-        grad_weight = cp.zeros_like(embeddings)
-
-        n_elements = indices.shape[0]
-        embed_dim = embeddings.shape[1]
-
-        BLOCK_SIZE_M = triton.next_power_of_2(min(128, embed_dim))
-        BLOCK_SIZE_N = triton.next_power_of_2(min(128, embed_dim))
-
-        grid = (
-            triton.cdiv(n_elements, BLOCK_SIZE_M),
-            triton.cdiv(embed_dim, BLOCK_SIZE_N),
-        )
-
-        embedding_backward_kernel[grid](
-            grad_output.data.ptr,
-            grad_weight.data.ptr,
-            indices.data.ptr,
-            n_elements,
-            embedding_dim=embed_dim,
-            BLOCK_SIZE_M=BLOCK_SIZE_M,
-            BLOCK_SIZE_N=BLOCK_SIZE_N,
-            DTYPE_FLAG=get_dtype_flag(embeddings.dtype)
-        )
-
-        return grad_weight
-        
-if __name__ == "__main__":
-
-    from torch.nn import Embedding
-
-    def test_fused_embedding():
-        torch.manual_seed(0)
-
-        # --- Config ---
-        vocab_size = 10
-        embed_dim = 16
-        batch_size = 4
-        seq_len = 3
-
-        embedding = Embedding(vocab_size, embed_dim, _weight=torch.randn(vocab_size, embed_dim, device="cuda", dtype=torch.float16))
-        indices = torch.randint(0, vocab_size, (batch_size, seq_len), device="cuda", dtype=torch.int32)
-        embeddings_cp = cp.from_dlpack(torch.utils.dlpack.to_dlpack(embedding.weight))
-        indices_cp = cp.from_dlpack(torch.utils.dlpack.to_dlpack(indices))
-        out_cp = fused_embedding_forward(embeddings_cp, indices_cp, use_dlpack=False)
-        out_torch = embedding(indices)
-        torch.testing.assert_close(torch.tensor(out_cp.get(), device="cuda", dtype=out_torch.dtype), out_torch, atol=1e-3, rtol=1e-3)
-        print("Forward pass matches PyTorch embedding output")
-
-        grad_output = torch.randn_like(out_torch)
-        grad_output_cp = cp.from_dlpack(torch.utils.dlpack.to_dlpack(grad_output))
-        grad_weight_cp = fused_embedding_backward(grad_output_cp, embeddings_cp, indices_cp, use_dlpack=True)
-        grad_weight_torch = torch.zeros_like(embedding.weight)
-        grad_weight_torch.index_add_(0, indices.view(-1), grad_output.view(-1, embed_dim))
-        torch.testing.assert_close(torch.tensor(grad_weight_cp.get(), device="cuda", dtype=grad_weight_torch.dtype), grad_weight_torch, atol=1e-3, rtol=1e-3)
-        print("Backward pass matches PyTorch index_add_ gradient")
-
-    test_fused_embedding()
-
+    return grad_weight

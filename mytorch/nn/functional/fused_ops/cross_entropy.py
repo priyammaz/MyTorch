@@ -3,14 +3,14 @@ Inspired by Unsloth: https://github.com/unslothai/unsloth/blob/main/unsloth/kern
 
 Also, CrossEntropy is typically unsafe at float16, so all intermediate vars are computed/stored in fp32
 """
-import torch
 import cupy as cp
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
 from .utils import TritonPtr
-from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .flags import AUTOTUNE_MODE
 from .utils import get_dtype_flag
+from .autotuner_bench import do_bench_cudagraph
 
 @triton.jit
 def tanh(x):
@@ -167,6 +167,7 @@ def get_backward_autotune_mode():
 @triton.autotune(
     configs=get_backward_autotune_mode(),
     key=["NUM_CLASSES"],  # Cache tuning result per NUM_CLASSES
+    do_bench=do_bench_cudagraph
 )
 @triton.jit
 def cross_entropy_backward(
@@ -267,62 +268,26 @@ def fused_cross_entropy_forward(logits, labels, softcap=None, use_dlpack=True):
     N, C = logits.shape
     BLOCK_SIZE = triton.next_power_of_2(C)
 
-    if not DLPACK_DISABLE and use_dlpack:
+    loss = cp.zeros(N, dtype=cp.float32)
+    logsumexp = cp.zeros(N, dtype=cp.float32)
 
-        logits = torch.utils.dlpack.from_dlpack(logits)
-        labels = torch.utils.dlpack.from_dlpack(labels)
-    
-        N, C = logits.shape
+    row_stride = logits.strides[0] // logits.itemsize
 
-        ### Intermediate stuff should be stored in higher precision always otherwise ###
-        ### cross entropy becomes unsafe ###
-        loss = torch.empty(N, dtype = torch.float32, device=logits.device)
-        logsumexp = torch.zeros(N, dtype=torch.float32, device=logits.device)
-
-        BLOCK_SIZE = triton.next_power_of_2(C)
-        row_stride = logits.stride(0)
-
-        grid = (N,)
-        cross_entropy_forward[grid](
-            logits, 
+    grid = (N,)
+    cross_entropy_forward[grid](
+            TritonPtr(logits), 
             row_stride, 
-            loss, 
-            logsumexp, 
-            labels, 
+            TritonPtr(loss), 
+            TritonPtr(logsumexp), 
+            TritonPtr(labels), 
             C, 
             BLOCK_SIZE,
             DTYPE_FLAG=get_dtype_flag(logits.dtype),
             SOFTCAP=softcap, 
             USE_SOFTCAP=True if softcap is not None else False
-        )
-        
-        # Convert back to CuPy
-        loss = cp.from_dlpack(loss)
-        logsumexp = cp.from_dlpack(logsumexp)
-        return loss, logsumexp
+        )       
     
-    else:
-
-        loss = cp.zeros(N, dtype=cp.float32)
-        logsumexp = cp.zeros(N, dtype=cp.float32)
-
-        row_stride = logits.strides[0] // logits.itemsize
-
-        grid = (N,)
-        cross_entropy_forward[grid](
-                TritonPtr(logits), 
-                row_stride, 
-                TritonPtr(loss), 
-                TritonPtr(logsumexp), 
-                TritonPtr(labels), 
-                C, 
-                BLOCK_SIZE,
-                DTYPE_FLAG=get_dtype_flag(logits.dtype),
-                SOFTCAP=softcap, 
-                USE_SOFTCAP=True if softcap is not None else False
-            )       
-        
-        return loss, logsumexp
+    return loss, logsumexp
 
 def fused_cross_entropy_backward(
         logits, labels, logsumexp, softcap=None, scale=1.0, use_dlpack=True
@@ -347,44 +312,17 @@ def fused_cross_entropy_backward(
     else:
         scale = cp.full((1,), scale, dtype=cp.float32)
 
-    if not DLPACK_DISABLE and use_dlpack:
+    grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
+    cross_entropy_backward[grid](
+        TritonPtr(logits),
+        logits.strides[0] // logits.itemsize,
+        TritonPtr(logsumexp), 
+        TritonPtr(labels), 
+        TritonPtr(scale),
+        C, 
+        DTYPE_FLAG=get_dtype_flag(logits.dtype),
+        SOFTCAP=softcap, 
+        USE_SOFTCAP=True if softcap is not None else False
+    )
 
-        scale = torch.utils.dlpack.from_dlpack(scale)
-        logits = torch.utils.dlpack.from_dlpack(logits)
-        labels = torch.utils.dlpack.from_dlpack(labels)
-        logsumexp = torch.utils.dlpack.from_dlpack(logsumexp)
-
-        # grad = torch.zeros_like(logits) <- this is an expensive allocation for large vocabs!
-        #                                    instead lets just overwrite our logits with the grads
-        #                                    this actually made the op about 2x faster!
-
-        grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
-        cross_entropy_backward[grid](
-            logits,
-            logits.stride(0),
-            logsumexp, 
-            labels,
-            scale, 
-            C, 
-            DTYPE_FLAG=get_dtype_flag(logits.dtype),
-            SOFTCAP=softcap, 
-            USE_SOFTCAP=True if softcap is not None else False
-        )
-      
-        return cp.from_dlpack(logits) # <- our logits have been replaced with the grad here!
-
-    else:
-        grid = lambda META: (N, triton.cdiv(C, META["BLOCK_SIZE"]))
-        cross_entropy_backward[grid](
-            TritonPtr(logits),
-            logits.strides[0] // logits.itemsize,
-            TritonPtr(logsumexp), 
-            TritonPtr(labels), 
-            TritonPtr(scale),
-            C, 
-            DTYPE_FLAG=get_dtype_flag(logits.dtype),
-            SOFTCAP=softcap, 
-            USE_SOFTCAP=True if softcap is not None else False
-        )
-
-        return logits
+    return logits

@@ -3,12 +3,10 @@ Awesome implementation from Liger Kernels!
 https://github.com/linkedin/Liger-Kernel/blob/main/src/liger_kernel/ops/rope.py
 """
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .utils import get_dtype_flag
 from .utils import TritonPtr
-from .flags import DLPACK_DISABLE
 
 @triton.jit
 def triton_rope_forward_backward(
@@ -187,83 +185,40 @@ def fused_rope_forward(x, cos, sin, use_dlpack=True):
 
     assert (x.dtype == cos.dtype) and (x.dtype == sin.dtype), "Sin/Cos must be in same dtype as data!"
 
-    if not DLPACK_DISABLE and use_dlpack:
-        
-        x = torch.utils.dlpack.from_dlpack(x)
-        cos = torch.utils.dlpack.from_dlpack(cos)
-        sin = torch.utils.dlpack.from_dlpack(sin)
+    batch_size, seq_len, num_heads, head_dim = x.shape
 
-        batch_size, seq_len, num_heads, head_dim = x.shape
+    pad_head_dim = triton.next_power_of_2(head_dim)
+    pad_num_heads = triton.next_power_of_2(num_heads)
 
-        pad_head_dim = triton.next_power_of_2(head_dim)
-        pad_num_heads = triton.next_power_of_2(num_heads)
+    ### Total number of tokens to process 
+    n_row = batch_size * seq_len
 
-        ### Total number of tokens to process 
-        n_row = batch_size * seq_len
+    ### Quick contiguous check ###
+    if not x.flags['C_CONTIGUOUS']:
+        x = cp.ascontiguousarray(x)
+    if not cos.flags['C_CONTIGUOUS']:
+        cos = cp.ascontiguousarray(cos)
+    if not sin.flags['C_CONTIGUOUS']:
+        sin = cp.ascontiguousarray(sin)
 
-        ### Quick contiguous check ###
-        if not x.is_contiguous():
-            x = x.contiguous()
-        if not cos.is_contiguous():
-            cos = cos.contiguous()
-        if not sin.is_contiguous():
-            sin = sin.contiguous()
+    triton_rope_forward_backward[(n_row, )](
+        TritonPtr(x),
+        x.strides[1] // x.itemsize,  
+        TritonPtr(cos),
+        cos.strides[-2] // cos.itemsize,
+        TritonPtr(sin),
+        sin.strides[-2] // sin.itemsize,
+        seq_len, 
+        cos.shape[0], 
+        num_heads, 
+        head_dim, 
+        pad_num_heads, 
+        pad_head_dim,
+        BACKWARD_PASS=False,
+        DTYPE_FLAG=get_dtype_flag(x.dtype)
+    )
 
-        triton_rope_forward_backward[(n_row, )](
-            x, 
-            x.stride(1),  
-            cos, 
-            cos.stride(-2),
-            sin, 
-            sin.stride(-2),
-            seq_len, 
-            cos.shape[0], 
-            num_heads, 
-            head_dim, 
-            pad_num_heads, 
-            pad_head_dim,
-            BACKWARD_PASS=False,
-            DTYPE_FLAG=get_dtype_flag(x.dtype)
-        )
-
-        return cp.from_dlpack(x), cp.from_dlpack(cos), cp.from_dlpack(sin)
-    
-    else:
-
-        batch_size, seq_len, num_heads, head_dim = x.shape
-
-        pad_head_dim = triton.next_power_of_2(head_dim)
-        pad_num_heads = triton.next_power_of_2(num_heads)
-
-        ### Total number of tokens to process 
-        n_row = batch_size * seq_len
-
-        ### Quick contiguous check ###
-        if not x.flags['C_CONTIGUOUS']:
-            x = cp.ascontiguousarray(x)
-        if not cos.flags['C_CONTIGUOUS']:
-            cos = cp.ascontiguousarray(cos)
-        if not sin.flags['C_CONTIGUOUS']:
-            sin = cp.ascontiguousarray(sin)
-
-        triton_rope_forward_backward[(n_row, )](
-            TritonPtr(x),
-            x.strides[1] // x.itemsize,  
-            TritonPtr(cos),
-            cos.strides[-2] // cos.itemsize,
-            TritonPtr(sin),
-            sin.strides[-2] // sin.itemsize,
-            seq_len, 
-            cos.shape[0], 
-            num_heads, 
-            head_dim, 
-            pad_num_heads, 
-            pad_head_dim,
-            BACKWARD_PASS=False,
-            DTYPE_FLAG=get_dtype_flag(x.dtype)
-        )
-
-        return x, cos, sin
+    return x, cos, sin
 
 def fused_rope_backward(dx, cos, sin, use_dlpack=True):
 
@@ -273,74 +228,34 @@ def fused_rope_backward(dx, cos, sin, use_dlpack=True):
     """
 
     assert (dx.dtype == cos.dtype) and (dx.dtype == sin.dtype), "Sin/Cos must be in same dtype as data!"
-
-    if not DLPACK_DISABLE and use_dlpack:
-        
-        dx = torch.utils.dlpack.from_dlpack(dx)
-        cos = torch.utils.dlpack.from_dlpack(cos)
-        sin = torch.utils.dlpack.from_dlpack(sin)
-
-        batch_size, seq_len, num_heads, head_dim = dx.shape
-
-        pad_head_dim = triton.next_power_of_2(head_dim)
-        pad_num_heads = triton.next_power_of_2(num_heads)
-
-        ### Total number of tokens to process 
-        n_row = batch_size * seq_len
-
-        ### Quick contiguous check ###
-        if not dx.is_contiguous():
-            dx = dx.contiguous()
-
-        triton_rope_forward_backward[(n_row, )](
-            dx, 
-            dx.stride(1),  
-            cos, 
-            cos.stride(-2),
-            sin, 
-            sin.stride(-2),
-            seq_len, 
-            cos.shape[0], 
-            num_heads, 
-            head_dim, 
-            pad_num_heads, 
-            pad_head_dim,
-            BACKWARD_PASS=True,
-            DTYPE_FLAG=get_dtype_flag(dx.dtype)
-        )
-
-
-        return cp.from_dlpack(dx)   
-
-    else:
      
-        batch_size, seq_len, num_heads, head_dim = dx.shape
+    batch_size, seq_len, num_heads, head_dim = dx.shape
 
-        pad_head_dim = triton.next_power_of_2(head_dim)
-        pad_num_heads = triton.next_power_of_2(num_heads)
+    pad_head_dim = triton.next_power_of_2(head_dim)
+    pad_num_heads = triton.next_power_of_2(num_heads)
 
-        ### Total number of tokens to process 
-        n_row = batch_size * seq_len
+    ### Total number of tokens to process 
+    n_row = batch_size * seq_len
 
-        ### Quick contiguous check ###
-        if not dx.flags['C_CONTIGUOUS']:
-            dx = cp.ascontiguousarray(dx)
+    ### Quick contiguous check ###
+    if not dx.flags['C_CONTIGUOUS']:
+        dx = cp.ascontiguousarray(dx)
 
-        triton_rope_forward_backward[(n_row, )](
-            TritonPtr(dx),
-            dx.strides[1] // dx.itemsize,  
-            TritonPtr(cos),
-            cos.strides[-2] // cos.itemsize,
-            TritonPtr(sin),
-            sin.strides[-2] // sin.itemsize,
-            seq_len, 
-            cos.shape[0], 
-            num_heads, 
-            head_dim, 
-            pad_num_heads, 
-            pad_head_dim,
-            BACKWARD_PASS=True,
-            DTYPE_FLAG=get_dtype_flag(dx.dtype)
-        )
+    triton_rope_forward_backward[(n_row, )](
+        TritonPtr(dx),
+        dx.strides[1] // dx.itemsize,  
+        TritonPtr(cos),
+        cos.strides[-2] // cos.itemsize,
+        TritonPtr(sin),
+        sin.strides[-2] // sin.itemsize,
+        seq_len, 
+        cos.shape[0], 
+        num_heads, 
+        head_dim, 
+        pad_num_heads, 
+        pad_head_dim,
+        BACKWARD_PASS=True,
+        DTYPE_FLAG=get_dtype_flag(dx.dtype)
+    )
 
-        return dx
+    return dx

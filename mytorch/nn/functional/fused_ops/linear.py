@@ -16,13 +16,13 @@ is just as fast as our own grouped matmul so theres no gains here to fuse them!
 
 """
 import cupy as cp
-import torch
 import triton
 import triton.language as tl
 from .activations import activation_switcher_forward, _avail_activations
-from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .flags import AUTOTUNE_MODE
 from .utils import get_dtype_flag
 from .utils import TritonPtr
+from .autotuner_bench import do_bench_cudagraph
 
 def get_cuda_autotune_config():
 
@@ -41,7 +41,7 @@ def get_cuda_autotune_config():
             triton.Config({'BLOCK_SIZE_M': 32, 'BLOCK_SIZE_N': 64, 'BLOCK_SIZE_K': 32, 'GROUP_SIZE_M': 8}, num_stages=5, num_warps=2),
         ]
 
-@triton.autotune(configs=get_cuda_autotune_config(), key=['M', 'N', 'K'])
+@triton.autotune(configs=get_cuda_autotune_config(), key=['M', 'N', 'K'], do_bench=do_bench_cudagraph)
 @triton.jit
 def fused_linear_forward_kernel(
     input_ptr, 
@@ -148,86 +148,36 @@ def fused_linear_forward(a, w, b=None, act_func="relu", use_dlpack=True):
     if act_func is not None:
         assert act_func in _avail_activations, f"Fused activations must be selected from {_avail_activations}, got {act_func}"
    
-    if not DLPACK_DISABLE and use_dlpack:
-        a_torch = torch.utils.dlpack.from_dlpack(a)
-        w_torch = torch.utils.dlpack.from_dlpack(w)
-        b_torch = torch.utils.dlpack.from_dlpack(b) if b is not None else None
+    if not a.flags.c_contiguous:
+        a = cp.ascontiguousarray(a)
+    if not w.is_contiguous():
+        w = cp.ascontiguousarray(w)
+    if b is not None and not b.is_contiguous():
+        b = cp.ascontiguousarray(b)
 
-        if not a_torch.is_contiguous():
-            a_torch = a_torch.contiguous()
-        if not w_torch.is_contiguous():
-            w_torch = w_torch.contiguous()
-        if b_torch is not None and not b_torch.is_contiguous():
-            b_torch = b_torch.contiguous()
-            
-        # Allocate output
-        preact_torch = torch.empty((B, O), device=a_torch.device, dtype=a_torch.dtype)
-        postact_torch = torch.empty_like(preact_torch) if act_func is not None else None
+    with cp.cuda.Device(a.device.id):
+        preact_cp = cp.empty((B, O), dtype=a.dtype)
+        postact_cp = cp.empty_like(preact_cp) if act_func is not None else None
 
-        # Define grid for Triton launch
-        grid = lambda meta: (
-            triton.cdiv(B, meta['BLOCK_SIZE_M']) *
-            triton.cdiv(O, meta['BLOCK_SIZE_N']),
-        )
+    grid = lambda meta: (
+        triton.cdiv(B, meta['BLOCK_SIZE_M']) *
+        triton.cdiv(O, meta['BLOCK_SIZE_N']),
+    )
 
-        fused_linear_forward_kernel[grid](
-            a_torch, 
-            w_torch, 
-            postact_torch,
-            preact_torch, 
-            b_torch,
-            B, 
-            O, 
-            I,
-            a_torch.stride(0), 
-            a_torch.stride(1),
-            w_torch.stride(0), 
-            w_torch.stride(1),
-            preact_torch.stride(0), 
-            preact_torch.stride(1),
-            act_func,
-            DTYPE_FLAG=get_dtype_flag(a_torch.dtype)
-        )
+    fused_linear_forward_kernel[grid](
+        TritonPtr(a),
+        TritonPtr(w),
+        TritonPtr(preact_cp),
+        TritonPtr(postact_cp),
+        TritonPtr(b) if b is not None else None,
+        B, O, I,
+        a.strides[0] // a.itemsize,
+        a.strides[1] // a.itemsize,
+        w.strides[0] // w.itemsize,
+        w.strides[1] // w.itemsize,
+        preact_cp.strides[0] // preact_cp.itemsize,
+        preact_cp.strides[1] // preact_cp.itemsize,
+        DTYPE_FLAG=get_dtype_flag(a.dtype)
+    )
 
-
-        # Return CuPy tensor via DLPack
-        if act_func is not None:
-            return cp.from_dlpack(preact_torch), cp.from_dlpack(postact_torch)
-        else:
-            return cp.from_dlpack(preact_torch), None
-
-    else:
-
-        if not a.flags.c_contiguous:
-            a = cp.ascontiguousarray(a)
-        if not w.is_contiguous():
-            w = cp.ascontiguousarray(w)
-        if b is not None and not b.is_contiguous():
-            b = cp.ascontiguousarray(b)
-
-        with cp.cuda.Device(a.device.id):
-            preact_cp = cp.empty((B, O), dtype=a.dtype)
-            postact_cp = cp.empty_like(preact_cp) if act_func is not None else None
-
-        grid = lambda meta: (
-            triton.cdiv(B, meta['BLOCK_SIZE_M']) *
-            triton.cdiv(O, meta['BLOCK_SIZE_N']),
-        )
-
-        fused_linear_forward_kernel[grid](
-            TritonPtr(a),
-            TritonPtr(w),
-            TritonPtr(preact_cp),
-            TritonPtr(postact_cp),
-            TritonPtr(b) if b is not None else None,
-            B, O, I,
-            a.strides[0] // a.itemsize,
-            a.strides[1] // a.itemsize,
-            w.strides[0] // w.itemsize,
-            w.strides[1] // w.itemsize,
-            preact_cp.strides[0] // preact_cp.itemsize,
-            preact_cp.strides[1] // preact_cp.itemsize,
-            DTYPE_FLAG=get_dtype_flag(a.dtype)
-        )
-
-        return preact_cp
+    return preact_cp
