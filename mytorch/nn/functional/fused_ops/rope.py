@@ -6,6 +6,9 @@ import cupy as cp
 import torch
 import triton
 import triton.language as tl
+from .utils import get_dtype_flag
+from .utils import TritonPtr
+from .flags import DLPACK_DISABLE
 
 @triton.jit
 def triton_rope_forward_backward(
@@ -29,7 +32,7 @@ def triton_rope_forward_backward(
     pid = tl.program_id(0)
 
     ### Cast to correct dtype ###
-    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     x_ptr = tl.cast(x_ptr, tl.pointer_type(pointer_dtype))
     cos_ptr = tl.cast(cos_ptr, tl.pointer_type(pointer_dtype))
     sin_ptr = tl.cast(sin_ptr, tl.pointer_type(pointer_dtype))
@@ -184,7 +187,7 @@ def fused_rope_forward(x, cos, sin, use_dlpack=True):
 
     assert (x.dtype == cos.dtype) and (x.dtype == sin.dtype), "Sin/Cos must be in same dtype as data!"
 
-    if use_dlpack:
+    if not DLPACK_DISABLE and use_dlpack:
         
         x = torch.utils.dlpack.from_dlpack(x)
         cos = torch.utils.dlpack.from_dlpack(cos)
@@ -220,7 +223,7 @@ def fused_rope_forward(x, cos, sin, use_dlpack=True):
             pad_num_heads, 
             pad_head_dim,
             BACKWARD_PASS=False,
-            DTYPE_FLAG=0 if x.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(x.dtype)
         )
 
         return cp.from_dlpack(x), cp.from_dlpack(cos), cp.from_dlpack(sin)
@@ -244,11 +247,11 @@ def fused_rope_forward(x, cos, sin, use_dlpack=True):
             sin = cp.ascontiguousarray(sin)
 
         triton_rope_forward_backward[(n_row, )](
-            x.data.ptr,
+            TritonPtr(x),
             x.strides[1] // x.itemsize,  
-            cos.data.ptr,
+            TritonPtr(cos),
             cos.strides[-2] // cos.itemsize,
-            sin.data.ptr,
+            TritonPtr(sin),
             sin.strides[-2] // sin.itemsize,
             seq_len, 
             cos.shape[0], 
@@ -257,7 +260,7 @@ def fused_rope_forward(x, cos, sin, use_dlpack=True):
             pad_num_heads, 
             pad_head_dim,
             BACKWARD_PASS=False,
-            DTYPE_FLAG=0 if x.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(x.dtype)
         )
 
         return x, cos, sin
@@ -271,7 +274,7 @@ def fused_rope_backward(dx, cos, sin, use_dlpack=True):
 
     assert (dx.dtype == cos.dtype) and (dx.dtype == sin.dtype), "Sin/Cos must be in same dtype as data!"
 
-    if use_dlpack:
+    if not DLPACK_DISABLE and use_dlpack:
         
         dx = torch.utils.dlpack.from_dlpack(dx)
         cos = torch.utils.dlpack.from_dlpack(cos)
@@ -303,7 +306,7 @@ def fused_rope_backward(dx, cos, sin, use_dlpack=True):
             pad_num_heads, 
             pad_head_dim,
             BACKWARD_PASS=True,
-            DTYPE_FLAG=0 if dx.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(dx.dtype)
         )
 
 
@@ -324,11 +327,11 @@ def fused_rope_backward(dx, cos, sin, use_dlpack=True):
             dx = cp.ascontiguousarray(dx)
 
         triton_rope_forward_backward[(n_row, )](
-            dx.data.ptr,
+            TritonPtr(dx),
             dx.strides[1] // dx.itemsize,  
-            cos.data.ptr,
+            TritonPtr(cos),
             cos.strides[-2] // cos.itemsize,
-            sin.data.ptr,
+            TritonPtr(sin),
             sin.strides[-2] // sin.itemsize,
             seq_len, 
             cos.shape[0], 
@@ -337,7 +340,7 @@ def fused_rope_backward(dx, cos, sin, use_dlpack=True):
             pad_num_heads, 
             pad_head_dim,
             BACKWARD_PASS=True,
-            DTYPE_FLAG=0 if dx.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(dx.dtype)
         )
 
         return dx

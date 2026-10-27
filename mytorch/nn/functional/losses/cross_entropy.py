@@ -1,4 +1,5 @@
 import numpy as np
+import cupy as cp
 import mytorch
 from mytorch import Tensor
 from mytorch.nn.functional import _compat as CHECKS
@@ -35,7 +36,8 @@ def manual_cross_entropy(logits, targets, ignore_index=-100, *args):
     nll = (logsumexp.flatten() - logits_data[np.arange(flattened_dim), targets_data]) * mask
     loss_value = np.sum(nll) / valid_counts
 
-    loss_value = loss_value.astype(logits.dtype, copy=False)
+    ###  keep the scalar loss in float32 ###
+    loss_value = loss_value.astype("float32" if str(logits.dtype) == "bfloat16" else logits.dtype, copy=False)
     
     def _cross_entropy_backward(grad_output):
 
@@ -89,7 +91,7 @@ def fused_cross_entropy(logits, targets, ignore_index=-100, softcap=None):
     ### -100 is hard coded into the fused kernel, so we hardcode it here as well! ###
     targets_flat = targets_data
     mask = (targets_flat != -100)
-    valid_counts = mask.sum().get().item()
+    valid_counts = mask.sum() 
     
     # Triton kernel forward
     loss_cp, logsumexp_cp = fused_cross_entropy_forward(logits_data, targets_data, softcap)
@@ -98,7 +100,7 @@ def fused_cross_entropy(logits, targets, ignore_index=-100, softcap=None):
     loss_value = loss_cp.sum() / valid_counts
 
     ### Cast back to the wanted dtype ###
-    loss_value = loss_value.astype(logits.dtype, copy=False)
+    loss_value = loss_value.astype("float32" if str(logits.dtype) == "bfloat16" else logits.dtype, copy=False)
 
     def _cross_entropy_backward(grad_output):
         
@@ -113,7 +115,7 @@ def fused_cross_entropy(logits, targets, ignore_index=-100, softcap=None):
                 targets_data,
                 logsumexp_cp,
                 softcap,
-                scale=(grad_output.get().item() / valid_counts)
+                scale=getattr(grad_output, "_array", grad_output).astype(cp.float32) / valid_counts
             ).reshape(*logits.shape).astype(logits.dtype, copy=False)
 
             if logits.grad is None:

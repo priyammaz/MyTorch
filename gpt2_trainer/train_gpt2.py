@@ -75,7 +75,8 @@ def parse_args():
     parser.add_argument("--max_grad_norm", type=float, default=1.0)
     parser.add_argument("--beta1", type=float, default=0.9)
     parser.add_argument("--beta2", type=float, default=0.95)
-    parser.add_argument("--mixed_precision", action="store_true")
+    parser.add_argument("--mixed_precision", nargs="?", const="fp16", default=False, choices=("fp16", "bf16"),
+                        help="`--mixed_precision` alone trains in fp16, `--mixed_precision bf16` trains in bfloat16")
     parser.add_argument("--enable_gradient_checkpointing", action="store_true")
 
     ### Logging Config ###

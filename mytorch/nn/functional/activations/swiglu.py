@@ -1,3 +1,4 @@
+import cupy as cp
 from mytorch import Tensor
 from mytorch.nn.functional import _compat as CHECKS
 from mytorch.nn.functional import _flags as FLAGS
@@ -99,12 +100,58 @@ def fused_swiglu(input_a, input_b):
     
     return out
 
-def swiglu(input_a, input_b, auto=False, fused=False):
+def fused_swiglu_packed(input):
+    """
+    SwiGLU on a packed projection: input = [a, b] along the last dim, out = silu(a) * b.
+    """
+    x = get_inner_inner_array(input)
+    if x.shape[-1] % 2 != 0:
+        raise ValueError(f"packed swiglu needs an even last dim, got {x.shape[-1]}")
+    hidden = x.shape[-1] // 2
+
+    ### Contiguous rows let the kernel read (and later overwrite) both halves in place ###
+    buffer = x if x.flags.c_contiguous else cp.ascontiguousarray(x)
+    a, b, output = fused_swiglu_forward(buffer[..., :hidden], buffer[..., hidden:])
+
+    def _swiglu_packed_backward(output_grad):
+        if not input.requires_grad:
+            return
+        ### Writes grad_a / grad_b into buffer's two halves, so buffer now holds input's full gradient ###
+        fused_swiglu_backward(output_grad, a, b)
+        grad = buffer if buffer.shape == tuple(input.shape) else buffer.reshape(input.shape)
+        if input.grad is None:
+            input.grad = grad
+        else:
+            input.grad += grad
+
+    requires_grad = input.requires_grad and Tensor.build_graph_enabled()
+    out = Tensor(
+        output,
+        requires_grad=requires_grad,
+        grad_fn=_swiglu_packed_backward if requires_grad else None,
+        grad_fn_name="<SwiGLUBackward>" if requires_grad else None,
+        device=input.device,
+        dtype=input.dtype
+    )
+
+    if requires_grad:
+        out._add_parents(input)
+
+    return out
+
+def swiglu(input_a, input_b=None, auto=False, fused=False):
+    """
+    swiglu(a, b) = silu(a) * b. With input_b=None, input_a is the packed projection [a, b] along the last dim
+    (the fused version then avoids the chunk copies entirely).
+    """
+    _use_fused = (not auto) and ((fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED)
+    if input_b is None:
+        if _use_fused:
+            return fused_swiglu_packed(input_a)
+        input_a, input_b = input_a.chunk(2, dim=-1)
     if auto:
-        return auto_swiglu(input)
-    else:    
-        _use_fused = (fused and CHECKS.FUSED_AVAIL) or FLAGS.ALWAYS_USE_FUSED
-        op = fused_swiglu if _use_fused else manual_swiglu
-        if fused and op is manual_swiglu:
-            CHECKS.warn_triton_missing()
-        return op(input_a, input_b)
+        return auto_swiglu(input_a, input_b)
+    op = fused_swiglu if _use_fused else manual_swiglu
+    if fused and op is manual_swiglu:
+        CHECKS.warn_triton_missing()
+    return op(input_a, input_b)

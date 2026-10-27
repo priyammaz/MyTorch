@@ -17,6 +17,28 @@ import mytorch
 import cupy as cp
 import numpy as np
 
+### Fused AdamW update: one GPU kernel per parameter, updated in place with no temporaries ###
+### (the unfused version launches ~11 kernels per parameter and allocates most intermediates) ###
+_fused_adamw_kernel = cp.ElementwiseKernel(
+    "T g, T beta1, T beta2, T lr_t, T eps, T decay",
+    "T p, T m, T v",
+    """
+    m = beta1 * m + (1 - beta1) * g;
+    v = beta2 * v + (1 - beta2) * g * g;
+    p = p - lr_t * m / (sqrt(v) + eps);
+    p = p * decay;
+    """,
+    "mytorch_fused_adamw",
+)
+_FUSED_ADAMW_DTYPES = ("float32", "float64", "float16")
+
+def _to_numpy(x):
+    x = _raw(x)
+    return cp.asnumpy(x) if isinstance(x, cp.ndarray) else np.array(x, copy=True)
+
+def _raw(x):
+    return getattr(x, "_array", x)
+
 class Optimizer:
     def step(self):
         raise NotImplementedError
@@ -222,8 +244,9 @@ class Adam(Optimizer):
         for group in self.param_groups:
 
             group_state = {
-                'm': [m.copy() for m in group['m']],
-                'v': [v.copy() for v in group['v']],
+                ### Host numpy copies: picklable and independent of the device we resume on ###
+                'm': [_to_numpy(m) for m in group['m']],
+                'v': [_to_numpy(v) for v in group['v']],
                 't': group['t'],
                 'beta1_pow': group['beta1_pow'],
                 'beta2_pow': group['beta2_pow'],
@@ -263,8 +286,10 @@ class Adam(Optimizer):
                 )
             
             ### Copy Everything Over ###
-            group['m'] = [m.copy() for m in group_state['m']]
-            group['v'] = [v.copy() for v in group_state['v']]
+            for cur, saved in zip(group['m'] + group['v'], group_state['m'] + group_state['v']):
+                cur_arr = _raw(cur)
+                cur_arr[...] = cp.asarray(saved) if isinstance(cur_arr, cp.ndarray) else np.asarray(saved)
+                
             group['t'] = group_state['t']
             group['beta1_pow'] = group_state['beta1_pow']
             group['beta2_pow'] = group_state['beta2_pow']
@@ -360,8 +385,20 @@ class AdamW(Optimizer):
             
             for i, p in enumerate(group['params']):
 
-                if p.requires_grad:
+                if p.requires_grad and p.grad is not None:
                     g = p.grad
+
+                    ### Fast path: single fused kernel updating p, m, v in place ###
+                    p_arr, m_arr, v_arr = _raw(p.data), _raw(group['m'][i]), _raw(group['v'][i])
+                    if isinstance(p_arr, cp.ndarray) and str(p_arr.dtype) in _FUSED_ADAMW_DTYPES:
+                        dt = p_arr.dtype.type
+                        _fused_adamw_kernel(
+                            _raw(g).astype(p_arr.dtype, copy=False),
+                            dt(group['beta1']), dt(group['beta2']), dt(lr_t), dt(group['eps']),
+                            dt(1.0 - group['lr'] * group['weight_decay']),
+                            p_arr, m_arr, v_arr,
+                        )
+                        continue
                     
                     # Update biased first moment estimate
                     group['m'][i] *= group['beta1']
@@ -396,8 +433,9 @@ class AdamW(Optimizer):
         for group in self.param_groups:
 
             group_state = {
-                'm': [m.copy() for m in group['m']],
-                'v': [v.copy() for v in group['v']],
+                ### Host numpy copies: picklable and independent of the device we resume on ###
+                'm': [_to_numpy(m) for m in group['m']],
+                'v': [_to_numpy(v) for v in group['v']],
                 't': group['t'],
                 'beta1_pow': group['beta1_pow'],
                 'beta2_pow': group['beta2_pow'],
@@ -437,8 +475,10 @@ class AdamW(Optimizer):
                 )
             
             ### Copy Everything Over ###
-            group['m'] = [m.copy() for m in group_state['m']]
-            group['v'] = [v.copy() for v in group_state['v']]
+            for cur, saved in zip(group['m'] + group['v'], group_state['m'] + group_state['v']):
+                cur_arr = _raw(cur)
+                cur_arr[...] = cp.asarray(saved) if isinstance(cur_arr, cp.ndarray) else np.asarray(saved)
+
             group['t'] = group_state['t']
             group['beta1_pow'] = group_state['beta1_pow']
             group['beta2_pow'] = group_state['beta2_pow']

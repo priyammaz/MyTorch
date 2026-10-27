@@ -181,8 +181,8 @@ def test():
     test_number += 1
     
     # Test 4: Training Pipeline - With mixed precision (if configured)
-    if mixed_precision == "fp16":
-        print(f"\nTest {test_number}: Training Pipeline (Mixed Precision fp16)")
+    if mixed_precision in ("fp16", "bf16"):
+        print(f"\nTest {test_number}: Training Pipeline (Mixed Precision {mixed_precision})")
         print("-" * terminal_width)
         
         sys.argv = [
@@ -330,7 +330,8 @@ def interactive_config():
         "Do you want to use mixed precision training?",
         choices=[
             "No", 
-            "fp16"
+            "fp16",
+            "bf16"
         ],
         style=custom_style_fancy
     ).ask()

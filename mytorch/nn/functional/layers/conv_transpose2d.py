@@ -1,4 +1,5 @@
 from mytorch import Tensor
+from mytorch._array import add_at
 
 def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_padding=0):
 
@@ -105,7 +106,7 @@ def conv_transpose2d(input, weight, bias=None, stride=1, padding=0, output_paddi
     jj_flat = xp.tile(j.reshape(-1), B)
 
     ### Accumulate into output_padded ###
-    xp.add.at(output_padded, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
+    add_at(output_padded, (bb_flat, kk_flat, ii_flat, jj_flat), values_flat)
     
     ### Add extra padding if we want to match a specific output shape ###
     if OP > 0:

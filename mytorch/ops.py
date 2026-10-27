@@ -1,3 +1,4 @@
+import numpy as np
 from .tensor import Tensor
 
 ### Functional Access to Non-Dunder Methods ###
@@ -68,8 +69,9 @@ def concatenate(tensors, dim=0):
     device = tensors[0].device
     requires_grad = any(t.requires_grad for t in tensors) and Tensor.build_graph_enabled()
 
+    ### np.* dispatches to Array.__array_function__, which unwraps to numpy/cupy for us ###
     tensor_list = [t.data for t in tensors]
-    out_data = xp.concatenate(tensor_list, axis=dim)
+    out_data = np.concatenate(tensor_list, axis=dim)
 
     ### For backward pass we need the sizes along the concat dim ###
     sizes = [t.shape[dim] for t in tensors]
@@ -122,9 +124,9 @@ def stack(tensors, dim=0):
     device = tensors[0].device
     requires_grad = any(t.requires_grad for t in tensors) and Tensor.build_graph_enabled()
 
-    # Extract raw arrays
+    ### np.* dispatches to Array.__array_function__ (cp.stack rejects Array objects outright) ###
     data_list = [t.data for t in tensors]
-    out_data = xp.stack(data_list, axis=dim)
+    out_data = np.stack(data_list, axis=dim)
 
     def _stack_backward(out_grad):
 

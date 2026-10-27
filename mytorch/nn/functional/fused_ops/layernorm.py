@@ -8,7 +8,9 @@ import torch
 import triton
 import triton.language as tl
 from .utils import calc_num_warps
+from .utils import TritonPtr
 from .flags import DLPACK_DISABLE
+from .utils import get_dtype_flag
 
 def layernorm_naive(x, weight, bias=None, eps=1e-5):
 
@@ -43,14 +45,14 @@ def layernorm_naive(x, weight, bias=None, eps=1e-5):
 @triton.jit
 def layernorm_kernel_forward_training(
     output_ptr, 
-    inv_var_ptr, # Need for Backward Pass (N,) # can be None during inference
-    mean_ptr, # Need fo Backward Pass (N,) # Can be None during inference
+    inv_var_ptr, # Need for Backward Pass (N,) float32 # can be None during inference
+    mean_ptr, # Need fo Backward Pass (N,) float32 # Can be None during inference
     input_ptr, 
     gamma_ptr,  # 1D vector shared across all samples (E, ) can be None if no weight
     beta_ptr,   # 1D vector shared across all samples (E, ) can be None if no bias
     input_row_stride, 
     output_row_stride,  
-    DTYPE_FLAG: tl.constexpr, # Flag for if our data is float32 or float16
+    DTYPE_FLAG: tl.constexpr, # Flag for if our data is float32, float16 or bfloat16
     eps: tl.constexpr,
     n_cols: tl.constexpr, # Dimensionality of our embeddings
     BLOCK_SIZE: tl.constexpr, # closest power of 2 to our dim of embeddings 
@@ -59,7 +61,7 @@ def layernorm_kernel_forward_training(
     """
     Operation:
 
-    gamma * ((x - mu)/(var + eps)) + beta
+    gamma * ((x - mu)/sqrt(var + eps)) + beta
 
     This kernel expects an (N x E) dimension matrix and so we can write an easy
     kernel that has every block normalize a single row! A more optimal method can be found
@@ -68,86 +70,55 @@ def layernorm_kernel_forward_training(
     But we are trying to find a balance between giving our modules some teeth, but also easily 
     understandable! Im sorry to all the hardcore kernel engineers! 
 
-    For backprop we need our Mean centered data and normed data! So we store these here
+    The mean and variance are precision sensitive (a sum over the whole row), so just like torch
+    we compute them in float32 (upcasting each element inside the kernel, no float32 copies of the
+    tensor) and save mean and 1/std as float32 for the backward pass
     """
 
     ### Which row are we normalizing? ###
     row_idx = tl.program_id(0)
 
     ### Map ptrs to correct dtype ###
-    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     output_ptr = tl.cast(output_ptr, tl.pointer_type(pointer_dtype))
     input_ptr = tl.cast(input_ptr, tl.pointer_type(pointer_dtype))
     if gamma_ptr is not None:
         gamma_ptr = tl.cast(gamma_ptr, tl.pointer_type(pointer_dtype))
     if mean_ptr is not None:
-        mean_ptr = tl.cast(mean_ptr, tl.pointer_type(pointer_dtype))
+        mean_ptr = tl.cast(mean_ptr, tl.pointer_type(tl.float32))
     if inv_var_ptr is not None:
-        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(pointer_dtype))
+        inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float32))
     if beta_ptr is not None:
         beta_ptr = tl.cast(beta_ptr, tl.pointer_type(pointer_dtype))
 
-    ### Get the start idx of data we want to norm (remember in memory its one long flat vector) ###
-    row_start_ptr = input_ptr + row_idx * input_row_stride
-    
-    ### Get offsets for the full block ###
-    col_offsets = tl.arange(0,BLOCK_SIZE)
-
-    ### Mask for invalid regions of block ###
+    ### Get offsets for the full block and mask for invalid regions ###
+    col_offsets = tl.arange(0, BLOCK_SIZE)
     mask = col_offsets < n_cols
-    
-    ### Get All Indexes ###
-    input_ptrs = row_start_ptr + col_offsets
 
-    ### Load Weights if they exist ###
-    if gamma_ptr is not None:
-        gamma_ptrs = gamma_ptr + col_offsets
-        gammas = tl.load(gamma_ptrs, mask=mask, other=0.) # We multiply by gamma, so 0 invalid is fine has no effect
-
-    if beta_ptr is not None:
-        beta_ptrs = beta_ptr + col_offsets
-        betas = tl.load(beta_ptrs, mask=mask, other=0.)
-
-    ### Load Row and Gamma ###
-    row = tl.load(input_ptrs, mask=mask, other=0.) # Invalid row values can just be 0
+    ### Load Row (upcast to float32 for the statistics) ###
+    row = tl.load(input_ptr + row_idx * input_row_stride + col_offsets, mask=mask, other=0.).to(tl.float32)
     
     ### Compute row mean and var w/ reduction ops ###
     row_mean = tl.sum(row, axis=0) / n_cols
-
-    ### Subtract mean from row where mask is valid, otherwise just 0 ###
-    row_mean_centered = tl.where(mask, row-row_mean, 0.)
-    
-    ### Compute variance (E((x-mu)**2))
+    row_mean_centered = tl.where(mask, row - row_mean, 0.)
     row_var = tl.sum(row_mean_centered * row_mean_centered, axis=0) / n_cols
     inv_var = tl.rsqrt(row_var + eps)
-    normed = row_mean_centered * inv_var
+    output = row_mean_centered * inv_var
 
-    ### Compute final output ###
+    ### Scale and shift ###
     if gamma_ptr is not None:
-        output = normed * gammas
-    else:
-        output = normed
-
+        output = output * tl.load(gamma_ptr + col_offsets, mask=mask, other=0.).to(tl.float32)
     if beta_ptr is not None:
-        output += betas
+        output = output + tl.load(beta_ptr + col_offsets, mask=mask, other=0.).to(tl.float32)
 
-    ### Write outputs ###
-    output_row_start_ptr = output_ptr + row_idx * output_row_stride
-    output_ptrs = output_row_start_ptr + col_offsets
-    tl.store(output_ptrs, output, mask=mask)
+    ### Write outputs (back in the input dtype) ###
+    tl.store(output_ptr + row_idx * output_row_stride + col_offsets, output, mask=mask)
 
     ### No need to waste time writing outputs if we dont need it! ###
     if mean_ptr is not None and inv_var_ptr is not None:
+        tl.store(mean_ptr + row_idx, row_mean)
+        tl.store(inv_var_ptr + row_idx, inv_var)
 
-        # store mean (scalar for this row)
-        mean_row_ptrs = mean_ptr + row_idx
-        tl.store(mean_row_ptrs, row_mean)
-
-        # store inv_var (scalar for this row)
-        inv_var_ptrs = inv_var_ptr + row_idx
-        tl.store(inv_var_ptrs, inv_var)
-
-@triton.heuristics({"num_warps": lambda args: calc_num_warps(args["BLOCK_SIZE"])})
 @triton.jit
 def layernorm_kernel_backward(
     x_ptr, 
@@ -155,14 +126,16 @@ def layernorm_kernel_backward(
     mean_ptr, 
     inv_var_ptr, 
     dX_ptr, 
-    dGamma_ptr, 
-    dB_ptr, 
+    dGamma_ptr, # (n_blocks, E) float32 partial sums, can be None
+    dB_ptr,     # (n_blocks, E) float32 partial sums, can be None
     dY_ptr,
     stride_x, 
     stride_dx, 
     stride_dy, 
-    n_cols, 
+    n_rows,
+    n_cols: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr, 
+    ROWS_PER_BLOCK: tl.constexpr,
     DTYPE_FLAG: tl.constexpr
 ):
     
@@ -170,25 +143,29 @@ def layernorm_kernel_backward(
     We need to compute the gradients w.r.t to the input x. This formula is as follows:
 
     y = x_hat * gamma + beta
-    where x_hat = (x - mu) / (var + eps)
+    where x_hat = (x - mu) / sqrt(var + eps)
     dL/dx = dL/dy * dy/dx_hat * dx_hat / dx
 
-    = 1/(var + eps) * [dL/dy * gamma - mean(dL/dy*gamma) - x_hat * mean(dL/dy * gamma * x_hat)]
-    = 1/(var + eps) * [dx_hat - mean(dx_hat) - x_hat * mean(dx_hat* x_hat)]
-    = 1/(var + eps) * (1 / N) * (N*dx_hat - sum(dx_hat) - x_hat * sum(dx_hat * x_hat))
-    sum up grads over the batch dim
+    = 1/std * [dL/dy * gamma - mean(dL/dy*gamma) - x_hat * mean(dL/dy * gamma * x_hat)]
+    = 1/std * [dx_hat - mean(dx_hat) - x_hat * mean(dx_hat* x_hat)]
 
-    This is pretty simple as we are just doing this op per vector, so lets just set our Block size to cover that full embed dim. But
-    as you can see we need some stuff from our forward pass like x_hat and 1/(var + eps)
+    dL/dgamma = sum over rows of dL/dy * x_hat
+    dL/dbeta  = sum over rows of dL/dy
+
+    Every program processes ROWS_PER_BLOCK rows at once (a 2D block). The gamma/beta grads are a sum over
+    ALL rows. Accumulating them with tl.atomic_add from every program into the same (E,) buffer was over
+    half the runtime (thousands of programs contending on the same E cells), so instead each program
+    writes the partial sum for its own block of rows into its own row of an (n_blocks, E) buffer, and the
+    caller does a single .sum(0) at the end.
     """
 
-    row_idx = tl.program_id(0)
+    block_idx = tl.program_id(0)
 
     ### Map Pointers To Correct Dtype ###
-    pointer_type = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_type = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     x_ptr = tl.cast(x_ptr, tl.pointer_type(pointer_type))
-    mean_ptr = tl.cast(mean_ptr, tl.pointer_type(pointer_type))
-    inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(pointer_type))
+    mean_ptr = tl.cast(mean_ptr, tl.pointer_type(tl.float32))
+    inv_var_ptr = tl.cast(inv_var_ptr, tl.pointer_type(tl.float32))
     dX_ptr = tl.cast(dX_ptr, tl.pointer_type(pointer_type))
     dY_ptr = tl.cast(dY_ptr, tl.pointer_type(pointer_type))
     if gamma_ptr is not None:
@@ -198,47 +175,44 @@ def layernorm_kernel_backward(
     if dB_ptr is not None:
         dB_ptr = tl.cast(dB_ptr, tl.pointer_type(tl.float32))   
     
-    ### Indexes for this row we are processing ###
+    ### Rows (R,) and columns (E,) this program handles ###
+    rows = block_idx * ROWS_PER_BLOCK + tl.arange(0, ROWS_PER_BLOCK)
+    row_mask = rows < n_rows
     cols = tl.arange(0, BLOCK_SIZE)
-    mask = cols < n_cols
+    col_mask = cols < n_cols
+    mask = row_mask[:, None] & col_mask[None, :]
 
-    ### Load Weights ###
+    ### Load all the data (R, E) in float32 ###
+    x = tl.load(x_ptr + rows[:, None] * stride_x + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+    dy = tl.load(dY_ptr + rows[:, None] * stride_dy + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+    row_mean = tl.load(mean_ptr + rows, mask=row_mask, other=0.0)[:, None]
+    row_inv_std = tl.load(inv_var_ptr + rows, mask=row_mask, other=0.0)[:, None]
+
     if gamma_ptr is not None:
-        gamma = tl.load(gamma_ptr + cols, mask=mask, other=0.).to(tl.float32)
+        gamma = tl.load(gamma_ptr + cols, mask=col_mask, other=0.).to(tl.float32)[None, :]
     else:
         gamma = 1.0
 
-    ### Get all other pointers for this row ###
-    row_x_ptr = x_ptr + row_idx * stride_x
-    row_dX_ptr = dX_ptr + row_idx * stride_dx
-    row_dY_ptr = dY_ptr + row_idx * stride_dy
-    row_mean_ptr = mean_ptr + row_idx
-    row_inv_var_ptr = inv_var_ptr + row_idx
-
-    ### Load all the data ###
-    x_row = tl.load(row_x_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-    dy_row = tl.load(row_dY_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-    row_mean = tl.load(row_mean_ptr).to(tl.float32)
-    row_inv_std = tl.load(row_inv_var_ptr).to(tl.float32)
-
     ### Compute backward pass ###
-    x_hat = (x_row - row_mean) * row_inv_std
-    wdy = gamma * dy_row # <- upstream grad (dL/dy)(dy/dx_hat)
-    mean1 = tl.sum(x_hat*wdy, axis=0) / n_cols
-    mean2 = tl.sum(wdy, axis=0) / n_cols
+    x_hat = (x - row_mean) * row_inv_std
+    wdy = gamma * dy # <- upstream grad (dL/dy)(dy/dx_hat)
+    mean1 = tl.sum(x_hat * wdy, axis=1)[:, None] / n_cols
+    mean2 = tl.sum(wdy, axis=1)[:, None] / n_cols
     dx = row_inv_std * (wdy - (x_hat * mean1 + mean2))
 
     ### Store dx ###
-    tl.store(row_dX_ptr + cols, dx.to(pointer_type), mask=mask)
+    tl.store(dX_ptr + rows[:, None] * stride_dx + cols[None, :], dx, mask=mask)
 
-    ### Accumulate grads for Weights and Biases ###
+    ### Partial sums of the weight/bias grads for this block of rows (kept in float32) ###
     if dGamma_ptr is not None:
-        dW = dy_row * x_hat
-        tl.atomic_add(dGamma_ptr + cols, dW, mask=mask)  # Keep in FP32!
-
+        tl.store(dGamma_ptr + block_idx * n_cols + cols, tl.sum(dy * x_hat, axis=0), mask=col_mask)
     if dB_ptr is not None:
-        db = dy_row
-        tl.atomic_add(dB_ptr + cols, db, mask=mask)
+        tl.store(dB_ptr + block_idx * n_cols + cols, tl.sum(dy, axis=0), mask=col_mask)
+
+
+def _rows_per_block(block_size):
+    ### ~8192 elements per program was the fastest in our sweeps (8 rows for a 768 dim model) ###
+    return max(1, 8192 // block_size)
 
 
 def fused_layernorm_forward(x, gamma=None, beta=None, eps=1e-5, training=True, use_dlpack=True):
@@ -250,12 +224,14 @@ def fused_layernorm_forward(x, gamma=None, beta=None, eps=1e-5, training=True, u
 
     Returns:
         y: Ouptut (N, E)
-        x_hat: Normed x before shift/scale (N,E)
-        inv_var: Inverse variance per sample in batch (N,)
+        mean: per row mean (N,) float32
+        inv_var: per row 1/std (N,) float32
     """
     
     n_rows, n_cols = x.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
+    dtype_flag = get_dtype_flag(x.dtype)  # 0=float32, 1=float16, 2=bfloat16
+    grid = (n_rows,)
 
     if not DLPACK_DISABLE and use_dlpack:
 
@@ -265,74 +241,37 @@ def fused_layernorm_forward(x, gamma=None, beta=None, eps=1e-5, training=True, u
         if beta is not None:
             beta = torch.utils.dlpack.from_dlpack(beta)
 
-        # Allocate outputs
+        # Allocate outputs (saved statistics are always float32)
         y = torch.empty_like(x)
-        inv_var = torch.empty(n_rows, dtype=x.dtype, device=x.device) if training else None
-        mean = torch.empty(n_rows, dtype=x.dtype, device=x.device) if training else None
-        
-        # Compute strides in elements for each array
-        x_row_stride = x.stride(0)
-        y_row_stride = y.stride(0)
-        
-        # Map dtype to Triton flag
-        dtype_flag = 0 if x.dtype == torch.float32 else 1  # 0=float32, 1=float16
-        
-        ### Set Grid ###
-        grid = (n_rows,)
-
+        inv_var = torch.empty(n_rows, dtype=torch.float32, device=x.device) if training else None
+        mean = torch.empty(n_rows, dtype=torch.float32, device=x.device) if training else None
 
         layernorm_kernel_forward_training[grid](
-            y,                   # output_ptr
-            inv_var,             # inv_var_ptr
-            mean,                # mean_ptr
-            x,                   # input_ptr
-            gamma,               # gamma_ptr
-            beta,                # beta_ptr
-            x_row_stride,        # input_row_stride
-            y_row_stride,        # output_row_stride
-            dtype_flag,          # dtype_flag (constexpr)
-            eps,                 # eps (constexpr)
-            n_cols,              # n_cols (constexpr)
-            BLOCK_SIZE,          # BLOCK_SIZE (constexpr),
+            y, inv_var, mean, x, gamma, beta,
+            x.stride(0), y.stride(0),
+            dtype_flag, eps, n_cols, BLOCK_SIZE,
         )
          
-        # Convert back to CuPy if needed
         y = cp.from_dlpack(y)
         if training:
-            mean = cp.from_dlpack(mean)
-            inv_var = cp.from_dlpack(inv_var)
-            return y, mean, inv_var
+            return y, cp.from_dlpack(mean), cp.from_dlpack(inv_var)
         return y
         
     else:
-        # Allocate outputs
+        # Allocate outputs (saved statistics are always float32)
         y = cp.empty_like(x)
-        mean = cp.empty((n_rows,), dtype=x.dtype) if training else None
-        inv_var = cp.empty((n_rows,), dtype=x.dtype) if training else None
-
-        # Compute strides in elements for each array
-        x_row_stride = x.strides[0] // x.itemsize
-        y_row_stride = y.strides[0] // y.itemsize
-
-        # Map dtype to Triton flag
-        dtype_flag = 0 if x.dtype == cp.float32 else 1  # 0=float32, 1=float16
-
-        ### Set Grid ###
-        grid = (n_rows,)
+        mean = cp.empty((n_rows,), dtype=cp.float32) if training else None
+        inv_var = cp.empty((n_rows,), dtype=cp.float32) if training else None
 
         layernorm_kernel_forward_training[grid](
-            y.data.ptr,                                           # output_ptr
-            inv_var.data.ptr if inv_var is not None else None,    # inv_var_ptr
-            mean.data.ptr if mean is not None else None,
-            x.data.ptr,                                           # input_ptr
-            gamma.data.ptr if gamma is not None else None,        # gamma_ptr
-            beta.data.ptr if beta is not None else None,          # beta_ptr
-            x_row_stride,                                         # input_row_stride
-            y_row_stride,                                         # output_row_stride
-            dtype_flag,                                           # dtype_flag (constexpr)
-            eps,                                                  # eps (constexpr)
-            n_cols,                                               # n_cols (constexpr)
-            BLOCK_SIZE,                                           # BLOCK_SIZE (constexpr)
+            TritonPtr(y),
+            TritonPtr(inv_var) if inv_var is not None else None,
+            TritonPtr(mean) if mean is not None else None,
+            TritonPtr(x),
+            TritonPtr(gamma) if gamma is not None else None,
+            TritonPtr(beta) if beta is not None else None,
+            x.strides[0] // x.itemsize, y.strides[0] // y.itemsize,
+            dtype_flag, eps, n_cols, BLOCK_SIZE,
         )
 
         if training:
@@ -342,6 +281,13 @@ def fused_layernorm_forward(x, gamma=None, beta=None, eps=1e-5, training=True, u
 def fused_layernorm_backward(x, mean, inv_var, dy, gamma=None, beta=None, use_dlpack=True):
     n_rows, n_cols = dy.shape
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
+    ROWS_PER_BLOCK = _rows_per_block(BLOCK_SIZE)
+    n_blocks = triton.cdiv(n_rows, ROWS_PER_BLOCK)
+    dtype_flag = get_dtype_flag(dy.dtype)
+    grid = (n_blocks,)
+
+    gamma_dtype = gamma.dtype if gamma is not None else None
+    beta_dtype = beta.dtype if beta is not None else None
 
     if not DLPACK_DISABLE and use_dlpack:
         x = torch.utils.dlpack.from_dlpack(x)
@@ -349,59 +295,38 @@ def fused_layernorm_backward(x, mean, inv_var, dy, gamma=None, beta=None, use_dl
         mean = torch.utils.dlpack.from_dlpack(mean)
         inv_var = torch.utils.dlpack.from_dlpack(inv_var)
         gamma = torch.utils.dlpack.from_dlpack(gamma) if gamma is not None else None
-        beta = torch.utils.dlpack.from_dlpack(beta) if beta is not None else None
 
-        grad_dtype = torch.float32        
         dx = torch.empty_like(dy)
-        dgamma = torch.zeros(n_cols, dtype=grad_dtype, device=dy.device) if gamma is not None else None
-        dbeta = torch.zeros(n_cols, dtype=grad_dtype, device=dy.device) if beta is not None else None
+        dgamma_blocks = torch.empty((n_blocks, n_cols), dtype=torch.float32, device=dy.device) if gamma is not None else None
+        dbeta_blocks = torch.empty((n_blocks, n_cols), dtype=torch.float32, device=dy.device) if beta is not None else None
 
-        stride_x = x.stride(0)
-        stride_dx = dx.stride(0)
-        stride_dy = dy.stride(0)
-        dtype_flag = 0 if dy.dtype == torch.float32 else 1
-
-        grid = (n_rows,)
         layernorm_kernel_backward[grid](
-            x, gamma, mean, inv_var, dx, dgamma, dbeta, dy,
-            stride_x, stride_dx, stride_dy, n_cols, BLOCK_SIZE, dtype_flag,
+            x, gamma, mean, inv_var, dx, dgamma_blocks, dbeta_blocks, dy,
+            x.stride(0), dx.stride(0), dy.stride(0), n_rows, n_cols, BLOCK_SIZE, ROWS_PER_BLOCK, dtype_flag,
         )
 
         dx = cp.from_dlpack(dx)
-        
-        # Convert back to original dtype
-        if gamma is not None:
-            dgamma = cp.from_dlpack(dgamma.to(gamma.dtype))
-        if beta is not None:
-            dbeta = cp.from_dlpack(dbeta.to(beta.dtype))
+        dgamma = cp.from_dlpack(dgamma_blocks.sum(0)).astype(gamma_dtype, copy=False) if gamma is not None else None
+        dbeta = cp.from_dlpack(dbeta_blocks.sum(0)).astype(beta_dtype, copy=False) if beta is not None else None
 
     else:
-
         dx = cp.empty_like(dy)
-        dgamma = cp.zeros((n_cols,), dtype=grad_dtype) if gamma is not None else None
-        dbeta = cp.zeros((n_cols,), dtype=grad_dtype) if beta is not None else None
-
-        stride_x = x.strides[0] // x.itemsize
-        stride_dx = dx.strides[0] // dx.itemsize
-        stride_dy = dy.strides[0] // dy.itemsize
-        dtype_flag = 0 if dy.dtype == cp.float32 else 1
-        grid = (n_rows,)
+        dgamma_blocks = cp.empty((n_blocks, n_cols), dtype=cp.float32) if gamma is not None else None
+        dbeta_blocks = cp.empty((n_blocks, n_cols), dtype=cp.float32) if beta is not None else None
 
         layernorm_kernel_backward[grid](
-            x.data.ptr,
-            gamma.data.ptr if gamma is not None else None,
-            mean.data.ptr, inv_var.data.ptr, dx.data.ptr,
-            dgamma.data.ptr if gamma is not None else None,
-            dbeta.data.ptr if beta is not None else None,
-            dy.data.ptr,
-            stride_x, stride_dx, stride_dy, n_cols, BLOCK_SIZE, dtype_flag,
+            TritonPtr(x),
+            TritonPtr(gamma) if gamma is not None else None,
+            TritonPtr(mean), TritonPtr(inv_var), TritonPtr(dx),
+            TritonPtr(dgamma_blocks) if gamma is not None else None,
+            TritonPtr(dbeta_blocks) if beta is not None else None,
+            TritonPtr(dy),
+            x.strides[0] // x.itemsize, dx.strides[0] // dx.itemsize, dy.strides[0] // dy.itemsize,
+            n_rows, n_cols, BLOCK_SIZE, ROWS_PER_BLOCK, dtype_flag,
         )
-        
-        # Convert back to original dtype
-        if gamma is not None:
-            dgamma = dgamma.astype(gamma.dtype)
-        if beta is not None:
-            dbeta = dbeta.astype(beta.dtype)
+
+        dgamma = dgamma_blocks.sum(0).astype(gamma_dtype, copy=False) if gamma is not None else None
+        dbeta = dbeta_blocks.sum(0).astype(beta_dtype, copy=False) if beta is not None else None
 
     return dx, dgamma, dbeta
 

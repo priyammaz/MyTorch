@@ -10,6 +10,9 @@ import triton
 import triton.language as tl
 from .activations import silu_forward_kernel, silu_backward_kernel
 from .utils import calc_num_warps
+from .utils import TritonPtr
+from .utils import get_dtype_flag
+from .flags import DLPACK_DISABLE
 
 @triton.jit
 def silu(x):
@@ -21,26 +24,29 @@ def swiglu_forward_kernel(
     a_ptr, 
     b_ptr, 
     out_ptr, 
-    stride, 
+    stride_a,
+    stride_b,
+    stride_out,
     n_cols: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
     DTYPE_FLAG: tl.constexpr
 ):
     program_id = tl.program_id(0).to(tl.int64)
     
-    a_ptr = tl.cast(a_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    b_ptr = tl.cast(b_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    out_ptr = tl.cast(out_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    a_ptr = tl.cast(a_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    b_ptr = tl.cast(b_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    out_ptr = tl.cast(out_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
 
-    # Locate start index
-    a_ptr += program_id * stride
-    b_ptr += program_id * stride
-    out_ptr += program_id * stride
+    # Locate start index, a and b have their own row strides so the two halves of a chunked
+    # projection (rows of 2 * n_cols) can be read in place
+    a_ptr += program_id * stride_a
+    b_ptr += program_id * stride_b
+    out_ptr += program_id * stride_out
 
     col_offsets = tl.arange(0, BLOCK_SIZE)
     mask = col_offsets < n_cols
     
-    # Load data - sigmoid requires float32
+    # Load data, sigmoid requires float32
     a_row = tl.load(a_ptr + col_offsets, mask=mask, other=0).to(tl.float32)
     b_row = tl.load(b_ptr + col_offsets, mask=mask, other=0)
     
@@ -54,21 +60,23 @@ def swiglu_backward_kernel(
     dout_ptr, 
     a_ptr,
     b_ptr, 
-    stride, 
+    stride_dout,
+    stride_a,
+    stride_b,
     n_cols: tl.constexpr, 
     BLOCK_SIZE: tl.constexpr,
     DTYPE_FLAG: tl.constexpr,
 ):
     program_id = tl.program_id(0).to(tl.int64)
     
-    a_ptr = tl.cast(a_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    b_ptr = tl.cast(b_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    dout_ptr = tl.cast(dout_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    a_ptr = tl.cast(a_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    b_ptr = tl.cast(b_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    dout_ptr = tl.cast(dout_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
 
     # Locate start index
-    dout_ptr += program_id * stride
-    a_ptr += program_id * stride
-    b_ptr += program_id * stride
+    dout_ptr += program_id * stride_dout
+    a_ptr += program_id * stride_a
+    b_ptr += program_id * stride_b
     
     col_offsets = tl.arange(0, BLOCK_SIZE)
     mask = col_offsets < n_cols
@@ -90,73 +98,137 @@ def swiglu_backward_kernel(
     tl.store(a_ptr + col_offsets, da_row, mask=mask)
     tl.store(b_ptr + col_offsets, db_row, mask=mask)
 
-def fused_swiglu_forward(a, b):
+def _rows(x, n_cols):
+    """
+    (..., n_cols) -> (n_rows, n_cols) WITHOUT copying when possible. The kernels only need each row to be
+    unit strided along the last dim (row stride can be anything), which holds for the chunked halves of a
+    contiguous projection. Anything else gets one contiguous copy.
+    """
+    if hasattr(x, "is_contiguous"):  # torch
+        if x.dim() == 0 or x.stride(-1) != 1:
+            x = x.contiguous()
+        rows = x.reshape(-1, n_cols)
+        return rows if rows.stride(-1) == 1 else rows.contiguous()
+    if x.strides[-1] != x.itemsize:
+        x = cp.ascontiguousarray(x)
+    rows = x.reshape(-1, n_cols)
+    return rows if rows.strides[-1] == rows.itemsize else cp.ascontiguousarray(rows)
+
+def fused_swiglu_forward(a, b, use_dlpack=True):
 
     ori_shape = a.shape
     n_cols = ori_shape[-1]
     
-    a = a.reshape(-1, n_cols)
-    b = b.reshape(-1, n_cols)
-
-    n_rows = a.shape[0]
-    
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
     num_warps = calc_num_warps(BLOCK_SIZE)
 
-    a = torch.utils.dlpack.from_dlpack(a)
-    b = torch.utils.dlpack.from_dlpack(b)
+    if not DLPACK_DISABLE and use_dlpack:
 
-    if not a.is_contiguous():
-        a = a.contiguous()
-    if not b.is_contiguous():
-        b = b.contiguous()
+        a = _rows(torch.utils.dlpack.from_dlpack(a), n_cols)
+        b = _rows(torch.utils.dlpack.from_dlpack(b), n_cols)
+        n_rows = a.shape[0]
 
-    c = torch.empty_like(a)
+        c = torch.empty((n_rows, n_cols), dtype=a.dtype, device=a.device)
 
-    swiglu_forward_kernel[(n_rows,)](
-        a,
-        b,
-        c,
-        c.stride(-2),
-        n_cols=n_cols,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=num_warps,
-        DTYPE_FLAG=0 if a.dtype == torch.float32 else 1
-    )
-    
-    # Return a and b as well so we don't have to reshape again in backward
-    return cp.from_dlpack(a), cp.from_dlpack(b), cp.from_dlpack(c.view(*ori_shape))
+        swiglu_forward_kernel[(n_rows,)](
+            a,
+            b,
+            c,
+            a.stride(0),
+            b.stride(0),
+            c.stride(0),
+            n_cols=n_cols,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
+            DTYPE_FLAG=get_dtype_flag(a.dtype)
+        )
+        
+        # Return a and b as well (views of the inputs when no copy was needed) for the backward
+        return cp.from_dlpack(a), cp.from_dlpack(b), cp.from_dlpack(c.view(*ori_shape))
 
-def fused_swiglu_backward(output_grad, a, b):
+    else:
+
+        a = _rows(a, n_cols)
+        b = _rows(b, n_cols)
+        n_rows = a.shape[0]
+
+        with cp.cuda.Device(a.device.id):
+            c = cp.empty((n_rows, n_cols), dtype=a.dtype)
+
+            swiglu_forward_kernel[(n_rows,)](
+                TritonPtr(a),
+                TritonPtr(b),
+                TritonPtr(c),
+                a.strides[0] // a.itemsize,
+                b.strides[0] // b.itemsize,
+                c.strides[0] // c.itemsize,
+                n_cols=n_cols,
+                BLOCK_SIZE=BLOCK_SIZE,
+                num_warps=num_warps,
+                DTYPE_FLAG=get_dtype_flag(a.dtype)
+            )
+
+        # Return a and b as well (views of the inputs when no copy was needed) for the backward
+        return a, b, c.reshape(ori_shape)
+
+def fused_swiglu_backward(output_grad, a, b, use_dlpack=True):
+    """
+    a, b are the arrays returned by fused_swiglu_forward (any (..., n_cols) shape works). They are overwritten in
+    place with the gradients (they may be views of the original inputs, which the forward never needs again)
+    """
 
     ori_shape = output_grad.shape
     n_cols = ori_shape[-1]
     
-    dc = output_grad.reshape(-1, n_cols)
-    
-    n_rows = dc.shape[0]
-    
     BLOCK_SIZE = triton.next_power_of_2(n_cols)
     num_warps = calc_num_warps(BLOCK_SIZE)
-    
-    a = torch.utils.dlpack.from_dlpack(a)
-    b = torch.utils.dlpack.from_dlpack(b)
-    dc = torch.utils.dlpack.from_dlpack(dc)
 
-    swiglu_backward_kernel[(n_rows,)](
-        dc,
-        a,
-        b,
-        dc.stride(-2),
-        n_cols=n_cols,
-        BLOCK_SIZE=BLOCK_SIZE,
-        num_warps=num_warps,
-        DTYPE_FLAG=0 if a.dtype == torch.float32 else 1
-    )
+    if not DLPACK_DISABLE and use_dlpack:
     
-    # a and b now contain gradients
-    return cp.from_dlpack(a.view(*ori_shape)), cp.from_dlpack(b.view(*ori_shape))
+        a = _rows(torch.utils.dlpack.from_dlpack(a), n_cols)
+        b = _rows(torch.utils.dlpack.from_dlpack(b), n_cols)
+        dc = _rows(torch.utils.dlpack.from_dlpack(output_grad), n_cols)
+        n_rows = dc.shape[0]
 
+        swiglu_backward_kernel[(n_rows,)](
+            dc,
+            a,
+            b,
+            dc.stride(0),
+            a.stride(0),
+            b.stride(0),
+            n_cols=n_cols,
+            BLOCK_SIZE=BLOCK_SIZE,
+            num_warps=num_warps,
+            DTYPE_FLAG=get_dtype_flag(a.dtype)
+        )
+        
+        # a and b now contain gradients
+        return cp.from_dlpack(a).reshape(ori_shape), cp.from_dlpack(b).reshape(ori_shape)
+
+    else:
+
+        a = _rows(a, n_cols)
+        b = _rows(b, n_cols)
+        dc = _rows(output_grad, n_cols)
+        n_rows = dc.shape[0]
+
+        with cp.cuda.Device(a.device.id):
+            swiglu_backward_kernel[(n_rows,)](
+                TritonPtr(dc),
+                TritonPtr(a),
+                TritonPtr(b),
+                dc.strides[0] // dc.itemsize,
+                a.strides[0] // a.itemsize,
+                b.strides[0] // b.itemsize,
+                n_cols=n_cols,
+                BLOCK_SIZE=BLOCK_SIZE,
+                num_warps=num_warps,
+                DTYPE_FLAG=get_dtype_flag(a.dtype)
+            )
+
+        # a and b now contain gradients
+        return a.reshape(ori_shape), b.reshape(ori_shape)
 
 if __name__ == "__main__":
     import torch

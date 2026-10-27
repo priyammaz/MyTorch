@@ -82,18 +82,10 @@ def scaled_dot_product_attention(Q, K, V,
                 attn_mask=attn_mask, softmax_scale=softmax_scale
             )
 
-
-
-        dQ, dK, dV = fused_sdpa_backward(grad_output, 
-                                         Q_data, K_data, V_data, 
-                                         attn_out, M, 
-                                         causal=is_causal,
-                                         softmax_scale=softmax_scale)
-
-        ### Cast grads back to original dtype ###
-        dQ = dQ.astype(Q.dtype)
-        dK = dK.astype(K.dtype)
-        dV = dV.astype(V.dtype)
+        ### Cast grads back to original dtype (no copy when they already match) ###
+        dQ = dQ.astype(Q.dtype, copy=False)
+        dK = dK.astype(K.dtype, copy=False)
+        dV = dV.astype(V.dtype, copy=False)
 
         if Q.grad is None:
             Q.grad = dQ

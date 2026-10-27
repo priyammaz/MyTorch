@@ -6,6 +6,8 @@ import cupy as cp
 import torch
 import triton
 import triton.language as tl
+from .utils import get_dtype_flag, to_torch_dtype
+from .utils import TritonPtr
 
 def element_wise_kernel_configs():
     return [
@@ -23,12 +25,8 @@ def element_wise_kernel_configs():
 ###################################
 
 _avail_activations = (
-    "sigmoid", "tanh", "gelu", "relu", "silu",
+    "sigmoid", "tanh", "gelu", "gelu_tanh", "relu", "silu",
     "leaky_relu", "relu_squared"
-)
-
-_to_cast = (
-    "sigmoid", "tanh", "gelu", "silu",
 )
 
 @triton.jit
@@ -51,11 +49,24 @@ def tanh_backward_kernel(input):
 
 @triton.jit
 def gelu_forward_kernel(input):
+    ### Exact GELU (same as torch.nn.functional.gelu(approximate="none")): x * Phi(x) ###
+    return 0.5 * input * (1 + tl.math.erf(input * 0.7071067811865476))
+
+@triton.jit
+def gelu_backward_kernel(input):
+    ### d/dx x * Phi(x) = Phi(x) + x * phi(x) ###
+    cdf = 0.5 * (1 + tl.math.erf(input * 0.7071067811865476))
+    pdf = tl.exp(-0.5 * input * input) * 0.3989422804014327
+    return cdf + input * pdf
+
+@triton.jit
+def gelu_tanh_forward_kernel(input):
+    ### tanh approximation (same as torch.nn.functional.gelu(approximate="tanh")) ###
     cdf = 0.5 * (1 + tanh_forward_kernel(0.7978845608 * input * (1 + 0.044715 * input * input)))
     return cdf * input
 
 @triton.jit
-def gelu_backward_kernel(input):
+def gelu_tanh_backward_kernel(input):
     tanh_res = tanh_forward_kernel(0.7978845608 * input * (1 + 0.044715 * input * input))
     sech_sq = 1 - tanh_res * tanh_res
     return 0.5 * (1 + tanh_res + input * sech_sq * 0.7978845608 * (1 + 3 * 0.044715 * input * input))
@@ -112,6 +123,9 @@ def activation_switcher_forward(name, input):
     if name == "gelu":
         input = input.to(tl.float32)
         output = gelu_forward_kernel(input)
+    if name == "gelu_tanh":
+        input = input.to(tl.float32)
+        output = gelu_tanh_forward_kernel(input)
     if name == "silu":
         input = input.to(tl.float32)
         output = silu_forward_kernel(input)
@@ -127,13 +141,22 @@ def activation_switcher_forward(name, input):
 @triton.jit
 def activation_switcher_backward(name, out_grad, input):
 
+    ### Activations with exp/erf/tanh need the extra precision, so we upcast each element to float32 ###
+    ### inside the kernel (no full size float32 copies of the tensors) and store back in the original dtype ###
     if name == "sigmoid":
+        input, out_grad = input.to(tl.float32), out_grad.to(tl.float32)
         output = sigmoid_backward_kernel(input)
     if name == "tanh":
+        input, out_grad = input.to(tl.float32), out_grad.to(tl.float32)
         output = tanh_backward_kernel(input)
     if name == "gelu":
+        input, out_grad = input.to(tl.float32), out_grad.to(tl.float32)
         output = gelu_backward_kernel(input)
+    if name == "gelu_tanh":
+        input, out_grad = input.to(tl.float32), out_grad.to(tl.float32)
+        output = gelu_tanh_backward_kernel(input)
     if name == "silu":
+        input, out_grad = input.to(tl.float32), out_grad.to(tl.float32)
         output = silu_backward_kernel(input)
     if name == "relu":
         output = relu_backward_kernel(input)
@@ -164,8 +187,8 @@ def generic_activation_kernel_forward(
 ):
     
     pid = tl.program_id(0)
-    input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32 if OUTPUT_DTYPE_FLAG == 0 else tl.float16))
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
+    output_ptr = tl.cast(output_ptr, tl.pointer_type(tl.float32 if OUTPUT_DTYPE_FLAG == 0 else (tl.float16 if OUTPUT_DTYPE_FLAG == 1 else tl.bfloat16)))
     
     offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offset < n_elements
@@ -188,14 +211,16 @@ def generic_activation_kernel_backward(
     n_elements, 
     BLOCK_SIZE: tl.constexpr,
     DTYPE_FLAG: tl.constexpr,
-    INPUT_GRAD_DTYPE_FLAG: tl.constexpr
+    INPUT_GRAD_DTYPE_FLAG: tl.constexpr,
+    INPUT_DTYPE_FLAG: tl.constexpr,
 ):
     
     pid = tl.program_id(axis=0)
 
-    input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
-    input_grad_ptr = tl.cast(input_grad_ptr, tl.pointer_type(tl.float32 if INPUT_GRAD_DTYPE_FLAG == 0 else tl.float16))
-    output_grad_ptr = tl.cast(output_grad_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else tl.float16))
+    ### DTYPE_FLAG is the upstream grad's dtype, the saved input can differ (e.g. fp16 input, fp32 grads) ###
+    input_ptr = tl.cast(input_ptr, tl.pointer_type(tl.float32 if INPUT_DTYPE_FLAG == 0 else (tl.float16 if INPUT_DTYPE_FLAG == 1 else tl.bfloat16)))
+    input_grad_ptr = tl.cast(input_grad_ptr, tl.pointer_type(tl.float32 if INPUT_GRAD_DTYPE_FLAG == 0 else (tl.float16 if INPUT_GRAD_DTYPE_FLAG == 1 else tl.bfloat16)))
+    output_grad_ptr = tl.cast(output_grad_ptr, tl.pointer_type(tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)))
 
     offset = pid * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
     mask = offset < n_elements
@@ -225,15 +250,11 @@ def fused_activation_forward(input, act_func, use_dlpack=True):
         ### Convert to Torch ###
         input = torch.utils.dlpack.from_dlpack(input)
 
-        ### Some activations need float32 inputs always! ###
-        if act_func in _to_cast:
-            input = input.to(torch.float32)
-        
         ### Make Sure Contiguous ###
         if not input.is_contiguous():
             input = input.contiguous()
 
-        output = torch.empty_like(input, dtype=torch.float32 if orig_dtype == cp.float32 else torch.float16)
+        output = torch.empty_like(input, dtype=to_torch_dtype(orig_dtype))
 
         grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
         generic_activation_kernel_forward[grid](
@@ -241,18 +262,14 @@ def fused_activation_forward(input, act_func, use_dlpack=True):
             input_ptr=input, 
             output_ptr=output, 
             n_elements=n_elements,
-            DTYPE_FLAG=0 if input.dtype == torch.float32 else 1,
-            OUTPUT_DTYPE_FLAG=0 if orig_dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(input.dtype),
+            OUTPUT_DTYPE_FLAG=get_dtype_flag(orig_dtype)
         )
 
         return cp.from_dlpack(output.reshape(orig_shape))
 
     else:
 
-        ### Some activations need float32 inputs always! ###
-        if act_func in _to_cast:
-            input = input.astype(cp.float32, copy=False)
-        
         ### Make Sure Contiguous ###
         if not input.flags.c_contiguous:
             input = cp.ascontiguousarray(input)
@@ -262,11 +279,11 @@ def fused_activation_forward(input, act_func, use_dlpack=True):
         grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
         generic_activation_kernel_forward[grid](
             name=act_func,
-            input_ptr=input.data.ptr, 
-            output_ptr=output.data.ptr, 
+            input_ptr=TritonPtr(input), 
+            output_ptr=TritonPtr(output), 
             n_elements=n_elements,
-            DTYPE_FLAG=0 if input.dtype == cp.float32 else 1,
-            OUTPUT_DTYPE_FLAG=0 if orig_dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(input.dtype),
+            OUTPUT_DTYPE_FLAG=get_dtype_flag(orig_dtype)
         )
 
         return output.reshape(orig_shape)
@@ -288,18 +305,13 @@ def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
         input = torch.utils.dlpack.from_dlpack(input)
         output_grad = torch.utils.dlpack.from_dlpack(output_grad)
 
-        ### Some activations need float32 inputs always! ###
-        if act_func in _to_cast:
-            input = input.to(torch.float32)
-            output_grad = output_grad.to(torch.float32)
-        
         ### Make Sure Contiguous ###
         if not input.is_contiguous():
             input = input.contiguous()
         if not output_grad.is_contiguous():
             output_grad = output_grad.contiguous()
 
-        input_grad = torch.empty_like(input, dtype=torch.float32 if orig_dtype == cp.float32 else torch.float16)
+        input_grad = torch.empty_like(input, dtype=to_torch_dtype(orig_dtype))
 
         grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
         generic_activation_kernel_backward[grid](
@@ -308,19 +320,15 @@ def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
             input_grad_ptr=input_grad,
             output_grad_ptr=output_grad, 
             n_elements=n_elements,
-            DTYPE_FLAG= 0 if output_grad.dtype == torch.float32 else 1,
-            INPUT_GRAD_DTYPE_FLAG = 0 if input_grad.dtype == torch.float32 else 1
+            DTYPE_FLAG= get_dtype_flag(output_grad.dtype),
+            INPUT_GRAD_DTYPE_FLAG = get_dtype_flag(input_grad.dtype),
+            INPUT_DTYPE_FLAG = get_dtype_flag(input.dtype),
         )
   
         return cp.from_dlpack(input_grad.reshape(orig_shape))
 
     else:
 
-        ### Some activations need float32 inputs always! ###
-        if act_func in _to_cast:
-            input = input.astype(cp.float32, copy=False)
-            output_grad = output_grad.astype(cp.float32, copy=False)
-        
         ### Make Sure Contiguous ###
         if not input.flags.c_contiguous:
             input = cp.ascontiguousarray(input)
@@ -332,12 +340,13 @@ def fused_activation_backward(input, output_grad, act_func, use_dlpack=True):
         grid = lambda meta: (triton.cdiv(n_elements, meta["BLOCK_SIZE"]),)
         generic_activation_kernel_backward[grid](
             name=act_func,
-            input_ptr=input.data.ptr, 
-            input_grad_ptr=input_grad.data.ptr,
-            output_grad_ptr=output_grad.data.ptr, 
+            input_ptr=TritonPtr(input), 
+            input_grad_ptr=TritonPtr(input_grad),
+            output_grad_ptr=TritonPtr(output_grad), 
             n_elements=n_elements,
-            DTYPE_FLAG= 0 if output_grad.dtype == cp.float32 else 1,
-            INPUT_GRAD_DTYPE_FLAG = 0 if input_grad.dtype == cp.float32 else 1
+            DTYPE_FLAG= get_dtype_flag(output_grad.dtype),
+            INPUT_GRAD_DTYPE_FLAG = get_dtype_flag(input_grad.dtype),
+            INPUT_DTYPE_FLAG = get_dtype_flag(input.dtype),
         )
 
         return input_grad.reshape(orig_shape)

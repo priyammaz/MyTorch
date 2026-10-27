@@ -18,6 +18,8 @@ import cupy as cp
 import triton
 import triton.language as tl
 from .flags import DLPACK_DISABLE, AUTOTUNE_MODE
+from .utils import get_dtype_flag
+from .utils import TritonPtr
 
 ####################################################
 ### PSEUDOCODE TO UNDERSTAND INDEXING FOR MATMUL ###
@@ -742,14 +744,14 @@ def grouped_matmul_kernel(
     BLOCK_SIZE_N: tl.constexpr, 
     BLOCK_SIZE_K: tl.constexpr,
     GROUP_SIZE_M: tl.constexpr,
-    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16
+    DTYPE_FLAG: tl.constexpr # 0 for float32, 1 for float16, 2 for bfloat16
 ):
     
     ### Grouping logic as described above! ###
     pid = tl.program_id(axis=0)
 
     ### Cast our Pointers to the Correct DTYPE ###
-    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else tl.float16
+    pointer_dtype = tl.float32 if DTYPE_FLAG == 0 else (tl.float16 if DTYPE_FLAG == 1 else tl.bfloat16)
     A_ptr = tl.cast(A_ptr, tl.pointer_type(pointer_dtype))
     B_ptr = tl.cast(B_ptr, tl.pointer_type(pointer_dtype))
     C_ptr = tl.cast(C_ptr, tl.pointer_type(pointer_dtype))
@@ -834,7 +836,7 @@ def torch_fused_grouped_matmul(a, b):
         a.stride(0), a.stride(1),
         b.stride(0), b.stride(1),
         c.stride(0), c.stride(1),
-        DTYPE_FLAG=0 if a.dtype == torch.float32 else 1
+        DTYPE_FLAG=get_dtype_flag(a.dtype)
     )
     return c
 
@@ -844,7 +846,7 @@ def fused_grouped_matmul(a, b, use_dlpack=True):
     M, K = a.shape
     K2, N = b.shape
     assert K == K2, "Inner dimensions must match"
-    assert (a.dtype == cp.float32) or (a.dtype == cp.float16), "Only support float32 or float16 ops"
+    get_dtype_flag(a.dtype)  # raises on unsupported dtypes
     assert a.dtype == b.dtype, f"a and b have different precision types {a.dtype} and {b.dtype}"
     
     if not DLPACK_DISABLE and use_dlpack:
@@ -864,7 +866,7 @@ def fused_grouped_matmul(a, b, use_dlpack=True):
             a.stride(0), a.stride(1),
             b.stride(0), b.stride(1),
             c.stride(0), c.stride(1),
-            DTYPE_FLAG=0 if a.dtype == torch.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(a.dtype)
         )
 
         return cp.from_dlpack(c)
@@ -881,9 +883,9 @@ def fused_grouped_matmul(a, b, use_dlpack=True):
         
         # Launch kernel
         grouped_matmul_kernel[grid](
-            a.data.ptr, 
-            b.data.ptr, 
-            c.data.ptr,
+            TritonPtr(a), 
+            TritonPtr(b), 
+            TritonPtr(c),
             M, N, K,
             a.strides[0]//a.itemsize, 
             a.strides[1]//a.itemsize,
@@ -891,7 +893,7 @@ def fused_grouped_matmul(a, b, use_dlpack=True):
             b.strides[1]//b.itemsize,
             c.strides[0]//c.itemsize, 
             c.strides[1]//c.itemsize,
-            DTYPE_FLAG=0 if a.dtype == cp.float32 else 1
+            DTYPE_FLAG=get_dtype_flag(a.dtype)
         )
         
         return c

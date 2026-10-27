@@ -3,6 +3,7 @@ import os
 import subprocess
 import sys
 import signal
+import time
 
 def main():
     parser = argparse.ArgumentParser(description="mytorch distributed launch")
@@ -16,6 +17,7 @@ def main():
     args, training_args = parser.parse_known_args()
     world_size = args.num_gpus
     procs = []
+    exit_code = 1
 
     try:
         for rank in range(world_size):
@@ -43,8 +45,22 @@ def main():
             procs.append(p)
 
         ### Wait for Processes ###
-        for p in procs:
-            p.wait()
+        while True:
+            codes = [p.poll() for p in procs]
+            failed = [(rank, code) for rank, code in enumerate(codes) if code not in (None, 0)]
+            if failed:
+                rank, code = failed[0]
+                print(f"Rank {rank} exited with code {code}, killing all ranks")
+                for p in procs:
+                    if p.poll() is None:
+                        os.killpg(os.getpgid(p.pid), signal.SIGTERM)
+                time.sleep(5)
+                exit_code = code
+                break
+            if all(code == 0 for code in codes):
+                exit_code = 0
+                break
+            time.sleep(1)
     
     except KeyboardInterrupt:
         print("Killing Process Groups")
@@ -54,8 +70,13 @@ def main():
     ### Sanity check incase any worker refuses to close ###
     finally:
         for p in procs:
-            if p.poll() is None: # none indicates still running
+            try:
+                ### kill the whole group, dataloader workers can outlive a crashed rank and hold GPU memory ###
                 os.killpg(os.getpgid(p.pid), signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+    return exit_code
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

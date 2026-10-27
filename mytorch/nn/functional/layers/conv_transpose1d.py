@@ -1,4 +1,5 @@
 from mytorch import Tensor
+from mytorch._array import add_at
 
 def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_padding=0):
     """
@@ -55,7 +56,7 @@ def conv_transpose1d(input, weight, bias=None, stride=1, padding=0, output_paddi
     ii_flat = xp.tile(i.reshape(-1), B)
 
     # Accumulate into output
-    xp.add.at(output_padded, (bb_flat, kk_flat, ii_flat), values_flat)
+    add_at(output_padded, (bb_flat, kk_flat, ii_flat), values_flat)
 
     # Crop to final output
     output_data = output_padded[:, :, P:P+L_out]
